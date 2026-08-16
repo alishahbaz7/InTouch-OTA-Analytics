@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Error Log — OTA Analytics{% endblock %}
+
+{% block content %}
+{% if notice %}<div class="notice notice-ok">{{ notice }}</div>{% endif %}
+
+<div class="page-toolbar">
+  <span class="hint">{{ entries | length }} recorded · also written to
+    <code>{{ log_path }}</code></span>
+  {% if entries %}
+  <form method="post" action="/errors/clear">
+    <button type="submit" class="ghost">Clear log</button>
+  </form>
+  {% endif %}
+</div>
+
+<section class="card">
+  <h2>Error log <span class="hint">most recent first</span></h2>
+  {% if entries %}
+  <table>
+    <thead><tr><th>When</th><th>Where</th><th>Page / job</th><th>Error</th>
+               <th>Message</th></tr></thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td class="dim">{{ e.occurred_at }}</td>
+        <td><span class="pill pill-{{ e.source }}">{{ e.source }}</span></td>
+        <td class="mono small">{{ e.path or '—' }}</td>
+        <td class="alert-text">{{ e.error_type }}</td>
+        <td style="white-space: normal">{{ e.message }}</td>
+      </tr>
+      {% if e.detail %}
+      <tr class="detail-row">
+        <td colspan="5">
+          <details>
+            <summary class="dim small">traceback</summary>
+            <pre class="small">{{ e.detail }}</pre>
+          </details>
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nothing has failed. This page stays empty until something does.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Fleet Overview — OTA Analytics{% endblock %}
+
+{% block content %}
+{# One model selection drives every panel below. Empty = the whole fleet. A <details> dropdown
+   keeps it to a single line of chrome instead of an always-open list box. #}
+<div class="page-toolbar">
+  <span class="hint">{{ kpis.devices_total | comma }} devices
+    {%- if selected_models %} in {{ selected_models | length }} of
+      {{ all_models | length }} models{% else %} · all models{% endif %}</span>
+
+  <details class="dropdown" id="model-picker">
+    <summary>
+      {%- if selected_models -%}
+        {{ selected_models[0] }}{% if selected_models | length > 1 %}
+          +{{ selected_models | length - 1 }}{% endif %}
+      {%- else -%}All models{%- endif -%}
+    </summary>
+    <form method="get" class="dropdown-panel">
+      <input type="hidden" name="window" value="{{ window }}">
+      <div class="dropdown-list">
+        {% for r in all_models %}
+        <label class="dropdown-item">
+          <input type="checkbox" name="model" value="{{ r.label }}"
+                 {{ 'checked' if r.label in selected_models }}>
+          <span>{{ r.label }}</span>
+          <em>{{ r.devices | comma }}</em>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="dropdown-actions">
+        <a href="/?window={{ window }}">Clear</a>
+        <button type="submit">Apply</button>
+      </div>
+    </form>
+  </details>
+</div>
+
+<section class="card">
+  <h2>Last seen by hour
+    <span class="hint">past 24h · {{ hourly_total | comma }} devices ·
+      peak {{ hourly_peak.devices | comma }} at {{ hourly_peak.hour }}
+      {%- if hourly and hourly[-1].partial %} · final bar is a part-hour{% endif %}</span>
+  </h2>
+  {{ m.hour_chart(hourly) }}
+</section>
+
+{% set total = kpis.devices_total or 1 %}
+{% macro pct(n) %}{{ '%.1f%% of fleet' % (n / total * 100) }}{% endmacro %}
+<div class="tiles">
+  {{ m.tile('Total devices', kpis.devices_total | comma,
+            '%s online now (%.1f%%)' % (kpis.devices_online | comma, kpis.online_pct * 100)) }}
+  {{ m.tile('Task completed', kpis.devices_completed | comma,
+            pct(kpis.devices_completed), 'tone-green') }}
+  {{ m.tile('Task pending — Online', kpis.pending_reachable | comma,
+            pct(kpis.pending_reachable), 'tone-yellow') }}
+  {{ m.tile('Task pending — Offline', kpis.pending_waiting | comma,
+            pct(kpis.pending_waiting), 'tone-orange') }}
+  {{ m.tile('No pending task', kpis.devices_never_tasked | comma,
+            pct(kpis.devices_never_tasked), 'tone-white') }}
+  {{ m.tile('Offline more than 1 month', kpis.stale_30d | comma,
+            pct(kpis.stale_30d), 'tone-grey') }}
+</div>
+
+<div class="glance-grid">
+  <section class="card">
+    <h2>Fleet at a glance</h2>
+    <div class="donuts donuts-stacked">
+      {{ m.donut('By model', by_model_donut) }}
+      {{ m.donut('Connectivity', status_donut, 'last 24h') }}
+      {{ m.donut('Update status', task_donut) }}
+    </div>
+  </section>
+
+  <section class="card {{ 'highlight' if change.fallbacks or change.unplanned_downgrades }}">
+    <h2>What changed
+      {# Period picker, driven by the change date on each recorded change. #}
+      <form method="get" class="inline-picker">
+        <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
+        <select name="window" onchange="this.form.submit()">
+          {% for key, label in windows %}
+          <option value="{{ key }}" {{ 'selected' if key == window }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <span class="hint">{{ change.devices | comma }} devices moved</span>
+    </h2>
+
+    {% set link = '/changes?window=' ~ window %}
+    <div class="change-rows">
+      <a class="change-row" href="{{ link }}">
+        <span class="arrow up">↑</span><span class="change-label">Firmware raised</span>
+        <b>{{ change.upgrades | comma }}</b></a>
+      <a class="change-row" href="{{ link }}"
+         title="Landed on the version it was told to install">
+        <span class="arrow down">↓</span><span class="change-label">Lowered — planned</span>
+        <b>{{ change.planned_downgrades | comma }}</b></a>
+      <a class="change-row {{ 'row-alert' if change.unplanned_downgrades }}" href="{{ link }}"
+         title="Went backwards with nothing targeting that version">
+        <span class="arrow down">↓</span>
+        <span class="change-label">Lowered — <strong>unplanned</strong></span>
+        <b class="{{ 'alert-text' if change.unplanned_downgrades }}">{{ change.unplanned_downgrades | comma }}</b></a>
+      <a class="change-row {{ 'row-alert' if change.fallbacks }}" href="{{ link }}"
+         title="Returned to its base firmware — the build it shipped with">
+        <span class="arrow down">↺</span><span class="change-label">Fell back to base</span>
+        <b class="{{ 'alert-text' if change.fallbacks }}">{{ change.fallbacks | comma }}</b></a>
+
+      <div class="change-divider">Also in this period</div>
+
+      <a class="change-row" href="{{ link }}">
+        <span class="arrow">⇄</span><span class="change-label">Devices moved twice or more</span>
+        <b>{{ change.devices_moved_twice | comma }}</b></a>
+      <a class="change-row" href="{{ link }}">
+        <span class="arrow">⚙</span><span class="change-label">Configuration changes</span>
+        <b>{{ change.config_changes | comma }}</b></a>
+      <a class="change-row" href="/pending{{ qs() }}">
+        <span class="arrow">…</span><span class="change-label">Task pending now</span>
+        <b>{{ kpis.devices_pending | comma }}</b></a>
+    </div>
+    {% if not change.moves %}
+    <p class="footnote">Nothing moved in {{ change.window_label | lower }}.</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="glance-grid">
+  <section class="card">
+    <h2>Task status
+      <span class="hint">{{ kpis.devices_pending | comma }} pending ·
+        <a href="/pending{{ qs() }}">detail →</a></span>
+    </h2>
+    {% set pending_total = kpis.devices_pending or 1 %}
+    {% for b in pending %}
+      {{ m.bar(b.label, b.devices, pending_total, b.tone) }}
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <h2>Last seen
+      <span class="hint">whole fleet · <a href="/reachability{{ qs() }}">detail →</a></span>
+    </h2>
+    {% for b in staleness %}
+      {{ m.bar(b.bucket, b.devices, kpis.devices_total,
+               'ok' if b.bucket == 'online now' else ('dim' if '90+' in b.bucket or b.bucket == 'never pinged' else 'neutral')) }}
+    {% endfor %}
+  </section>
+</div>
+
+<section class="card">
+  <h2>Task state by model</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th class="n">Devices</th><th class="n">Never tasked</th>
+          <th class="n">Completed</th><th class="n">Pending</th>
+          <th class="n">Stuck</th><th class="n">Online</th><th>Mix</th></tr>
+    </thead>
+    <tbody>
+    {% for r in by_model %}
+      <tr>
+        <td><a href="/firmware?snapshot={{ snapshot_id }}&model={{ r.label }}">{{ r.label }}</a></td>
+        <td class="n">{{ r.devices | comma }}</td>
+        <td class="n">{{ r.never_tasked | comma }}</td>
+        <td class="n">{{ r.completed | comma }}</td>
+        <td class="n">{{ r.pending | comma }}</td>
+        <td class="n {{ 'alert-text' if r.pending_reachable }}">{{ r.pending_reachable | comma }}</td>
+        <td class="n">{{ m.ratio(r.online, r.devices) }}</td>
+        <td class="mix">
+          {{ m.stack([('completed', r.completed, 'ok'), ('pending', r.pending, 'warn'),
+                      ('never tasked', r.never_tasked, 'neutral')], r.devices) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

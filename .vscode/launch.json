@@ -1,0 +1,68 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Dashboard (load exports + serve)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false
+    },
+    {
+      "name": "Dashboard (serve only, no ingest)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--no-ingest"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Ingest all exports",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ota_analytics.cli",
+      "args": ["ingest-dir"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Status",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ota_analytics.cli",
+      "args": ["status"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Data quality report",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ota_analytics.cli",
+      "args": ["quality"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Rebuild metrics",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ota_analytics.cli",
+      "args": ["rollup"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

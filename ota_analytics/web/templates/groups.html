@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Groups — OTA Analytics{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>Groups
+    <span class="hint">the closest thing to a rollout cohort — many versions in one group means
+      a rollout still in progress, or one that stopped part-way</span>
+  </h2>
+  <table>
+    <thead>
+      <tr><th>Group</th><th class="n">Devices</th><th class="n">Online</th>
+          <th class="n">Pending</th><th class="n">Stuck (online)</th>
+          <th class="n">Versions</th><th>Reach</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="/devices?snapshot={{ snapshot_id }}&group={{ r.group_name | urlencode }}">{{ r.group_name }}</a></td>
+        <td class="n">{{ r.devices | comma }}</td>
+        <td class="n">{{ r.online | comma }}</td>
+        <td class="n">{{ r.pending | comma }}</td>
+        <td class="n {{ 'alert-text' if r.pending_reachable }}">{{ r.pending_reachable | comma }}</td>
+        <td class="n {{ 'alert-text' if r.firmware_versions > 5 }}">{{ r.firmware_versions }}</td>
+        <td class="barcell">
+          {% set rate = r.online / r.devices if r.devices else 0 %}
+          <div class="bar-track slim">
+            <div class="bar-fill {{ 'ok' if rate > 0.7 else ('warn' if rate > 0.25 else 'bad') }}"
+                 style="width: {{ '%.2f' % (rate * 100) }}%"></div>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

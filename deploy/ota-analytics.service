@@ -1,0 +1,60 @@
+# InTouch OTA Analytics — systemd unit.
+#
+# This is what makes the service survive the things a laptop could not: a crash, a reboot, or
+# the terminal being closed. Restart=always is the whole point.
+#
+#   sudo cp deploy/ota-analytics.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ota-analytics
+#   systemctl status ota-analytics && journalctl -u ota-analytics -f
+
+[Unit]
+Description=InTouch OTA Analytics dashboard and fetch scheduler
+Documentation=file:/opt/ota-analytics/docs/DEPLOY.md
+# The scheduler logs into the platform on startup, so wait for real connectivity rather than
+# just for the interface to exist.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ota
+Group=ota
+WorkingDirectory=/opt/ota-analytics
+
+# Passwords live here, never in the unit file: `systemctl show` prints Environment= lines to any
+# user, while this file is root-owned 0600.
+EnvironmentFile=/etc/ota-analytics.env
+
+# Bound to loopback deliberately. Nothing reaches this port from outside the machine — the
+# Cloudflare tunnel connects to it from the inside, so there is no listening port to attack.
+ExecStart=/opt/ota-analytics/.venv/bin/python main.py --host 127.0.0.1 --port 8000 --no-browser
+
+Restart=always
+RestartSec=5
+# Do not give up after the default 5 attempts: a platform outage at boot is temporary, and a
+# service that quietly stopped retrying collects no data until someone notices.
+StartLimitIntervalSec=0
+
+# ─── hardening ───────────────────────────────────────────────────────────────
+# Nobody else is patching this box, so keep the blast radius small.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# ProtectSystem=strict makes everything read-only; these are the only paths that may be written.
+ReadWritePaths=/opt/ota-analytics/data /opt/ota-analytics/reports
+
+# Measured peak for a full 35,475-device fetch is 25 MB, so this is ~20x headroom — set high
+# enough never to interfere, low enough that a runaway is killed rather than taking the machine
+# with it. Safe to lower to 512M on a 1 GB host.
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Data Quality — OTA Analytics{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>Data quality
+    <span class="hint">recorded on every ingest — the numbers elsewhere are only as good as this</span>
+  </h2>
+  <table>
+    <thead><tr><th>Severity</th><th>Rule</th><th class="n">Devices</th>
+               <th>Meaning</th><th>Examples</th></tr></thead>
+    <tbody>
+      {% for i in issues %}
+      <tr>
+        <td><span class="sev sev-{{ i.severity }}">{{ i.severity }}</span></td>
+        <td class="mono">{{ i.rule }}</td>
+        <td class="n">{{ i.affected | comma }}</td>
+        <td style="white-space: normal">{{ i.detail }}</td>
+        <td class="dim small">
+          {% set sample = i.sample | from_json %}
+          {{ (sample[:2] | join(', '))[:60] if sample else '—' }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="footnote">
+    Not computable from this source: campaign success rates, failure codes, retry counts,
+    durations, bandwidth — the platform stores no event log. Everything here comes from fleet
+    snapshots and the differences between them.
+  </p>
+</section>
+{% endblock %}

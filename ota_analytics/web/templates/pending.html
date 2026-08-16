@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Pending — OTA Analytics{% endblock %}
+
+{% block content %}
+<div class="tiles">
+  {{ m.tile('Pending devices', kpis.devices_pending | comma, 'all reasons') }}
+  {{ m.tile('Stuck while reachable', kpis.pending_reachable | comma, 'investigate', 'alert') }}
+  {{ m.tile('Waiting for power-on', kpis.pending_waiting | comma, 'expected', 'muted-tile') }}
+  {{ m.tile('Outstanding tasks', kpis.pending_tasks_total | comma, 'queue depth') }}
+</div>
+
+<section class="card">
+  <h2>Task status
+    <span class="hint">a pending task is parked until the device returns — the top row is the
+      exception: powered, connected, still not updated</span>
+  </h2>
+  {% set total = kpis.devices_pending or 1 %}
+  {% for b in buckets %}
+    {{ m.bar(b.label, b.devices, total, b.tone) }}
+  {% endfor %}
+</section>
+
+<section class="card highlight">
+  <h2>Stuck while reachable <span class="hint">{{ stuck | length }} devices · online within 24h
+    with a task outstanding</span>
+    {% if stuck %}
+    <details class="dropdown export">
+      <summary><span class="dl-icon">⤓</span> Download</summary>
+      <div class="dropdown-panel">
+        <a class="dropdown-item" href="/pending/export?format=xlsx">
+          <span>Excel workbook</span><em>.xlsx</em></a>
+        <a class="dropdown-item" href="/pending/export?format=csv">
+          <span>CSV</span><em>.csv</em></a>
+        <a class="dropdown-item" href="/pending/export?format=txt">
+          <span>IMEI list — to paste into the platform</span><em>.txt</em></a>
+      </div>
+    </details>
+    {% endif %}
+  </h2>
+  {% if stuck %}
+  <table>
+    <thead>
+      <tr><th>IMEI</th><th>Model</th><th>Firmware</th><th>HW</th>
+          <th class="n">Tasks</th><th>Last seen</th><th>Groups</th></tr>
+    </thead>
+    <tbody>
+      {% for d in stuck %}
+      <tr>
+        <td class="mono">{{ d.imei }}</td>
+        <td>{{ d.device_model or '—' }}</td>
+        <td>{{ d.firmware or '—' }}</td>
+        <td class="dim">{{ d.hw_ver or '—' }}</td>
+        <td class="n">{{ d.pending_tasks }}</td>
+        <td>{{ m.dark_days(d.seen_age_hours) }}</td>
+        <td class="dim small">{{ (d.groups_raw or '—')[:44] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No reachable device is currently carrying a pending task.</p>
+  {% endif %}
+</section>
+
+{% if multi_snapshot %}
+<section class="card">
+  <h2>Stalled across snapshots
+    <span class="hint">{{ stalled | length }} · pending in consecutive snapshots, firmware unchanged</span>
+  </h2>
+  {% if stalled %}
+  <table>
+    <thead><tr><th>IMEI</th><th>Model</th><th>Firmware</th>
+               <th class="n">Snapshots</th><th>Last seen pending</th></tr></thead>
+    <tbody>
+      {% for d in stalled[:200] %}
+      <tr>
+        <td class="mono">{{ d.imei }}</td><td>{{ d.device_model or '—' }}</td>
+        <td>{{ d.firmware or '—' }}</td>
+        <td class="n">{{ d.pending_streak + 1 }}</td><td class="dim">{{ d.last_seen_pending }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nothing stalled yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

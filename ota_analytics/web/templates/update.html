@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block title %}Update Data — OTA Analytics{% endblock %}
+
+{% block content %}
+{% if result %}
+<div class="notice notice-{{ result.level }}">{{ result.message }}</div>
+{% endif %}
+
+{# Hero: connection state, the timer, and the one action most visits are here for. #}
+<section class="hero status-{{ auth.level }}">
+  <div class="hero-main">
+    <div class="hero-status">
+      <span class="dot"></span>
+      <div>
+        <strong>{{ auth.label }}</strong>
+        {% if connection.username %}<span class="dim">— {{ connection.username }}</span>{% endif %}
+        <div class="hint">{{ auth.detail }}</div>
+      </div>
+    </div>
+
+    <div class="hero-metrics">
+      <div class="hero-metric">
+        <span class="hero-metric-label">Auto-fetch</span>
+        <span class="hero-metric-value {{ 'ok' if agent.enabled }}">
+          {{ 'every ' ~ describe_interval(agent.interval_seconds) if agent.enabled else 'off' }}
+        </span>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-metric-label">Next run</span>
+        <span class="hero-metric-value" id="hero-next">
+          {{ agent.next_run[11:16] if agent.next_run else '—' }}
+        </span>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-metric-label">Last run</span>
+        <span class="hero-metric-value">{{ agent.last_run[11:16] if agent.last_run else '—' }}</span>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-metric-label">Runs / failed</span>
+        <span class="hero-metric-value">{{ agent.runs }} / {{ agent.failures }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="hero-actions">
+    <form method="post" action="/update/run-now">
+      <button type="submit" class="btn-primary">Fetch now</button>
+    </form>
+    <form method="post" action="/update/schedule" class="inline-schedule">
+      <input type="number" name="interval_value" min="1" max="1440"
+             value="{{ (agent.interval_seconds // 60) if agent.interval_seconds < 3600
+                       else (agent.interval_seconds // 3600) }}">
+      <select name="interval_unit">
+        <option value="minutes" {{ 'selected' if agent.interval_seconds < 3600 }}>min</option>
+        <option value="hours" {{ 'selected' if agent.interval_seconds >= 3600 }}>hrs</option>
+      </select>
+      <label class="inline compact">
+        <input type="checkbox" name="enabled" value="true" {{ 'checked' if agent.enabled }}>
+        auto
+      </label>
+      <button type="submit" class="ghost">Save</button>
+    </form>
+
+    {% if startup.supported %}
+    {# Fetching that does not survive a reboot is not unattended. The delay keeps the first
+       fetch out of the logon rush, when antivirus and sync clients compete for the disk. #}
+    <form method="post" action="/update/startup" class="inline-schedule startup-toggle">
+      <label class="switch" title="{{ startup.detail }}">
+        <input type="checkbox" name="enabled" value="true" {{ 'checked' if startup.enabled }}
+               onchange="this.form.submit()">
+        <span class="slider"></span>
+        <span class="switch-label">Start with Windows</span>
+      </label>
+      <input type="number" name="startup_delay" min="0" max="240"
+             value="{{ startup.delay_minutes }}" title="Minutes to wait before the first fetch">
+      <span class="hint">min delay
+        {%- if startup.enabled %} ·
+          {{ 'at boot' if startup.starts_at_boot else 'at sign-in' }}
+        {%- endif %}</span>
+      {% if startup.enabled %}
+      <button type="submit" form="startup-test" class="ghost">Test it</button>
+      {% endif %}
+    </form>
+    {% if startup.enabled %}<form id="startup-test" method="post" action="/update/startup-test"></form>{% endif %}
+    {% endif %}
+  </div>
+
+  {% if agent.last_message %}
+  <div class="hero-foot {{ 'alert-text' if agent.last_status == 'error' }}">
+    {{ agent.last_message }}
+  </div>
+  {% endif %}
+</section>
+
+{% if not auth.can_automate %}
+<div class="notice notice-warn">
+  Unattended fetching needs credentials it can renew itself — sign in below with your username
+  and password and tick <strong>Remember me</strong>. A pasted bearer token stops working once
+  it expires.
+</div>
+{% endif %}
+
+<div class="choice-grid">
+  <section class="card {{ 'highlight' if tab == 'online' }}">
+    <h2>Connection <span class="hint">{{ presets[connection.preset].label
+      if connection.preset in presets else 'custom' }}</span></h2>
+
+    {% if not is_local %}
+    <div class="notice notice-error">
+      Opened from another machine over plain HTTP — a password typed here would cross the
+      network unencrypted. Use <code>http://127.0.0.1:8000/update</code> on the host machine.
+    </div>
+    {% endif %}
+
+    <form method="post" action="/update/online" class="stack-form">
+      <label>Platform
+        <select name="preset" onchange="this.form.submit()">
+          {% for key, p in presets.items() %}
+          <option value="{{ key }}" {{ 'selected' if key == connection.preset }}>{{ p.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <div class="field-row">
+        <label>Username
+          <input type="text" name="username" autocomplete="username"
+                 value="{{ connection.username }}" placeholder="you@company.com">
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password"
+                 placeholder="{{ 'saved — leave blank' if connection.remembered else '' }}">
+        </label>
+      </div>
+
+      <label class="inline">
+        <input type="checkbox" name="remember" value="true" {{ 'checked' if connection.remembered }}>
+        Remember me <span class="opt">— required for auto-fetch</span>
+      </label>
+
+      {% if not connection.verify_tls %}
+      <div class="notice notice-warn">
+        Certificate checking is <strong>off</strong> — credentials go to whatever answers at
+        that address.
+      </div>
+      {% endif %}
+
+      <details class="advanced" {{ 'open' if connection.preset == 'custom' }}>
+        <summary>Endpoints &amp; sign-in details</summary>
+
+        <label class="inline">
+          <input type="checkbox" name="verify_tls" value="true"
+                 {{ 'checked' if connection.verify_tls }}>
+          <span>Verify the HTTPS certificate
+            <span class="opt">— keep on; off means anything on the network can impersonate the
+              platform and capture the password</span></span>
+        </label>
+
+        <label>Export URL
+          <input type="url" name="url" value="{{ connection.url }}">
+        </label>
+        <label>Login URL
+          <input type="url" name="login_url" value="{{ connection.login_url }}">
+        </label>
+        <div class="field-row">
+          <label>Sign-in method
+            <select name="auth_mode">
+              {% for value, text in [('token','API token (JSON/multipart sign-in)'),
+                                     ('bearer','Paste a bearer token'),
+                                     ('form','Form login, session cookie'),
+                                     ('basic','HTTP Basic'), ('none','No authentication')] %}
+              <option value="{{ value }}" {{ 'selected' if connection.auth_mode == value }}>{{ text }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Login encoding
+            <select name="login_encoding">
+              {% for value, text in [('multipart','multipart/form-data'), ('json','JSON body'),
+                                     ('form','urlencoded')] %}
+              <option value="{{ value }}" {{ 'selected' if connection.login_encoding == value }}>{{ text }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <label>User field
+            <input type="text" name="user_field" value="{{ connection.user_field }}">
+          </label>
+          <label>Password field
+            <input type="text" name="pass_field" value="{{ connection.pass_field }}">
+          </label>
+        </div>
+        <label>Password sent as
+          <select name="password_hash">
+            <option value="md5" {{ 'selected' if connection.password_hash == 'md5' }}>MD5 hash</option>
+            <option value="none" {{ 'selected' if connection.password_hash == 'none' }}>plain text</option>
+          </select>
+        </label>
+      </details>
+
+      <div class="form-actions">
+        <button type="submit">Sign in &amp; fetch</button>
+        {% if connection.remembered %}
+        <button type="submit" form="forget" class="ghost">Forget password</button>
+        {% endif %}
+      </div>
+      <p class="footnote">
+        Password stored in <strong>{{ credential_store }}</strong>, never in this project's
+        files or the database.
+      </p>
+    </form>
+    {% if connection.remembered %}
+    <form id="forget" method="post" action="/update/forget">
+      <input type="hidden" name="username" value="{{ connection.username }}">
+    </form>
+    {% endif %}
+  </section>
+
+  <section class="card {{ 'highlight' if tab == 'import' }}">
+    <h2>Import a file <span class="hint">.xlsx export — columns matched by name</span></h2>
+    <form method="post" action="/update/import" enctype="multipart/form-data" class="stack-form">
+      <label class="dropzone">
+        <input type="file" name="file" accept=".xlsx" required>
+        <span class="dropzone-text">Choose an export file</span>
+        <small>Keep the platform's filename — the snapshot date is read from it.</small>
+      </label>
+      <div class="form-actions"><button type="submit">Upload &amp; load</button></div>
+    </form>
+
+    <h3>History <span class="hint">{{ snapshots | length }} snapshots · click to view</span></h3>
+    <table class="compact-table">
+      <thead><tr><th>Taken</th><th>Source</th><th class="n">Devices</th></tr></thead>
+      <tbody>
+        {% for s in snapshots[:12] %}
+        <tr>
+          <td><a href="/?snapshot={{ s.id }}">{{ s.snapshot_at }}</a></td>
+          <td class="dim small">{{ 'API' if s.source_file.startswith('API') else s.source_file[:26] }}</td>
+          <td class="n">{{ s.row_count | comma }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+{# Sharing the database. Two installs disagree whenever they hold different snapshots, and
+   nothing else on screen makes that visible — so the digest comes first, and the exchange
+   that fixes a mismatch sits directly under it. #}
+<section class="card {{ 'highlight' if tab == 'share' }}" id="share">
+  <h2>Share this data <span class="hint">so two installs can prove they agree</span></h2>
+
+  <div class="identity-grid">
+    <div class="identity-cell wide">
+      <span class="hero-metric-label">Fleet digest</span>
+      <span class="digest-value">{{ identity.digest_short }}</span>
+      <div class="hint">A fingerprint of the exports loaded here. Same digest, same numbers —
+        compare this with a colleague before comparing anything else. Hashing the database
+        file itself would report a mismatch every time, because two copies holding identical
+        data are never byte-identical.</div>
+    </div>
+    <div class="identity-cell">
+      <span class="hero-metric-label">Snapshots</span>
+      <span class="hero-metric-value">{{ identity.snapshots | comma }}</span>
+    </div>
+    <div class="identity-cell">
+      <span class="hero-metric-label">Coverage</span>
+      <span class="hero-metric-value small">{{ identity.first_snapshot_at or '—' }}<br>
+        {{ identity.last_snapshot_at or '—' }}</span>
+    </div>
+    <div class="identity-cell">
+      {# Two clocks, kept apart on purpose: when the platform's data was true, and when this
+         install pulled it. A single "last sync" figure conflates them. #}
+      <span class="hero-metric-label">Last fetched</span>
+      <span class="hero-metric-value small">{{ identity.last_ingest_at or '—' }}</span>
+    </div>
+    <div class="identity-cell">
+      <span class="hero-metric-label">Created</span>
+      <span class="hero-metric-value small">{{ identity.created_at or '—' }}</span>
+    </div>
+  </div>
+
+  <p class="footnote">
+    Database <code>{{ identity.db_path }}</code> · id <code>{{ identity.db_id[:8] }}</code>
+    {%- if identity.last_import_at %} · last import {{ identity.last_import_at }}
+      from {{ identity.last_import_from }}{% endif %}
+  </p>
+
+  <div class="field-row">
+    <form method="post" action="/update/label" class="stack-form">
+      <label>This install is called
+        <input type="text" name="label" value="{{ identity.instance_label }}" maxlength="60"
+               placeholder="e.g. shahbaz-laptop">
+      </label>
+      <div class="form-actions"><button type="submit" class="ghost">Rename</button></div>
+      <p class="footnote">Appears on every bundle and report this install produces, so a file
+        that has been emailed around still says where it came from.</p>
+    </form>
+
+    <form method="get" action="/update/bundle" class="stack-form">
+      <label>Export snapshots from <span class="opt">— blank for all</span>
+        <input type="text" name="since" placeholder="2026-08-15 or 2026-08-15 09:00">
+      </label>
+      <div class="form-actions"><button type="submit">Download bundle</button></div>
+      <p class="footnote">Carries the snapshots themselves, not the database file — the other
+        side replays them, so your history and theirs combine instead of one replacing the
+        other.</p>
+    </form>
+  </div>
+
+  <form method="post" action="/update/bundle-import" enctype="multipart/form-data"
+        class="stack-form">
+    <label class="dropzone">
+      <input type="file" name="file" accept=".otabundle,.zip" required>
+      <span class="dropzone-text">Import a colleague's bundle</span>
+      <small>Snapshots already loaded here are skipped, so importing twice changes nothing.
+        Catching up on a few fetches takes seconds; a first import of months of history can
+        take several minutes and the page will wait for it.</small>
+    </label>
+    <label class="inline">
+      <input type="checkbox" name="allow_interleave" value="true">
+      <span>Allow snapshots dated inside history already held
+        <span class="opt">— off by default: slotting a fetch into the middle of a timeline
+          changes what every unchanged device appears to have been doing, so it rewrites the
+          surrounding snapshots and rebuilds everything. Slower, and only needed when their
+          data is older than yours.</span></span>
+    </label>
+    <div class="form-actions"><button type="submit">Merge bundle</button></div>
+  </form>
+</section>
+{% endblock %}

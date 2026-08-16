@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}OTA Analytics{% endblock %}
+
+{% block content %}
+<h1>No data yet</h1>
+<section class="card">
+  <p>Ingest a platform export to get started:</p>
+  <pre>python -m ota_analytics.cli ingest-dir "Sample data"</pre>
+  <p class="footnote">
+    Ingest is idempotent — re-running it on the same file changes nothing, so a folder can be
+    re-scanned safely as new exports arrive.
+  </p>
+</section>
+{% endblock %}

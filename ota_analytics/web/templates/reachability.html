@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Reachability — OTA Analytics{% endblock %}
+
+{% block content %}
+<div class="glance-grid">
+  <section class="card">
+    <h2>Fleet last seen</h2>
+    {% set total = (staleness | sum(attribute='devices')) or 1 %}
+    {% for b in staleness %}
+      {{ m.bar(b.bucket, b.devices, total,
+               'ok' if b.bucket == 'online now' else ('dim' if '90+' in b.bucket or b.bucket == 'never pinged' else 'neutral')) }}
+    {% endfor %}
+  </section>
+  <section class="card muted-card">
+    <h2>Reading this page</h2>
+    <p class="lede">
+      Online rate paired with how long the offline devices have been dark. A low rate with very
+      old contact means retired hardware; a low rate with recent contact means devices are
+      dropping off now. Worst first, ≥{{ min_devices }} devices.
+    </p>
+  </section>
+</div>
+
+<section class="card">
+  <h2>By firmware version</h2>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Firmware</th><th class="n">Devices</th><th class="n">Online</th>
+          <th>Online rate</th><th class="n">Avg dark</th><th class="n">Max dark</th>
+          <th class="n">Pending</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      {% set rate = r.online / r.devices if r.devices else 0 %}
+      <tr>
+        <td class="dim">{{ r.device_model }}</td>
+        <td><strong>{{ r.firmware }}</strong></td>
+        <td class="n">{{ r.devices | comma }}</td>
+        <td class="n">{{ r.online | comma }}</td>
+        <td class="barcell">
+          <div class="bar-track slim">
+            <div class="bar-fill {{ 'ok' if rate > 0.7 else ('warn' if rate > 0.25 else 'bad') }}"
+                 style="width: {{ '%.2f' % (rate * 100) }}%"></div>
+          </div>
+          <span class="pctlabel">{{ '%.1f' % (rate * 100) }}%</span>
+        </td>
+        <td class="n">{{ '{:,.0f}d'.format(r.avg_dark_days) if r.avg_dark_days else '—' }}</td>
+        <td class="n dim">{{ '{:,.0f}d'.format(r.max_dark_days) if r.max_dark_days else '—' }}</td>
+        <td class="n">{{ r.pending | comma }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

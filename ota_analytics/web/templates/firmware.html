@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Firmware — OTA Analytics{% endblock %}
+
+{% block content %}
+{# Model slicer. No selection means every model, so "all" is the default and narrowing is
+   opt-in. Ctrl/Shift-click picks any subset. #}
+<form class="filters slicer" method="get">
+  <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
+  <label class="grow">Models
+    <select name="model" multiple size="{{ [models | length, 6] | min }}">
+      {% for r in models %}
+      <option value="{{ r.label }}" {{ 'selected' if r.label in selected_models }}>
+        {{ r.label }} — {{ r.devices | comma }} devices
+      </option>
+      {% endfor %}
+    </select>
+    <small>
+      {% if selected_models %}
+        {{ selected_models | length }} of {{ models | length }} selected —
+        {{ mix_total | comma }} devices
+      {% else %}
+        All {{ models | length }} models — {{ mix_total | comma }} devices
+      {% endif %}
+      &middot; ctrl+click to pick several
+    </small>
+  </label>
+  <button type="submit">Apply</button>
+  <a class="clear" href="/firmware{{ qs() }}">All models</a>
+</form>
+
+{% if selected_models %}
+<div class="chips selection">
+  {% for name in selected_models %}<span class="chip">{{ name }}</span>{% endfor %}
+</div>
+{% endif %}
+
+{% if targets %}
+<div class="tiles">
+  {{ m.tile('On target', kpis.compliance.on_target | comma, '', 'ok-tile') }}
+  {{ m.tile('Off target', kpis.compliance.off_target | comma, 'needs update', 'alert') }}
+  {{ m.tile('End of life', kpis.compliance.eol_ok | comma, '', 'muted-tile') }}
+  {{ m.tile('No target set', kpis.compliance.undeclared | comma, 'unknown', 'muted-tile') }}
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>Devices per firmware version
+    <span class="count">{{ mix | length }} version{{ 's' if mix | length != 1 }}</span></h2>
+  {% set biggest = mix[0].devices if mix else 1 %}
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Firmware</th><th class="n">Devices</th>
+          <th class="n">Share</th><th>Distribution</th>
+          <th class="n">Online</th><th class="n">Pending</th></tr>
+    </thead>
+    <tbody>
+      {% for r in mix %}
+      <tr>
+        <td class="dim">{{ r.device_model }}</td>
+        <td><strong>{{ r.firmware }}</strong></td>
+        <td class="n">{{ r.devices | comma }}</td>
+        <td class="n">{{ '%.1f' % (r.devices / mix_total * 100 if mix_total else 0) }}%</td>
+        <td class="barcell">
+          <div class="bar-track slim"><div class="bar-fill neutral"
+               style="width: {{ '%.2f' % (r.devices / biggest * 100) }}%"></div></div>
+        </td>
+        <td class="n">{{ m.ratio(r.online, r.devices) }}</td>
+        <td class="n">{{ r.pending | comma }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="2">Total</td><td class="n">{{ mix_total | comma }}</td>
+          <td class="n">100%</td><td colspan="3"></td></tr>
+    </tfoot>
+  </table>
+</section>
+
+{% if gaps %}
+<section class="card highlight">
+  <h2>Coverage gaps
+    <span class="hint">off target and never tasked — online ones are actionable now</span>
+  </h2>
+  <table>
+    <thead><tr><th>Model</th><th>On firmware</th><th>Target</th>
+               <th class="n">Devices</th><th class="n">Online now</th></tr></thead>
+    <tbody>
+      {% for g in gaps %}
+      <tr>
+        <td>{{ g.device_model }}</td><td>{{ g.firmware }}</td><td class="dim">{{ g.target }}</td>
+        <td class="n">{{ g.devices | comma }}</td>
+        <td class="n {{ 'alert-text' if g.online }}">{{ g.online | comma }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

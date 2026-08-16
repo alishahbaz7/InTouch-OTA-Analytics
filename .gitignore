@@ -1,0 +1,28 @@
+# local database and generated artifacts
+data/
+reports/
+*.db
+*.db-wal
+*.db-shm
+
+# platform exports — real device data, never commit
+Sample data/*
+!Sample data/.gitkeep
+*.xlsx
+!tests/fixtures/*.xlsx
+
+# shared snapshot bundles — every device's IMEI, VIN and ICCID, in one file
+*.otabundle
+
+# secrets
+.env
+# Local deployment settings: password verifiers and the session signing key.
+deploy/windows/local-env.ps1
+data/secret.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/

@@ -1,0 +1,50 @@
+{# Deliberately standalone rather than extending base.html: that layout carries the snapshot
+   picker, the fetch status and links to every protected page, none of which belongs in front of
+   someone who has not signed in yet. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — OTA Analytics</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <style>
+    .signin { max-width: 22rem; margin: 12vh auto; padding: 0 1rem; }
+    .signin h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .signin p.sub { color: #6b7280; margin-top: 0; font-size: 0.9rem; }
+    .signin form { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1.5rem; }
+    .signin input { padding: 0.55rem 0.65rem; border: 1px solid #d1d5db; border-radius: 6px;
+                    font-size: 1rem; }
+    .signin button { padding: 0.55rem; border: 0; border-radius: 6px; background: #1f2937;
+                     color: #fff; font-size: 1rem; cursor: pointer; }
+    .signin .msg { padding: 0.6rem 0.75rem; border-radius: 6px; font-size: 0.9rem; }
+    .signin .msg.error { background: #fef2f2; color: #991b1b; }
+    .signin .msg.warn  { background: #fffbeb; color: #92400e; }
+    .signin .hint { color: #6b7280; font-size: 0.85rem; margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <main class="signin">
+    <h1>InTouch OTA Analytics</h1>
+    <p class="sub">Sign in to continue.</p>
+
+    {% if not configured %}
+      <p class="msg warn">No password is configured, so this dashboard is open to anyone who can
+      reach it. Set <code>OTA_ADMIN_PASSWORD_HASH</code> before exposing it beyond this machine.</p>
+    {% endif %}
+
+    {% if error %}<p class="msg error">{{ error }}</p>{% endif %}
+
+    <form method="post" action="/login">
+      {# The submitted password is never rendered back into this page. #}
+      <input type="hidden" name="next" value="{{ next }}">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password"
+             autofocus required>
+      <button type="submit">Sign in</button>
+    </form>
+
+    <p class="hint">The viewer password can read every page but cannot change anything.</p>
+  </main>
+</body>
+</html>

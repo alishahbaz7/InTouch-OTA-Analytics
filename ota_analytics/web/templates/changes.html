@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Changes &amp; Fallbacks — OTA Analytics{% endblock %}
+
+{% block content %}
+{# Time window, not a snapshot pair. Every move is logged individually, so nothing can hide
+   between two chosen endpoints. #}
+<div class="window-tabs">
+  {% for key, label in windows %}
+  <a href="/changes?window={{ key }}" class="{{ 'on' if key == window }}">{{ label }}</a>
+  {% endfor %}
+  <span class="hint">{{ registry_summary.devices | comma }} devices tracked ·
+    {{ registry_summary.change_rows | comma }} changes recorded</span>
+
+  <details class="dropdown export">
+    <summary><span class="dl-icon">⤓</span> Download</summary>
+    <div class="dropdown-panel">
+      <div class="dropdown-heading">All moves in this period</div>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&format=xlsx">
+        <span>Excel workbook</span><em>.xlsx</em></a>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&format=csv">
+        <span>CSV</span><em>.csv</em></a>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&format=txt">
+        <span>IMEI list</span><em>.txt</em></a>
+
+      <div class="dropdown-heading">Just the ones needing action</div>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&only=fallbacks&format=xlsx">
+        <span>Fallbacks to base</span><em>{{ summary.fallbacks }}</em></a>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&only=fallbacks&format=txt">
+        <span>Fallback IMEIs</span><em>.txt</em></a>
+      <a class="dropdown-item" href="/changes/export?window={{ window }}&only=unplanned&format=xlsx">
+        <span>Unplanned downgrades</span><em>{{ summary.unplanned_downgrades }}</em></a>
+    </div>
+  </details>
+</div>
+
+<div class="tiles">
+  {{ m.tile('Firmware moves', summary.moves | comma,
+            (summary.devices | comma) ~ ' devices') }}
+  {{ m.tile('Raised', '↑ ' ~ (summary.upgrades | comma), '', 'ok-tile') }}
+  {{ m.tile('Lowered — planned', '↓ ' ~ (summary.planned_downgrades | comma),
+            'matched target', 'muted-tile') }}
+  {{ m.tile('Lowered — unplanned', '↓ ' ~ (summary.unplanned_downgrades | comma),
+            'no target said so', 'alert') }}
+  {{ m.tile('Fallbacks', summary.fallbacks | comma, 'returned to base', 'alert') }}
+  {{ m.tile('Moved twice or more', summary.devices_moved_twice | comma, 'unstable') }}
+</div>
+
+<div class="glance-grid">
+  <section class="card {{ 'highlight' if fallbacks }}">
+    <h2>Fallbacks
+      <span class="hint">device returned to its <strong>base firmware</strong> — the build it
+        shipped with</span>
+    </h2>
+    {% if fallbacks %}
+    <table>
+      <thead><tr><th>IMEI</th><th>Model</th><th>Move</th><th>Base</th>
+                 <th>When</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for f in fallbacks[:100] %}
+        <tr class="row-alert">
+          <td class="mono">{{ f.imei }}</td>
+          <td>{{ f.device_model or '—' }}</td>
+          <td class="change">
+            <span class="v-from">{{ f.from_firmware }}</span>
+            <span class="arrow down">↓</span>
+            <span class="v-to">{{ f.to_firmware }}</span>
+          </td>
+          <td class="dim">{{ f.base_firmware }}</td>
+          <td class="dim">{{ f.changed_at[5:16] }}</td>
+          <td><span class="pill pill-{{ (f.status or 'unknown') | lower }}">{{ f.status or '—' }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">No device has returned to its base firmware in the recorded history.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Sitting on base firmware
+      <span class="hint">base build with a newer target assigned</span>
+    </h2>
+    <div class="change-rows">
+      <div class="change-row">
+        <span class="arrow">▪</span><span class="change-label">On base, newer target set</span>
+        <b>{{ at_base.at_base | comma }}</b>
+      </div>
+      <div class="change-row">
+        <span class="arrow up">◉</span><span class="change-label">of those reachable now</span>
+        <b>{{ at_base.reachable | comma }}</b>
+      </div>
+      <div class="change-row row-alert">
+        <span class="arrow down">↺</span><span class="change-label">confirmed fallbacks (observed)</span>
+        <b class="alert-text">{{ at_base.confirmed_fallbacks | comma }}</b>
+      </div>
+      <div class="change-row">
+        <span class="arrow">?</span>
+        <span class="change-label">never moved, or fell back before we watched</span>
+        <b>{{ at_base.never_moved_or_unobserved | comma }}</b>
+      </div>
+    </div>
+    <p class="footnote">
+      The last row is ambiguous by nature — only history separates a device that fell back from
+      one that never updated. It shrinks as the change log grows.
+    </p>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Firmware moves
+    <span class="hint">{{ moves | length }} shown · newest first</span>
+  </h2>
+  {% if moves %}
+  <table>
+    <thead>
+      <tr><th>When</th><th>IMEI</th><th>Model</th><th>Move</th><th>Verdict</th>
+          <th>Target</th><th>Base</th><th>HW</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for r in moves %}
+      <tr class="{{ 'row-alert' if r.is_fallback or (r.direction == 'downgrade' and not r.matched_target) }}">
+        <td class="dim">{{ r.changed_at[5:16] }}</td>
+        <td class="mono">{{ r.imei }}</td>
+        <td>{{ r.device_model or '—' }}</td>
+        <td class="change">
+          <span class="v-from">{{ r.from_firmware }}</span>
+          <span class="arrow {{ 'up' if r.direction == 'upgrade' else 'down' }}">
+            {{ '↑' if r.direction == 'upgrade' else '↓' }}</span>
+          <span class="v-to">{{ r.to_firmware }}</span>
+        </td>
+        <td>
+          {% if r.is_fallback %}<span class="tag tag-original">fallback to base</span>
+          {% elif r.direction == 'downgrade' and r.matched_target %}
+            <span class="tag tag-previous">planned rollback</span>
+          {% elif r.direction == 'downgrade' %}
+            <span class="tag tag-original">unplanned</span>
+          {% else %}<span class="dim">upgrade</span>{% endif %}
+        </td>
+        <td class="dim">{{ r.update_firmware or '—' }}</td>
+        <td class="dim">{{ r.base_firmware or '—' }}</td>
+        <td class="dim">{{ r.hw_ver or '—' }}</td>
+        <td><span class="pill pill-{{ (r.status or 'unknown') | lower }}">{{ r.status or '—' }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No firmware moved in this window.</p>
+  {% endif %}
+</section>
+
+{% if summary.other_fields %}
+<section class="card">
+  <h2>Other fields that changed <span class="hint">same window</span></h2>
+  <div class="chips">
+    {% for f in summary.other_fields %}
+    <span class="chip">{{ f.field }} <b>{{ f.n | comma }}</b></span>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if fallbacks %}
+<section class="card">
+  <h2>What the fallbacks share
+    <span class="hint">a slice concentrating above its share of the fleet is a lead, not a cause</span>
+  </h2>
+  <div class="segments">
+    {% for title, key in [('By model', 'by_model'), ('By version path', 'by_path'),
+                          ('By hardware revision', 'by_hw'), ('By group', 'by_group')] %}
+    <div class="segment">
+      <h3>{{ title }}</h3>
+      {% set rows = segments[key] %}
+      {% set top = rows[0].devices if rows else 1 %}
+      {% if rows %}
+        {% for r in rows[:8] %}
+        <div class="bar-row compact">
+          <div class="bar-label" title="{{ r.label }}">{{ r.label }}</div>
+          <div class="bar-track"><div class="bar-fill bad"
+               style="width: {{ '%.1f' % (r.devices / top * 100) }}%"></div></div>
+          <div class="bar-value">{{ r.devices | comma }}</div>
+        </div>
+        {% endfor %}
+      {% else %}<p class="empty small">No data</p>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

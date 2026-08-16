@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Devices — OTA Analytics{% endblock %}
+
+{% block content %}
+<form class="filters" method="get">
+  <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
+  <label>Model
+    <select name="model">
+      <option value="">All</option>
+      {% for r in models %}
+      <option value="{{ r.label }}" {{ 'selected' if r.label == filters.model }}>{{ r.label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Firmware
+    <select name="firmware">
+      <option value="">All ({{ firmwares | length }} versions)</option>
+      {% for f in firmwares %}
+      <option value="{{ f.label }}" {{ 'selected' if f.label == filters.firmware }}>
+        {{ f.label }} — {{ f.devices | comma }}
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Status
+    <select name="status">
+      <option value="">All</option>
+      {% for s in ['Online', 'Offline', 'Inactive'] %}
+      <option value="{{ s }}" {{ 'selected' if s == filters.status }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Task state
+    <select name="queue_state">
+      <option value="">All</option>
+      {% for s in ['pending', 'completed', 'never_tasked'] %}
+      <option value="{{ s }}" {{ 'selected' if s == filters.queue_state }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Group
+    <input type="text" name="group" value="{{ filters.group or '' }}" placeholder="exact name">
+  </label>
+  <label>Last update
+    <select name="changed">
+      <option value="">Any time</option>
+      {% for value, text in change_windows %}
+      <option value="{{ value }}" {{ 'selected' if value == filters.changed }}>{{ text }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Fallback
+    <select name="fallback">
+      <option value="">All devices</option>
+      <option value="yes" {{ 'selected' if filters.fallback == 'yes' }}>Tagged fallback</option>
+      <option value="missed" {{ 'selected' if filters.fallback == 'missed' }}>Fallback — missed target</option>
+    </select>
+  </label>
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <input type="hidden" name="dir" value="{{ dir }}">
+  <button type="submit">Apply</button>
+  <a class="clear" href="/devices{{ qs() }}">Clear</a>
+  {# Terse on purpose: the sorted column is already marked with ▼/▲ in its header. #}
+  <span class="hint">{{ total | comma }} · {{ page }}/{{ pages }}</span>
+
+  {# Downloads carry the filters in force, so the file matches the table above it. #}
+  {% set export_query = base_query ~ ('&' if base_query else '') ~ 'sort=' ~ sort ~ '&dir=' ~ dir %}
+  <details class="dropdown export">
+    <summary><span class="dl-icon">⤓</span> Download</summary>
+    <div class="dropdown-panel">
+      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=xlsx">
+        <span>Excel workbook</span><em>.xlsx</em></a>
+      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=csv">
+        <span>CSV</span><em>.csv</em></a>
+      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=txt">
+        <span>IMEI list — to paste into the platform</span><em>.txt</em></a>
+      <p class="footnote">All {{ total | comma }} matching devices, not just this page.</p>
+    </div>
+  </details>
+</form>
+
+<section class="card">
+  <table>
+    {#- Clicking a header sorts by it; clicking the active one flips direction. -#}
+    {% macro sortable(key, label, numeric=false) %}
+      {% set active = (sort == key) %}
+      {% set next_dir = 'asc' if (active and dir == 'desc') else 'desc' %}
+      <th class="sortable {{ 'n' if numeric }} {{ 'sorted' if active }}">
+        <a href="/devices?{{ base_query }}{{ '&' if base_query }}sort={{ key }}&dir={{ next_dir }}">
+          {{ label }}<span class="sort-arrow">{{ ('▼' if dir == 'desc' else '▲') if active else '' }}</span>
+        </a>
+      </th>
+    {% endmacro %}
+    <thead>
+      <tr>
+        {{ sortable('imei', 'IMEI') }}
+        {{ sortable('model', 'Model') }}
+        {{ sortable('firmware', 'Firmware') }}
+        {{ sortable('changed', 'Last change') }}
+        {{ sortable('target', 'Target') }}
+        {{ sortable('config', 'Config') }}
+        {{ sortable('hw', 'HW') }}
+        {{ sortable('status', 'Status') }}
+        {{ sortable('task', 'Task') }}
+        {{ sortable('seen', 'Last seen') }}
+        {{ sortable('checked', 'Last checked') }}
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in rows %}
+      <tr>
+        <td class="mono">{{ d.imei }}</td>
+        <td>{{ d.device_model or '—' }}</td>
+        <td>
+          <strong>{{ d.firmware or '—' }}</strong>
+          {%- if d.is_fallback %}
+          <span class="tag tag-fallback"
+                title="Task completed but the device is on its base firmware {{ d.base_firmware }}{% if d.update_firmware and d.update_firmware != d.firmware %}, while targeted at {{ d.update_firmware }}{% endif %}">fallback</span>
+          {%- endif %}
+        </td>
+        <td class="change">
+          {% if d.prev_firmware %}
+            <span class="v-from">{{ d.prev_firmware }}</span>
+            <span class="arrow">→</span>
+            <span class="v-to">{{ d.firmware }}</span>
+            <span class="dim small">{{ (d.last_fw_change_at or '')[5:16] }}</span>
+          {% elif d.last_changed_at %}
+            <span class="dim small">{{ d.last_changed_at[5:16] }}</span>
+          {% else %}
+            <span class="muted">never</span>
+          {% endif %}
+        </td>
+        <td class="dim">{{ d.update_firmware or '—' }}</td>
+        <td class="dim">{{ d.configuration or '—' }}</td>
+        <td class="dim">{{ d.hw_ver or '—' }}</td>
+        <td><span class="pill pill-{{ d.status | lower }}">{{ d.status }}</span></td>
+        <td><span class="pill pill-{{ d.queue_state }}">{{ d.queue_state }}</span></td>
+        <td>{{ m.dark_days(d.seen_age_hours) }}</td>
+        <td class="dim small">{{ (d.last_checked_at or '')[11:16] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if pages > 1 %}
+<nav class="pager">
+  {% set base = '/devices?' ~ base_query ~ ('&' if base_query else '')
+                ~ 'sort=' ~ sort ~ '&dir=' ~ dir %}
+  {% if page > 1 %}<a href="{{ base }}&page={{ page - 1 }}">&larr; Previous</a>{% endif %}
+  <span>{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="{{ base }}&page={{ page + 1 }}">Next &rarr;</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

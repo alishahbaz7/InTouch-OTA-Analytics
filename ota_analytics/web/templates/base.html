@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OTA Analytics{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">InTouch <span>OTA Analytics</span>
+    <a class="version" href="/api/version" title="Version {{ build.version }} ·
+schema {{ build.schema_version }} · released {{ build.released }} · Python {{ build.python }}"
+    >v{{ build.version }}</a>
+  </div>
+  {# Reachability, Groups and Quality are still served — they are simply not in the nav.
+     Restore any of them by adding a line here. #}
+  <nav>
+    <a href="/{{ qs() }}" class="{{ 'on' if request.url.path == '/' }}">Overview</a>
+    <a href="/changes{{ qs() }}" class="{{ 'on' if request.url.path == '/changes' }}">Changes</a>
+    <a href="/devices{{ qs() }}" class="{{ 'on' if request.url.path == '/devices' }}">Devices</a>
+    <a href="/pending{{ qs() }}" class="{{ 'on' if request.url.path == '/pending' }}">Pending</a>
+    <a href="/firmware{{ qs() }}" class="{{ 'on' if request.url.path == '/firmware' }}">Firmware</a>
+  </nav>
+  <div class="header-right">
+    {# Connection + agent status. Kept in the header so it is answerable at a glance from any
+       page: am I signed in, and when does data next refresh? #}
+    <a class="status-chip status-{{ auth.level }}" href="/update" title="{{ auth.detail }}">
+      <span class="dot"></span>
+      <span class="status-text">{{ auth.label }}</span>
+    </a>
+    <a class="status-chip status-{{ 'ok' if agent.enabled else 'idle' }}" href="/update"
+       id="agent-chip"
+       title="{% if agent.enabled %}Fetching every {{ describe_interval(agent.interval_seconds) }}{% else %}Auto-fetch is off{% endif %}">
+      <span class="dot"></span>
+      <span class="status-text" id="agent-text">
+        {%- if agent.enabled %}Auto {{ describe_interval(agent.interval_seconds) }}
+        {%- else %}Auto off{% endif -%}
+      </span>
+    </a>
+
+    {% if updated_at %}
+    <a class="status-chip status-{{ 'warn' if viewing_history else 'idle' }}"
+       href="/update" title="Data last refreshed {{ updated_at }}">
+      <span class="dot"></span>
+      <span class="status-text">Updated {{ updated_at[11:16] }}
+        <span class="dim">· {{ updated_age }}</span></span>
+    </a>
+    {% endif %}
+    {% if error_summary.last_24h %}
+    <a class="status-chip status-error" href="/errors"
+       title="{{ error_summary.last_24h }} error(s) in the last 24 hours, latest {{ error_summary.latest }}">
+      <span class="dot"></span>
+      <span class="status-text">{{ error_summary.last_24h }} error{{ 's' if error_summary.last_24h != 1 }}</span>
+    </a>
+    {% endif %}
+    <a class="btn-update {{ 'on' if request.url.path.startswith('/update') }}"
+       href="/update">Update data</a>
+  </div>
+</header>
+
+<main>
+  {% if viewing_history %}
+  <div class="notice notice-warn history-bar">
+    Viewing the snapshot from <strong>{{ current.snapshot_at }}</strong>, not the latest data.
+    <a href="{{ request.url.path }}">Back to latest ({{ updated_at[11:16] }}) →</a>
+  </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer>
+  {% if current %}
+    {{ current.row_count | comma }} devices &middot; {{ current.snapshot_at }}
+    &middot; <span class="dim">{{ current.source_file }}</span>
+  {% endif %}
+  {% if not multi_snapshot %}
+    <span class="warn">Single snapshot — trends unlock with a second export.</span>
+  {% endif %}
+  {% if agent.last_run %}
+    <span>Last auto-fetch {{ agent.last_run }} — {{ agent.last_status }}</span>
+  {% endif %}
+  {# The reconciliation line. Two installs report the same numbers if and only if these match,
+     so it is on every page rather than buried on a settings screen. #}
+  <a class="digest" href="/update#share" title="Fleet digest {{ identity.fleet_digest or '—' }}
+{{ identity.snapshots or 0 }} snapshot(s), {{ identity.first_snapshot_at or '—' }} to {{ identity.last_snapshot_at or '—' }}
+Database: {{ identity.db_path }}
+Compare this with a colleague before comparing numbers.">
+    <strong>{{ identity.instance_label }}</strong>
+    · data {{ identity.digest_short }}
+    · {{ identity.snapshots or 0 }} snapshot{{ '' if identity.snapshots == 1 else 's' }}
+  </a>
+  <span class="dim">v{{ build.version }} ({{ build.codename }}) · schema {{ build.schema_version }}
+    · Python {{ build.python }}</span>
+</footer>
+
+<script>
+// Keeps the agent chip honest between page loads: counts down to the next fetch and refreshes
+// when one lands. Plain fetch + DOM, no libraries, so it still works on an offline box.
+(function () {
+  var chip = document.getElementById('agent-chip');
+  var text = document.getElementById('agent-text');
+  if (!chip || !text) return;
+
+  var nextRun = null, enabled = false, lastRunSeen = null;
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+  function tick() {
+    if (!enabled || !nextRun) return;
+    var secs = Math.round((nextRun - Date.now()) / 1000);
+    if (secs <= 0) { text.textContent = 'Fetching…'; return; }
+    var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    text.textContent = 'Next ' + (h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s));
+  }
+
+  function poll() {
+    fetch('/api/agent', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        enabled = d.enabled;
+        chip.className = 'status-chip status-' + (d.last_status === 'error' ? 'error'
+                                                  : d.enabled ? 'ok' : 'idle');
+        if (!d.enabled) { text.textContent = 'Auto off'; nextRun = null; return; }
+        nextRun = d.next_run ? new Date(d.next_run.replace(' ', 'T')).getTime() : null;
+        chip.title = 'Fetching every ' + d.interval_label +
+                     (d.last_message ? ' — last: ' + d.last_message : '');
+        // A completed fetch means the page's numbers are stale. Reload onto the NEW snapshot:
+        // keeping ?snapshot= would pin the view to the old one and show the "not the latest
+        // data" banner after every automatic refresh.
+        if (lastRunSeen && d.last_run && d.last_run !== lastRunSeen && d.last_status === 'ok') {
+          var url = new URL(window.location.href);
+          url.searchParams.delete('snapshot');
+          window.location.replace(url.toString());
+        }
+        lastRunSeen = d.last_run;
+        tick();
+      })
+      .catch(function () { /* server restarting; try again next poll */ });
+  }
+
+  poll();
+  setInterval(poll, 15000);
+  setInterval(tick, 1000);
+})();
+
+// Close any open dropdown when clicking elsewhere — <details> otherwise stays open until it
+// is clicked again, which reads as broken.
+document.addEventListener('click', function (event) {
+  document.querySelectorAll('details.dropdown[open]').forEach(function (node) {
+    if (!node.contains(event.target)) node.removeAttribute('open');
+  });
+});
+</script>
+</body>
+</html>

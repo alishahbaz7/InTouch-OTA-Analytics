@@ -1,0 +1,154 @@
+{# Reusable display components. No JavaScript — bars are CSS widths, gauges are inline SVG. #}
+
+{% macro tile(label, value, sub=None, tone='') %}
+<div class="tile {{ tone }}">
+  <div class="tile-label">{{ label }}</div>
+  <div class="tile-value">{{ value }}</div>
+  {% if sub %}<div class="tile-sub">{{ sub }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{% macro bar(label, value, total, tone='', note='') %}
+{% set pct = (value / total * 100) if total else 0 %}
+<div class="bar-row">
+  <div class="bar-label">{{ label }}</div>
+  <div class="bar-track">
+    <div class="bar-fill {{ tone }}" style="width: {{ '%.2f' % pct }}%"></div>
+  </div>
+  <div class="bar-value">{{ '{:,}'.format(value) }}<span class="muted"> {{ '%.1f' % pct }}%</span></div>
+  {% if note %}<div class="bar-note">{{ note }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{# Proportional stacked bar: segments is a list of (label, value, css-class). #}
+{% macro stack(segments, total) %}
+<div class="stack">
+  {% for label, value, tone in segments %}
+    {% if value %}
+    <div class="stack-seg {{ tone }}" style="width: {{ '%.3f' % (value / total * 100 if total else 0) }}%"
+         title="{{ label }}: {{ '{:,}'.format(value) }}"></div>
+    {% endif %}
+  {% endfor %}
+</div>
+<div class="stack-legend">
+  {% for label, value, tone in segments %}
+  <span class="key"><i class="{{ tone }}"></i>{{ label }} <b>{{ '{:,}'.format(value) }}</b></span>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro ratio(value, total) %}
+  {{ '%.1f' % (value / total * 100 if total else 0) }}%
+{% endmacro %}
+
+{# Donut chart. segments: [{label, value, tone}] — tone is a CSS class. #}
+{% macro donut(title, segments, subtitle='', note='') %}
+{% set total = segments | sum(attribute='value') %}
+{% set circumference = 339.292 %}  {# 2 * pi * 54 #}
+<figure class="donut-fig">
+  <figcaption>{{ title }}{% if subtitle %}<span>{{ subtitle }}</span>{% endif %}</figcaption>
+  <div class="donut-wrap">
+    <svg viewBox="0 0 140 140" class="donut" role="img" aria-label="{{ title }}">
+      <circle class="donut-bg" cx="70" cy="70" r="54"></circle>
+      {% set ns = namespace(offset=0.0) %}
+      {% for s in segments %}
+        {% if s.value and total %}
+          {% set arc = s.value / total * circumference %}
+          <circle class="donut-seg {{ s.tone }}" cx="70" cy="70" r="54"
+                  stroke-dasharray="{{ '%.3f' % arc }} {{ '%.3f' % (circumference - arc) }}"
+                  stroke-dashoffset="{{ '%.3f' % (-ns.offset) }}"
+                  transform="rotate(-90 70 70)">
+            <title>{{ s.label }}: {{ '{:,}'.format(s.value) }}</title>
+          </circle>
+          {% set ns.offset = ns.offset + arc %}
+        {% endif %}
+      {% endfor %}
+      <text x="70" y="68" class="donut-total">{{ '{:,}'.format(total) }}</text>
+      <text x="70" y="84" class="donut-cap">devices</text>
+    </svg>
+    <ul class="donut-legend">
+      {% for s in segments %}
+      <li>
+        <i class="{{ s.tone }}"></i>
+        <span>{{ s.label }}</span>
+        <b>{{ '{:,}'.format(s.value) }}</b>
+        <em>{{ '%.1f' % (s.value / total * 100 if total else 0) }}%</em>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% if note %}<p class="footnote">{{ note }}</p>{% endif %}
+</figure>
+{% endmacro %}
+
+{# Hourly bar chart. series: [{hour, devices, is_current}] #}
+{% macro hour_chart(series, width=980, height=240) %}
+{% set values = series | map(attribute='devices') | list %}
+{% set peak = (values | max) if values else 0 %}
+{% set scale_max = peak if peak > 0 else 1 %}
+{% set pad_l = 52 %}{% set pad_r = 14 %}{% set pad_t = 14 %}{% set pad_b = 34 %}
+{% set plot_w = width - pad_l - pad_r %}
+{% set plot_h = height - pad_t - pad_b %}
+{% set n = series | length %}
+{% set slot = plot_w / (n if n else 1) %}
+<svg viewBox="0 0 {{ width }} {{ height }}" class="svg-chart" role="img"
+     aria-label="Devices by hour last seen">
+  <defs>
+    {# Hatch fill marks a bucket that covers only part of an hour. #}
+    <pattern id="partialHatch" width="6" height="6" patternUnits="userSpaceOnUse"
+             patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="var(--panel-2)"></rect>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="var(--ok)" stroke-width="3"></line>
+    </pattern>
+  </defs>
+  {# horizontal gridlines with value labels #}
+  {% for frac in [0, 0.5, 1] %}
+    {% set y = pad_t + plot_h - (frac * plot_h) %}
+    <line class="grid" x1="{{ pad_l }}" y1="{{ '%.1f' % y }}"
+          x2="{{ width - pad_r }}" y2="{{ '%.1f' % y }}"></line>
+    <text class="axis" x="{{ pad_l - 8 }}" y="{{ '%.1f' % (y + 4) }}" text-anchor="end">
+      {{ '{:,}'.format((scale_max * frac) | round | int) }}
+    </text>
+  {% endfor %}
+
+  {% for p in series %}
+    {% set bar_w = slot * 0.62 %}
+    {% set x = pad_l + (loop.index0 * slot) + (slot - bar_w) / 2 %}
+    {% set h = (p.devices / scale_max) * plot_h %}
+    <rect class="hbar {{ 'current' if p.is_current }} {{ 'partial' if p.partial }}"
+          x="{{ '%.1f' % x }}" y="{{ '%.1f' % (pad_t + plot_h - h) }}"
+          width="{{ '%.1f' % bar_w }}" height="{{ '%.1f' % h }}" rx="2">
+      <title>{{ p.hour }} — {{ '{:,}'.format(p.devices) }} devices{% if p.partial %} (partial hour: only {{ p.minutes }} min elapsed when the export ran){% endif %}</title>
+    </rect>
+    {% if loop.index0 % 3 == 0 or p.is_current %}
+      <text class="axis" x="{{ '%.1f' % (x + bar_w / 2) }}" y="{{ height - 12 }}"
+            text-anchor="middle">{{ p.hour }}</text>
+    {% endif %}
+  {% endfor %}
+
+  <line class="axis-line" x1="{{ pad_l }}" y1="{{ pad_t + plot_h }}"
+        x2="{{ width - pad_r }}" y2="{{ pad_t + plot_h }}"></line>
+</svg>
+{% endmacro %}
+
+{# Age since last seen, in the largest unit that still says something useful.
+   Rounding everything to hours turned "seen 12 minutes ago" into "0h", which reads as zero
+   and hides exactly the devices that just reported. #}
+{% macro dark_days(hours) %}
+  {%- if hours is none -%}
+    <span class="muted">never</span>
+  {%- else -%}
+    {%- set h = hours if hours > 0 else 0 -%}
+    {%- if h < 0.0167 -%}
+      <span class="ok">just now</span>
+    {%- elif h < 1 -%}
+      <span class="ok">{{ '%.0f' % (h * 60) }}m</span>
+    {%- elif h < 24 -%}
+      <span class="ok">{{ '%.0f' % h }}h</span>
+    {%- elif h < 48 -%}
+      1d
+    {%- else -%}
+      {{ '{:,.0f}'.format(h / 24) }}d
+    {%- endif -%}
+  {%- endif -%}
+{% endmacro %}

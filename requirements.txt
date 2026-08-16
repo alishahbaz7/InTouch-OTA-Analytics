@@ -1,0 +1,16 @@
+# InTouch OTA Analytics — runtime dependencies
+# Python 3.12. Install with: python -m pip install -r requirements.txt
+
+openpyxl>=3.1          # xlsx read (streaming) and report write
+fastapi>=0.115         # dashboard + JSON API
+uvicorn>=0.30          # ASGI server
+jinja2>=3.1            # server-rendered templates
+python-multipart>=0.0.9  # form handling and file upload
+httpx>=0.27            # downloading exports from the OTA platform
+keyring>=25            # platform password -> OS credential store, never a file on disk
+
+# Phase 5 (AI insights) — uncomment when that phase starts
+# anthropic>=0.40
+
+# dev
+pytest>=8
