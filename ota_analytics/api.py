@@ -24,7 +24,9 @@ from . import (auth, bundle, config, db, errors, exports, identity, ingest, metr
 
 from . import __version__, build_info      # noqa: E402  (kept beside the app metadata)
 
-WEB = Path(__file__).parent / "web"
+# Templates and static files ship inside the bundle in a packaged build, so they are located
+# the same way schema.sql is rather than relative to this module.
+WEB = config.resource("ota_analytics", "web")
 BUILD = build_info()
 app = FastAPI(title="InTouch OTA Analytics", version=__version__)
 app.mount("/static", StaticFiles(directory=WEB / "static"), name="static")

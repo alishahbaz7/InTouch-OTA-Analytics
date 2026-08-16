@@ -10,7 +10,9 @@ from typing import Iterator
 from . import config, identity, normalize
 
 SCHEMA_VERSION = 7
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+# Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
+# this module — `__file__` there points at a path that does not exist on disk.
+SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
 
 # A whole ingest runs as one transaction — 35k rows, measured at 2.8-10.6s — and it holds the
 # write lock for that entire time. SQLite's default 5s wait therefore expires mid-ingest and

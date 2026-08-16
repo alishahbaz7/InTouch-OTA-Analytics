@@ -3,13 +3,16 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-08-16"
-CODENAME = "digest"
+CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.2.0", "2026-08-16", "Packaged Windows application: portable one-folder build with its "
+                            "data beside the .exe, a windowless twin for auto-start, and the "
+                            "CLI reachable from the executable"),
     ("1.1.0", "2026-08-16", "Fleet digest and database identity on every page and report; "
                             "snapshot bundles so two installs can merge history and prove "
                             "they agree"),

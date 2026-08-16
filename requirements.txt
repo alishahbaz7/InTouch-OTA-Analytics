@@ -14,3 +14,4 @@ keyring>=25            # platform password -> OS credential store, never a file 
 
 # dev
 pytest>=8
+pyinstaller>=6.10       # packaging: python build.py -> dist\InTouchOTA-Analytics-vX.Y.Z-win64.zip

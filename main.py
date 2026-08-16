@@ -27,8 +27,72 @@ import time
 import webbrowser
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))   # so this runs no matter what VS Code sets as the working dir
+FROZEN = bool(getattr(sys, "frozen", False))
+# Where the program lives. Packaged, that is the folder holding the .exe; from source, the
+# folder holding this file. They are not the same thing once the code is bundled.
+ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+if not FROZEN:
+    sys.path.insert(0, str(ROOT))   # runs no matter what VS Code sets as the working dir
+
+def _usable(stream: object) -> bool:
+    """Whether a stream actually leads somewhere a library can write to."""
+    if stream is None:
+        return False
+    try:
+        return int(getattr(stream, "fileno")()) >= 0
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
+def attach_log_when_headless() -> None:
+    """Give the windowless build real output streams, pointed at a log file.
+
+    A windowed executable has no console, so stdout and stderr lead nowhere. That is not merely
+    cosmetic: uvicorn installs a logging handler on `sys.stdout` and cannot start without one,
+    so the windowless build — the one auto-start runs — exited a few seconds after launch,
+    every reboot, with nothing recorded anywhere to say why.
+
+    An unattended process that fails at 3am has to leave something behind, so this is also the
+    only log that copy will ever produce.
+    """
+    if not FROZEN or (_usable(sys.stdout) and _usable(sys.stderr)):
+        return
+
+    log_dir = Path(os.environ.get("OTA_DATA_DIR", ROOT / "data"))
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handle = open(log_dir / "app.log", "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        return                      # read-only folder: carry on silently rather than refuse
+
+    handle.write(f"\n--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    if not _usable(sys.stdout):
+        sys.stdout = handle
+    if not _usable(sys.stderr):
+        sys.stderr = handle
+
+
+def use_utf8_console() -> None:
+    """Windows consoles default to a legacy code page that mangles the dashes this program
+    prints, turning an em dash into a replacement character mid-table."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except (AttributeError, OSError):
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+attach_log_when_headless()
+use_utf8_console()
 
 # Import name -> pip name, for packages this program cannot start without.
 REQUIRED_PACKAGES = {
@@ -46,8 +110,15 @@ def check_dependencies() -> None:
     a different one from the terminal where the packages were installed. When that happens the
     real problem is *which interpreter*, so print it — a bare ImportError sends people looking
     in the wrong place.
+
+    Skipped in a packaged build: the dependencies are inside the executable, so there is no
+    interpreter to have picked wrongly and nothing for `pip install` to fix. A missing module
+    there means the build was made wrong, which is not a message for whoever is running it.
     """
     import importlib.util
+
+    if FROZEN:
+        return
 
     missing = [pip_name for module, pip_name in REQUIRED_PACKAGES.items()
                if importlib.util.find_spec(module) is None]
@@ -97,7 +168,8 @@ def check_exposure(host: str) -> None:
     print("This would publish every IMEI, VIN and ICCID to anyone on the network.\n",
           file=sys.stderr)
     print("Set a password first:\n", file=sys.stderr)
-    print(f'  & "{sys.executable}" -m ota_analytics.cli passwd --role admin', file=sys.stderr)
+    print(f'  & "{sys.executable}" passwd --role admin' if FROZEN else
+          f'  & "{sys.executable}" -m ota_analytics.cli passwd --role admin', file=sys.stderr)
     print(f"\nthen put the printed line in the environment as {auth.ENV_ADMIN_HASH}, or run on\n"
           "127.0.0.1 for local-only use.", file=sys.stderr)
     raise SystemExit(2)
@@ -201,8 +273,9 @@ def start_background(args: argparse.Namespace) -> int:
     log_path = config.DATA_DIR / "agent.log"
     port = find_free_port(args.host, args.port)
 
-    command = [sys.executable, str(ROOT / "main.py"),
-               "--host", args.host, "--port", str(port), "--no-browser"]
+    # Packaged, the program *is* the executable and there is no main.py to hand it.
+    command = ([sys.executable] if FROZEN else [sys.executable, str(ROOT / "main.py")])
+    command += ["--host", args.host, "--port", str(port), "--no-browser"]
     if args.no_ingest:
         command.append("--no-ingest")
 
@@ -312,6 +385,17 @@ def open_browser_when_ready(url: str, host: str, port: int, timeout: float = 90.
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+
+    # `InTouchOTA-Analytics.exe db-export ...` — from source these live behind
+    # `python -m ota_analytics.cli`, which a packaged build has no way to reach. Without this,
+    # sharing a database, setting a password and declaring firmware targets would all be
+    # source-only features.
+    if argv:
+        from ota_analytics.cli import command_names, main as cli_main
+        if argv[0] in command_names():
+            return cli_main(argv)
+
     parser = argparse.ArgumentParser(description="Run the OTA analytics dashboard")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -384,6 +468,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A frozen executable re-runs this file in every child process it spawns. Without this the
+    # child restarts the dashboard instead of doing its job, which forks endlessly.
+    if FROZEN:
+        import multiprocessing
+        multiprocessing.freeze_support()
     raise SystemExit(main())
 
 

@@ -20,6 +20,10 @@ Sample data/*
 deploy/windows/local-env.ps1
 data/secret.key
 
+# build output — 43 MB of binaries, rebuildable with `python build.py`
+build/
+dist/
+
 # python
 __pycache__/
 *.py[cod]

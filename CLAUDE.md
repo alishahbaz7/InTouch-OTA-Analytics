@@ -262,6 +262,45 @@ the UI makes that visible, so it gets argued about instead of checked.
   which SQLite ignores inside a transaction. Re-running the same bundle finishes an interrupted
   merge instead of reporting success over a half-merged database.
 
+## The packaged build (`build.py`, `InTouchOTA-Analytics.spec`)
+
+`python build.py` produces `dist\InTouchOTA-Analytics\` plus a zip to hand over. Everything
+here exists because a frozen build breaks assumptions that are invisible from source.
+
+- **Two roots, and conflating them is the whole problem.** `config.ROOT` is where the program
+  *writes* (the folder holding the .exe); `config.resource()` is where it *reads* its own files
+  from (inside the bundle, read-only). Running from source they are the same directory, which
+  is exactly why the difference is easy to miss. Deriving `data/` from `__file__` put the
+  database inside PyInstaller's extraction folder — **every launch would have started from an
+  empty database.** `schema.sql` and `web/` go through `resource()`; nothing else may.
+- **Two executables, mirroring `python.exe` / `pythonw.exe`.** `InTouchOTA-Analytics.exe` has a
+  console for interactive use and the CLI; `InTouchOTA-Analytics-silent.exe` has none and is
+  what auto-start runs. A single console build leaves a terminal window open after every
+  reboot; a single windowed build swallows every message, including the refusal to serve the
+  fleet unprotected.
+- **A windowless build has no usable stdout, and uvicorn will not start without one.** It
+  installs a logging handler on `sys.stdout`, so the silent exe exited a few seconds after
+  launch, every reboot, recording nothing. `main.attach_log_when_headless()` points both
+  streams at `data\app.log` — which is also the only log that copy will ever produce.
+- **Auto-start builds one argv, not `(interpreter, script)`.** A packaged build has no
+  `main.py`; the program *is* the executable. `startup.launch_command()` is the single source
+  for the Startup-folder entry, the scheduled task and "Test it", so they cannot drift apart.
+  Paths are quoted **unconditionally** — whoever unpacks the app chooses where it lives, and an
+  unquoted `C:\Program Files\...` breaks at boot with nobody watching.
+- **Portable data means the folder gets moved, and the auto-start entry does not follow it.**
+  `startup.status()` reads back the program the armed mechanism actually runs and warns when it
+  is not this one. Without that, moving the folder silently stops collection.
+- **The CLI must be reachable from the .exe.** `main.main()` delegates to `ota_analytics.cli`
+  when argv[0] is a known subcommand, derived from the parser via `cli.command_names()` so a
+  new command cannot be left unreachable. Otherwise `db-export`, `db-import` and `passwd` would
+  be source-only.
+- **Hidden imports are not optional.** `uvicorn.loops.*`, `uvicorn.protocols.*` and
+  `keyring.backends.Windows` are imported by name at runtime, so analysis cannot see them. Left
+  out, the build succeeds and then fails when run — and a missing keyring backend would put the
+  platform password in a file instead of the credential store.
+- One-folder, not one-file: one-file unpacks to a temp directory on every launch, and a single
+  large unsigned binary is what antivirus quarantines hardest. UPX is off for the same reason.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

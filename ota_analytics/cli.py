@@ -492,6 +492,17 @@ def cmd_passwd(args) -> int:
     return 0
 
 
+def command_names() -> set[str]:
+    """Every subcommand this CLI accepts.
+
+    Derived from the parser rather than listed again, so a command added above is reachable
+    from the packaged executable without anyone remembering to update a second copy.
+    """
+    return {name for action in build_parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+            for name in action.choices}
+
+
 def main(argv: list[str] | None = None) -> int:
     config.ensure_dirs()
     args = build_parser().parse_args(argv)

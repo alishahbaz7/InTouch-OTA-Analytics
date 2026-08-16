@@ -38,7 +38,7 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 392 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 408 tests
 ```
 
 ## How the data works
@@ -98,6 +98,33 @@ the **Update data** page under *Share this data*.
 Importing snapshots dated *inside* history you already hold is refused unless you ask for it:
 inserting a fetch into the middle of a timeline changes what every unchanged device appears to
 have been doing. `--allow-interleave` does it properly, but rebuilds everything and takes minutes.
+
+## Building the application
+
+```powershell
+.\.venv\Scripts\python.exe build.py
+```
+
+Produces `dist\InTouchOTA-Analytics-v1.2.0-win64.zip` (~27 MB). The recipient unpacks it
+anywhere and runs `InTouchOTA-Analytics.exe` — no Python, no install.
+
+**The app is portable: its database lives in a `data` folder beside the .exe.** Copy the folder
+to move or back up the history; delete it and you start empty. `OTA_DATA_DIR` still overrides.
+
+The zip contains two executables, the same way Python ships `python.exe` and `pythonw.exe`:
+
+| | |
+|---|---|
+| `InTouchOTA-Analytics.exe` | console — interactive use and the CLI, prints its log |
+| `InTouchOTA-Analytics-silent.exe` | no window — what **Start with Windows** runs after a reboot |
+
+The CLI is the same executable: `InTouchOTA-Analytics.exe db-info`, `... db-export --out
+share.otabundle`, `... passwd --role admin`.
+
+Auto-start is set from the Update Data page and works in the packaged build. Because the app is
+portable, moving the folder afterwards leaves the entry pointing at the old location — the page
+detects that and tells you to switch it off and on again. The windowless copy has no console,
+so it writes to `data\app.log`; that is where to look if a scheduled start fails.
 
 ## Hosting it
 

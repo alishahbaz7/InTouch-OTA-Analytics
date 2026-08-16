@@ -25,9 +25,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config
+
 ENTRY_NAME = "InTouch OTA Analytics.vbs"
 DEFAULT_DELAY_MINUTES = 30
 MIN_DELAY, MAX_DELAY = 0, 240
+
+# The windowless twin of the packaged executable, the same way pythonw.exe is python.exe's.
+# Auto-start uses it so a reboot does not leave a console window sitting on the desktop.
+SILENT_EXE = "InTouchOTA-Analytics-silent.exe"
 
 
 def startup_dir() -> Path:
@@ -42,11 +48,38 @@ def entry_path() -> Path:
     return startup_dir() / ENTRY_NAME
 
 
-def _launcher() -> tuple[Path, Path]:
-    """(interpreter, script). pythonw runs without a console window."""
-    root = Path(__file__).resolve().parent.parent
+def launch_command() -> list[str]:
+    """The exact argv that starts the dashboard with no window — packaged or from source.
+
+    Returned as argv rather than as (interpreter, script), because a packaged build has no
+    script: the program *is* the executable, and `sys.executable` stops being an interpreter.
+    Every mechanism below quotes this one list, so the two cases cannot drift apart and leave
+    auto-start registered against a command that does not exist.
+    """
+    if config.is_frozen():
+        exe = Path(sys.executable).resolve()
+        silent = exe.with_name(SILENT_EXE)
+        return [str(silent if silent.exists() else exe), "--no-browser"]
+
     windowless = Path(sys.executable).with_name("pythonw.exe")
-    return (windowless if windowless.exists() else Path(sys.executable)), root / "main.py"
+    interpreter = windowless if windowless.exists() else Path(sys.executable)
+    return [str(interpreter), str(config.ROOT / "main.py"), "--no-browser"]
+
+
+def _quote(parts: list[str]) -> str:
+    """Join argv into one command line, quoting every path unconditionally.
+
+    Not only when a space is present: the path is chosen by whoever unpacks the app, and
+    `C:\\Program Files\\...` or a folder with an `&` in it would otherwise be split by the
+    shell into a command that does not exist. Quoting a path that did not need it costs
+    nothing; missing one breaks auto-start silently, on a machine nobody is watching.
+    """
+    return " ".join(part if part.startswith("-") else f'"{part}"' for part in parts)
+
+
+def launch_target() -> str:
+    """The program auto-start would run. Compared against what is armed, to catch a moved app."""
+    return launch_command()[0]
 
 
 def is_supported() -> bool:
@@ -62,9 +95,9 @@ def clamp_delay(minutes) -> int:
 
 
 def _script(delay_minutes: int) -> str:
-    interpreter, script = _launcher()
-    # Quotes are doubled for VBScript string literals; both paths contain spaces on this machine.
-    command = f'""{interpreter}"" ""{script}"" --no-browser'
+    # Quotes are doubled because the whole command sits inside a VBScript string literal, and
+    # the paths contain spaces both from source ("InTouchOTA analytics") and packaged.
+    command = _quote(launch_command()).replace('"', '""')
     return (
         "' Created by InTouch OTA Analytics. Delete this file, or use the toggle on the\n"
         "' Update Data page, to stop the dashboard starting with Windows.\n"
@@ -100,8 +133,7 @@ def create_task(delay_minutes: int) -> bool:
     """
     if not is_supported():
         return False
-    interpreter, script = _launcher()
-    command = f'"{interpreter}" "{script}" --no-browser'
+    command = _quote(launch_command())
     delay = f"{min(delay_minutes, 9999):04d}:00"
     code, _ = _run(["schtasks", "/Create", "/TN", TASK_NAME, "/TR", command,
                     "/SC", "ONSTART", "/DELAY", delay, "/F"])
@@ -147,6 +179,63 @@ def _environment_warning() -> str:
             "password. See docs/DEPLOY.md.")
 
 
+def _first_quoted(text: str) -> str:
+    """The first quoted token of a command line — the program it runs."""
+    if '"' in text:
+        parts = text.split('"')
+        return parts[1] if len(parts) > 1 else ""
+    return text.strip().split(" ")[0]
+
+
+def _armed_target(mechanism: str) -> str:
+    """Which program the currently-armed mechanism actually runs.
+
+    Read back rather than assumed, because the app is portable: the folder can be moved or
+    copied after auto-start was switched on, and the entry keeps pointing at where it used to
+    be. Nothing fails loudly when that happens — the machine simply stops collecting.
+    """
+    try:
+        if mechanism == "scheduled-task":
+            code, out = _run(["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"])
+            if code != 0:
+                return ""
+            for line in out.splitlines():
+                if line.strip().lower().startswith("task to run:"):
+                    return _first_quoted(line.split(":", 1)[1].strip())
+            return ""
+
+        for line in entry_path().read_text(encoding="utf-8").splitlines():
+            if ".Run " in line:
+                # `.Run "<command>", 0, False`, where <command> has its quotes doubled because
+                # it sits inside a VBScript string literal. Peel the literal, then un-double.
+                inner = line.split(".Run ", 1)[1].rsplit(", 0,", 1)[0].strip()
+                if inner.startswith('"') and inner.endswith('"'):
+                    inner = inner[1:-1]
+                return _first_quoted(inner.replace('""', '"'))
+    except (OSError, IndexError, ValueError):
+        return ""
+    return ""
+
+
+def _relocation_warning(mechanism: str) -> str:
+    armed = _armed_target(mechanism)
+    if not armed:
+        return ""
+    current = launch_target()
+    if os.path.normcase(os.path.abspath(armed)) == os.path.normcase(os.path.abspath(current)):
+        return ""
+    if not Path(armed).exists():
+        return (f"Auto-start still points at {armed}, which is no longer there — the app has "
+                f"been moved or renamed, so it will not start. Switch it off and on again to "
+                f"re-point it at this copy.")
+    return (f"Auto-start runs a different copy of the app ({armed}), which has its own "
+            f"database. Switch it off and on again to make this copy the one that starts.")
+
+
+def _warnings(mechanism: str) -> str:
+    return " ".join(w for w in (_relocation_warning(mechanism), _environment_warning()) if w)
+
+
 def status() -> StartupState:
     if not is_supported():
         return StartupState(supported=False, enabled=False, mechanism="none",
@@ -163,7 +252,7 @@ def status() -> StartupState:
                 break
         return StartupState(
             supported=True, enabled=True, delay_minutes=delay, mechanism="scheduled-task",
-            starts_at_boot=True, path=TASK_NAME, warning=_environment_warning(),
+            starts_at_boot=True, path=TASK_NAME, warning=_warnings("scheduled-task"),
             detail=f"Starts with Windows via a scheduled task, {delay} minutes after boot.")
 
     path = entry_path()
@@ -182,7 +271,7 @@ def status() -> StartupState:
 
     return StartupState(
         supported=True, enabled=True, delay_minutes=delay, path=str(path),
-        mechanism="startup-folder", starts_at_boot=False, warning=_environment_warning(),
+        mechanism="startup-folder", starts_at_boot=False, warning=_warnings("startup-folder"),
         detail=(f"Starts {delay} minutes after you sign in to Windows."
                 if delay else "Starts as soon as you sign in to Windows."))
 
@@ -217,12 +306,11 @@ def run_now() -> bool:
     """Launch exactly what the startup entry launches, without waiting. Used to prove it works."""
     if not is_supported():
         return False
-    interpreter, script = _launcher()
     try:
-        subprocess.Popen([str(interpreter), str(script), "--no-browser"],
+        subprocess.Popen(launch_command(),
                          creationflags=subprocess.DETACHED_PROCESS
                          | subprocess.CREATE_NEW_PROCESS_GROUP,
-                         cwd=str(script.parent), close_fds=True)
+                         cwd=str(config.ROOT), close_fds=True)
         return True
     except OSError:
         return False
