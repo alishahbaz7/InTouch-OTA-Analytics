@@ -8,6 +8,7 @@ that no longer exists on disk.
 
 from __future__ import annotations
 
+import html
 import importlib
 import sys
 from pathlib import Path
@@ -159,6 +160,54 @@ def test_a_moved_app_is_reported_rather_than_silently_dead(monkeypatch, tmp_path
     warning = startup.status().warning
     assert warning
     assert "moved" in warning.lower() or "different copy" in warning.lower()
+
+
+# ─── what the first screen tells someone to do ──────────────────────────────
+
+def test_the_setup_hint_names_the_executable_when_packaged(frozen):
+    """The empty dashboard is the first thing a new install shows.
+
+    Telling someone to run `python -m ota_analytics.cli` in a build that has no Python sends
+    them off to install one to fix a problem they do not have.
+    """
+    importlib.reload(config)
+    hint = config.command_hint("ingest-dir", str(config.EXPORT_DIR))
+    assert hint.startswith("InTouchOTA-Analytics.exe")
+    assert "python" not in hint
+    assert "ota_analytics.cli" not in hint
+
+
+def test_the_setup_hint_uses_python_from_source():
+    hint = config.command_hint("ingest-dir", "Sample data")
+    assert hint == 'python -m ota_analytics.cli ingest-dir "Sample data"'
+
+
+def test_the_empty_dashboard_offers_the_right_command(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import db, scheduler, sources
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "empty.db")
+    monkeypatch.setattr(config, "EXPORT_DIR", tmp_path / "Sample data")
+    monkeypatch.setattr(scheduler, "STATE_PATH", tmp_path / "scheduler.json")
+    monkeypatch.setattr(sources, "SETTINGS_PATH", tmp_path / "connection.json")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    db.connect()
+
+    from ota_analytics import api
+    response = TestClient(api.app, raise_server_exceptions=False).get("/")
+
+    assert response.status_code == 200
+    assert "No data yet" in response.text
+    assert "Something went wrong" not in response.text
+    # It points at the page that actually does the work, not only at a shell command.
+    assert 'href="/update"' in response.text
+    # Unescaped, because the quotes around a path with spaces are rendered as entities — which
+    # is the template doing the right thing, not the command being wrong.
+    rendered = html.unescape(response.text)
+    assert config.command_hint("ingest-dir", str(config.EXPORT_DIR)) in rendered
 
 
 # ─── the CLI, reachable from the executable ─────────────────────────────────

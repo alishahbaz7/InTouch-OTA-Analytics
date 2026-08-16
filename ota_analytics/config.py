@@ -39,6 +39,16 @@ def _app_root() -> Path:
 ROOT = _app_root()
 
 
+def command_hint(*args: str) -> str:
+    """How to run this program from a terminal, spelled the way the reader would type it.
+
+    Packaged, `python -m ota_analytics.cli` does not exist and printing it sends someone to
+    install Python to fix a problem they do not have. The executable is the CLI.
+    """
+    prefix = [Path(sys.executable).name] if is_frozen() else ["python", "-m", "ota_analytics.cli"]
+    return " ".join(f'"{part}"' if " " in part else part for part in (*prefix, *args))
+
+
 def resource(*parts: str) -> Path:
     """Locate a file shipped *with* the program: schema.sql, the templates, the stylesheet.
 

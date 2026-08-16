@@ -40,10 +40,42 @@ def check_pyinstaller() -> None:
         raise SystemExit(1)
 
 
+def clear(folder: Path) -> None:
+    """Remove a previous build, refusing rather than half-removing it.
+
+    `ignore_errors=True` is the wrong choice here and cost a real debugging session: a copy of
+    the app running out of `dist\\` holds its own files open, so the delete removed some of them
+    and skipped the rest. PyInstaller then rebuilt over the wreckage, and the app started but
+    failed on the first page whose template had been deleted — a TemplateNotFound from a folder
+    that plainly existed.
+
+    A build that cannot start clean must say so instead.
+    """
+    if not folder.exists():
+        return
+    try:
+        shutil.rmtree(folder)
+    except (PermissionError, OSError) as exc:
+        locked = getattr(exc, "filename", "") or folder
+        print(f"Cannot clear {folder}\n", file=sys.stderr)
+        print(f"  something is holding {locked}\n", file=sys.stderr)
+        print("A copy of the app is almost certainly still running. Close it — or:\n",
+              file=sys.stderr)
+        print('  Get-Process -Name "InTouchOTA*" | Stop-Process -Force\n', file=sys.stderr)
+        raise SystemExit(1)
+
+
 def build() -> None:
     check_pyinstaller()
+
+    # Anyone testing from dist\ has a database in there, and it is about to be deleted.
+    stale_db = DIST / "data"
+    if stale_db.exists():
+        print(f"Note: removing the test database in {stale_db}")
+        print("      (a real install keeps its data beside its own copy of the .exe)\n")
+
     for stale in (ROOT / "build", ROOT / "dist"):
-        shutil.rmtree(stale, ignore_errors=True)
+        clear(stale)
 
     print(f"Building {NAME} v{version()} with {sys.executable}\n")
     result = subprocess.run(

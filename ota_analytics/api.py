@@ -188,6 +188,11 @@ def page_context(conn: sqlite3.Connection, request: Request, snapshot: int | Non
         # On every page, because "are we even looking at the same data?" is the first question
         # whenever two people compare numbers, and it is not answerable from anything else here.
         "identity": identity.manifest(conn),
+        # Spelled for however this copy is running: a packaged build has no
+        # `python -m ota_analytics.cli` to offer, and saying otherwise sends someone to install
+        # Python to fix a problem they do not have.
+        "export_dir": str(config.EXPORT_DIR),
+        "ingest_command": config.command_hint("ingest-dir", str(config.EXPORT_DIR)),
         "error_summary": errors.summary(conn),
         "auth": scheduler.auth_status(),
         "agent": scheduler.get_scheduler().state,

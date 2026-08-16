@@ -1,14 +1,45 @@
 {% extends "base.html" %}
-{% block title %}OTA Analytics{% endblock %}
+{% block title %}Get started — OTA Analytics{% endblock %}
 
 {% block content %}
 <h1>No data yet</h1>
+
+{# The first screen anyone sees on a fresh install, so it has to say what to do rather than
+   what is missing. The terminal command is last, not first: most people here have just opened
+   the app and want a button. #}
 <section class="card">
-  <p>Ingest a platform export to get started:</p>
-  <pre>python -m ota_analytics.cli ingest-dir "Sample data"</pre>
+  <p class="lede">Nothing has been loaded yet, so there is nothing to analyse. Two ways to
+    start, both on the <a href="/update">Update data</a> page:</p>
+
+  <ol class="getting-started">
+    <li>
+      <strong>Pull it from the platform.</strong> Sign in once and it fetches the fleet
+      directly — then keeps itself up to date on a schedule.
+    </li>
+    <li>
+      <strong>Upload an export.</strong> Any <code>.xlsx</code> the platform produces. Keep the
+      platform's filename: the snapshot date is read from it, not from a column.
+    </li>
+  </ol>
+
+  <p><a class="btn-update" href="/update">Update data →</a></p>
+
   <p class="footnote">
-    Ingest is idempotent — re-running it on the same file changes nothing, so a folder can be
-    re-scanned safely as new exports arrive.
+    You can also drop exports into <code>{{ export_dir }}</code> and restart, or load them from
+    a terminal with <code>{{ ingest_command }}</code>. Ingest is idempotent — re-running it on
+    the same file changes nothing, so the folder can be re-scanned safely as new exports arrive.
+  </p>
+</section>
+
+<section class="card">
+  <h2>What you get from one export, and what needs two</h2>
+  <p>A single export is a point-in-time inventory: how many devices are online, which firmware
+    they run, and — the number worth acting on — how many are <em>reachable but not
+    updating</em>.</p>
+  <p class="footnote">
+    Movement (upgrades, rollbacks, devices falling back to their base firmware) comes from
+    comparing snapshots, so it appears once a second export is loaded. Nothing needs to be
+    configured for that; it unlocks on its own.
   </p>
 </section>
 {% endblock %}
