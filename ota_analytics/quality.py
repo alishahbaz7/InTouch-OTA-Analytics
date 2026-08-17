@@ -61,6 +61,37 @@ def run_rules(
             "Export contains columns this build does not map. They were ignored.",
         ))
 
+    # Control characters in an identifier. Found in the real export: 128 devices whose ICCID is
+    # a valid number followed by a backspace and stray bytes, and one whose CONFIGURATION has the
+    # same shape. Worth a rule of its own rather than a silent clean-up on the way out: an ICCID
+    # is what someone uses to chase a SIM with the operator, and a mangled one sends them to the
+    # wrong place. It also made .xlsx downloads fail outright, since a spreadsheet may not
+    # contain these characters at all.
+    #
+    # GLOB rather than a regex: it is built into SQLite, needs no extension, and '*[...]*'
+    # matches a character class. The class is every character a spreadsheet forbids, not just the
+    # backspace actually seen, so a different stray byte next month is caught too.
+    for column, label in (("iccid", "ICCID"), ("configuration", "CONFIGURATION"),
+                          ("vin", "VIN"), ("device_name", "Device Name")):
+        match = (f"{column} GLOB '*[' || char("
+                 f"{','.join(str(c) for c in [*range(1, 9), 11, 12, *range(14, 32)])}"
+                 f") || ']*'")
+        n = _scalar(conn, f"""
+            SELECT COUNT(*) FROM device_state
+            WHERE snapshot_id = ? AND {column} IS NOT NULL AND {match}
+        """, sid)
+        if not n:
+            continue
+        findings.append((
+            f"control_characters_in_{column}", "high", n,
+            _sample(conn, f"""
+                SELECT imei FROM device_state WHERE snapshot_id = ? AND {match}
+            """, sid),
+            f"{label} contains control characters, so the value is corrupt at source. The "
+            f"stored value is kept exactly as received; downloads strip them so the file stays "
+            f"readable.",
+        ))
+
     # Model spelling variants: raw differs from canonical.
     n = _scalar(conn, """
         SELECT COUNT(*) FROM device_state

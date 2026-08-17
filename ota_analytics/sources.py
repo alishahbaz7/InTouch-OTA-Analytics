@@ -312,6 +312,20 @@ def _validate_xlsx(content: bytes, source: str, *, from_url: bool = False) -> No
             f"{source} is a web page, not a spreadsheet. This usually means a login page was "
             "saved instead of the export — download the file again from the platform.")
 
+    # A report this dashboard produced, being offered back as a source. Easy mistake — the
+    # filenames look similar (devices_17Aug26_1029.csv against Devices_35477_15Aug26_1511.xlsx) —
+    # and worth naming precisely, because the answer is not "convert it to .xlsx". A report is a
+    # filtered view with renamed headings and no snapshot time; re-ingesting one would invent a
+    # snapshot that never happened.
+    if not from_url and "imei," in head[:200] and (
+            "previous firmware" in head or "task state" in head or "hours since seen" in head):
+        raise SourceError(
+            f"{source} is a report this dashboard produced, not a platform export. Reports are "
+            "for reading, not for loading back in: they hold a filtered view with renamed "
+            "columns and no snapshot time. To bring in a colleague's data, either upload the "
+            ".xlsx they exported from the platform, or — for their whole accumulated history — "
+            "have them use 'Download bundle' under Share this data and import that file here.")
+
     hint = ("Check that the URL is the export endpoint." if from_url
             else "Export it again from the platform as .xlsx.")
     raise SourceError(f"{source} is not an .xlsx file (it starts with {content[:8]!r}). {hint}")

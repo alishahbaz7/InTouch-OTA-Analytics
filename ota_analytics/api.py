@@ -899,7 +899,9 @@ async def update_bundle_import(request: Request, file: UploadFile = File(...),
     try:
         outcome = bundle.import_bundle(conn, await file.read(),
                                        allow_interleave=allow_interleave)
-        level = {"imported": "ok", "already_present": "warn",
+        # "Already loaded" is a correct answer, not a problem: showing it as a warning made a
+        # successful no-op read as a failure.
+        level = {"imported": "ok", "already_present": "ok",
                  "refused": "warn", "empty": "warn"}.get(outcome.status, "warn")
         result = {"level": level, "message": outcome.message}
     except bundle.BundleError as exc:

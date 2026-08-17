@@ -60,10 +60,22 @@ def resource(*parts: str) -> Path:
     return root.joinpath(*parts)
 
 
-DATA_DIR = Path(os.environ.get("OTA_DATA_DIR", ROOT / "data"))
-DB_PATH = Path(os.environ.get("OTA_DB_PATH", DATA_DIR / "ota_analytics.db"))
-EXPORT_DIR = Path(os.environ.get("OTA_EXPORT_DIR", ROOT / "Sample data"))
-REPORT_DIR = Path(os.environ.get("OTA_REPORT_DIR", ROOT / "reports"))
+def _path_from_env(name: str, default: Path) -> Path:
+    """Read a path override, treating a blank value as unset.
+
+    `OTA_DATA_DIR=` in a unit file or a shell is a misconfiguration, not a request to write to
+    the current working directory — which is where `Path("")` resolves, silently creating a
+    second empty database somewhere nobody will look for it. Same rule as
+    OTA_PLATFORM_PASSWORD: blank counts as absent.
+    """
+    value = (os.environ.get(name) or "").strip()
+    return Path(value) if value else default
+
+
+DATA_DIR = _path_from_env("OTA_DATA_DIR", ROOT / "data")
+DB_PATH = _path_from_env("OTA_DB_PATH", DATA_DIR / "ota_analytics.db")
+EXPORT_DIR = _path_from_env("OTA_EXPORT_DIR", ROOT / "Sample data")
+REPORT_DIR = _path_from_env("OTA_REPORT_DIR", ROOT / "reports")
 
 # Ingest tuning
 BATCH_SIZE = 5_000

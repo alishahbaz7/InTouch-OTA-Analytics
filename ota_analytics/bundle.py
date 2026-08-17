@@ -90,6 +90,10 @@ class ImportResult:
     compacted: int = 0
     digest_before: str = ""
     digest_after: str = ""
+    # The bundle came from this very database. Worth separating from "nothing new to merge":
+    # re-importing your own export is a no-op for a different reason, and the reason is the
+    # useful part — merging needs a file from a *different* install.
+    same_database: bool = False
 
 
 # ─── export ─────────────────────────────────────────────────────────────────
@@ -485,7 +489,13 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
     held = {r["file_sha256"] for r in conn.execute("SELECT file_sha256 FROM snapshot")}
     new = [s for s in incoming if s["sha"] not in held]
 
-    source_label = (data.get("source") or {}).get("instance_label") or "another install"
+    # Not named `source`: that is this function's parameter, and shadowing it here handed the
+    # manifest's dict to _open() further down.
+    origin = data.get("source") or {}
+    source_label = origin.get("instance_label") or "another install"
+    source_id = origin.get("db_id") or ""
+    same_database = bool(source_id and source_id == identity.get(conn, identity.DB_ID))
+
     if not new:
         # An import is not atomic end to end: renumbering has to toggle PRAGMA foreign_keys,
         # which SQLite ignores inside a transaction, so it commits on its own. If a previous
@@ -501,11 +511,23 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
                 message="Every snapshot in this bundle was already loaded, but the database "
                         "was left mid-merge by an earlier run. Finished it: snapshots "
                         f"reordered and {repaired['compacted']:,} redundant rows removed.")
+        if same_database:
+            message = (
+                f"Nothing to merge: this bundle was exported from this same database "
+                f"(“{source_label}”, id {source_id[:8]}), so all "
+                f"{len(incoming)} of its snapshots are already here. That is the expected "
+                f"result, not a failure. Merging combines history from a *different* install — "
+                f"have a colleague run the export on their machine and import that file here.")
+        else:
+            message = (
+                f"Nothing to merge: all {len(incoming)} snapshot(s) from “{source_label}” "
+                f"are already loaded, so the two installs already hold the same data and will "
+                f"report the same numbers. Fleet digest {identity.short(digest_before)} on both "
+                f"sides.")
         return ImportResult(
             status="already_present", manifest=data, snapshots_in_bundle=len(incoming),
             digest_before=digest_before, digest_after=digest_before,
-            message=f"All {len(incoming)} snapshot(s) in this bundle are already loaded. "
-                    f"Nothing changed — this database and {source_label} already agree.")
+            same_database=same_database, message=message)
 
     bundle_start = min(s["snapshot_at"] for s in new)
     local_latest = conn.execute(
@@ -629,4 +651,4 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
         status="imported", message=message, manifest=data,
         snapshots_in_bundle=len(incoming), snapshots_new=len(new), device_rows=written,
         interleaved=interleaved, renumbered=renumbered, compacted=compacted,
-        digest_before=digest_before, digest_after=digest_after)
+        digest_before=digest_before, digest_after=digest_after, same_database=same_database)

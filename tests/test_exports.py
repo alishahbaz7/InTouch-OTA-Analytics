@@ -21,6 +21,47 @@ def rows_from_csv(body: str) -> list[dict]:
     return list(csv.DictReader(io.StringIO(body.lstrip("﻿"))))
 
 
+# ─── characters a spreadsheet refuses ───────────────────────────────────────
+
+# Exactly the shape found in the real export: 128 devices carry an ICCID that is a valid number
+# followed by a backspace and stray bytes. openpyxl raises IllegalCharacterError rather than
+# writing it, so one bad cell failed the whole download with a 500 — and only the .xlsx option,
+# which is why it looked like that format was broken rather than the data.
+CORRUPT_ICCID = "8991922406995209166F\x08\x08Áá"
+
+
+def test_xlsx_survives_a_control_character_in_the_data():
+    payload = exports.to_xlsx([{"imei": "111", "iccid": CORRUPT_ICCID}],
+                              [("imei", "IMEI"), ("iccid", "ICCID")])
+    assert payload[:4] == b"PK\x03\x04"
+
+    from openpyxl import load_workbook
+    sheet = load_workbook(io.BytesIO(payload), read_only=True).active
+    values = [list(row) for row in sheet.iter_rows(values_only=True)]
+    # The number survives; only the illegal bytes are dropped.
+    assert values[1][1] == "8991922406995209166FÁá"
+
+
+def test_csv_strips_them_too():
+    """A raw backspace in a CSV is just as broken — it fails later, in whatever opens it."""
+    body = exports.to_csv([{"imei": "111", "iccid": CORRUPT_ICCID}],
+                          [("imei", "IMEI"), ("iccid", "ICCID")])
+    assert "\x08" not in body
+    assert "8991922406995209166F" in body
+
+
+def test_legal_whitespace_is_left_alone():
+    """Tab, newline and carriage return are valid in both formats and carry meaning."""
+    assert exports._clean("a\tb\nc\rd") == "a\tb\nc\rd"
+
+
+def test_the_whole_device_export_survives_corrupt_data(client):  # noqa: F811
+    """End to end through the route, because the failure was a 500 on the real fleet."""
+    response = client.get("/devices/export?format=xlsx")
+    assert response.status_code == 200
+    assert response.content[:4] == b"PK\x03\x04"
+
+
 # ─── formatting ─────────────────────────────────────────────────────────────
 
 def test_csv_has_a_header_and_one_row_per_device():

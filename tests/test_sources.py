@@ -10,6 +10,33 @@ from ota_analytics import config, normalize, sources
 from tests.conftest import HEADERS, device
 
 
+def test_a_dashboard_report_is_named_as_such_not_just_rejected():
+    """The commonest wrong upload: a report this dashboard produced, offered back as a source.
+
+    The filenames look alike — devices_17Aug26_1029.csv against
+    Devices_35477_15Aug26_1511.xlsx — and the useful answer is not "save it as .xlsx". A report
+    is a filtered view with renamed headings and no snapshot time; re-ingesting one would invent
+    a snapshot that never happened.
+    """
+    report = ("﻿IMEI,Model,Firmware,Fallback,Previous firmware,Target firmware,"
+              "Configuration,Hardware,Status,Task state,Pending tasks,Last seen,"
+              "Hours since seen,Last checked,Groups,VIN,ICCID\n"
+              "111,LOCAT140VB,7.5.0.51A,,,,2.2.2,1.2.0,Online,completed,0,,,,,,\n")
+
+    with pytest.raises(sources.SourceError) as raised:
+        sources.store_upload("devices_17Aug26_1029.csv", report.encode("utf-8"))
+
+    message = str(raised.value)
+    assert "report this dashboard produced" in message
+    assert "bundle" in message.lower()       # points at the thing that does work
+
+
+def test_a_plain_csv_still_gets_the_ordinary_message():
+    """Only our own reports get the special explanation; anything else keeps the generic one."""
+    with pytest.raises(sources.SourceError, match="not an .xlsx"):
+        sources.store_upload("something.csv", b"a,b,c\n1,2,3\n")
+
+
 @pytest.fixture(autouse=True)
 def isolate_export_dir(tmp_path, monkeypatch):
     """Never write test files into the real export folder."""

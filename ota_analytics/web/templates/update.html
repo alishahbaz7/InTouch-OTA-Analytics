@@ -222,7 +222,10 @@
       <label class="dropzone">
         <input type="file" name="file" accept=".xlsx" required>
         <span class="dropzone-text">Choose an export file</span>
-        <small>Keep the platform's filename — the snapshot date is read from it.</small>
+        <small>The platform's own <code>.xlsx</code>, from you or a colleague — keep its
+          filename, the snapshot date is read from it. Not a report downloaded from this
+          dashboard: for a colleague's accumulated history use
+          <a href="#share">Share this data</a> instead.</small>
       </label>
       <div class="form-actions"><button type="submit">Upload &amp; load</button></div>
     </form>
@@ -312,9 +315,10 @@
     <label class="dropzone">
       <input type="file" name="file" accept=".otabundle,.zip" required>
       <span class="dropzone-text">Import a colleague's bundle</span>
-      <small>Snapshots already loaded here are skipped, so importing twice changes nothing.
-        Catching up on a few fetches takes seconds; a first import of months of history can
-        take several minutes and the page will wait for it.</small>
+      <small><strong>It has to come from a different install.</strong> Importing a bundle you
+        exported here does nothing — every snapshot in it is already loaded, which is why it
+        reports "nothing to merge". Catching up on a few fetches takes seconds; a first import
+        of months of history can take a few minutes and the page will wait for it.</small>
     </label>
     <label class="inline">
       <input type="checkbox" name="allow_interleave" value="true">

@@ -15,7 +15,20 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import datetime
+
+# Characters a .xlsx file may not contain. openpyxl refuses the whole workbook rather than
+# writing them, so one bad cell failed the entire download with a 500 while CSV was unaffected —
+# which is why the spreadsheet option looked broken and the others did not.
+#
+# This is real data, not a hypothetical: the platform export carries 128 devices whose ICCID has
+# an embedded backspace followed by stray bytes ('8991922406995209166F\x08\x08Áá'), and one
+# device whose CONFIGURATION has the same shape. Tab, newline and carriage return are legal and
+# deliberately left alone. The database keeps the original; only the file being written is
+# cleaned, and quality.py reports the devices so the corruption is visible rather than papered
+# over.
+ILLEGAL_IN_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # (key in the row dict, column header)
 DEVICE_COLUMNS = [
@@ -166,9 +179,16 @@ def to_xlsx(rows: list[dict], columns, sheet_name: str = "Devices",
 
 
 def _clean(value):
-    """Excel and CSV both prefer plain scalars; round the one float we carry."""
+    """Excel and CSV both prefer plain scalars; round the one float we carry.
+
+    Control characters are stripped for both formats, not just for Excel: they are never
+    meaningful in an identifier, and a CSV carrying a raw backspace is just as broken — it simply
+    fails later, in whatever opens it, instead of here.
+    """
     if value is None:
         return ""
     if isinstance(value, float):
         return round(value, 1)
+    if isinstance(value, str):
+        return ILLEGAL_IN_XLSX.sub("", value)
     return value

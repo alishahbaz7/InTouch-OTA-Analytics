@@ -3,13 +3,16 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-08-17"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.2.3", "2026-08-17", "XLSX downloads work again — 128 devices carry a corrupt ICCID that "
+                            "a spreadsheet may not contain, and the quality page now reports "
+                            "them; clearer messages when a bundle or upload is a no-op"),
     ("1.2.2", "2026-08-17", "Interleaved bundle merge finishes instead of hanging, and is 5.6x "
                             "faster; every fetch is faster too — the registry resolved the "
                             "device_state view fifteen times per snapshot instead of once"),

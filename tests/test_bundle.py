@@ -73,6 +73,48 @@ def test_export_import_reproduces_every_snapshot(tmp_path: Path, exports):
     target.close()
 
 
+def test_importing_your_own_export_says_why_nothing_happened(tmp_path: Path, exports):
+    """The commonest confusion: export from here, import here, and read the no-op as a failure.
+
+    It is the correct answer, so it has to read like one — and it has to say that merging needs
+    a file from a *different* install, which is the thing the person actually wants to know.
+    """
+    conn = db.connect(tmp_path / "mine.db")
+    load(conn, exports.values())
+    identity.set_instance_label(conn, "shahbaz-laptop")
+
+    path = tmp_path / f"own{bundle.SUFFIX}"
+    bundle.export_bundle(conn, path)
+    result = bundle.import_bundle(conn, path)
+
+    assert result.status == "already_present"
+    assert result.same_database is True
+    assert "same database" in result.message
+    assert "different" in result.message
+    assert "shahbaz-laptop" in result.message
+    conn.close()
+
+
+def test_a_colleagues_matching_bundle_is_reported_differently(tmp_path: Path, exports):
+    """Same data, different install: the useful fact is that the two now agree."""
+    mine = db.connect(tmp_path / "mine.db")
+    theirs = db.connect(tmp_path / "theirs.db")
+    load(mine, exports.values())
+    load(theirs, exports.values())
+    identity.set_instance_label(theirs, "colleague-pc")
+
+    path = tmp_path / f"theirs{bundle.SUFFIX}"
+    bundle.export_bundle(theirs, path)
+    result = bundle.import_bundle(mine, path)
+
+    assert result.status == "already_present"
+    assert result.same_database is False
+    assert "same data" in result.message or "same numbers" in result.message
+    assert "colleague-pc" in result.message
+    mine.close()
+    theirs.close()
+
+
 def test_reimport_is_a_no_op(tmp_path: Path, exports):
     source = db.connect(tmp_path / "source.db")
     load(source, exports.values())
