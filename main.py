@@ -142,6 +142,9 @@ from ota_analytics import config, db, ingest, rollup  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 
+# Identifies a copy of *this* app answering on a port. Kept in step with api.APP_ID by a test.
+APP_MARKER = "intouch-ota-analytics"
+
 # Addresses that only this machine can reach. Anything else means other computers can too.
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
@@ -347,6 +350,31 @@ def background_status() -> int:
     return 0
 
 
+def already_serving(host: str, port: int, timeout: float = 1.5) -> bool:
+    """Whether *this* application is already answering on that port.
+
+    Starting a second copy is the normal outcome of double-clicking the app when auto-start has
+    already launched the windowless one: the port is taken, so the new copy quietly moves to
+    8001 and shows a different URL. Nothing errors, both copies share one database, and the
+    person is left with two dashboards, two schedulers fetching the same data, and no way to
+    tell which window belongs to which — while the copy holding :8000 has no window at all.
+
+    Checked by asking, not by probing the socket, because something unrelated may hold the
+    port and that case still deserves the old fall-back-to-another-port behaviour.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as reply:
+            body = reply.read(4096).decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+    # Matched as text rather than parsed: /healthz is a fixed, tiny document, and the marker is
+    # specific enough that nothing else would answer with it on loopback.
+    return APP_MARKER in body
+
+
 def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
     """Return the first port at or after `preferred` that nothing else is holding.
 
@@ -430,6 +458,24 @@ def main(argv: list[str] | None = None) -> int:
     check_exposure(args.host)
     if args.background:
         return start_background(args)
+
+    # Show the copy that is already running rather than quietly becoming a second one. This is
+    # the ordinary case once auto-start is on: the windowless copy is already holding the port,
+    # invisibly, and double-clicking the app would otherwise open a dashboard on a different
+    # port with a second scheduler behind it. --reload is exempt: that is a developer
+    # deliberately restarting.
+    if not args.reload and already_serving(args.host, args.port):
+        url = f"http://{args.host}:{args.port}"
+        print(f"InTouch OTA Analytics is already running at {url}")
+        print("  Opening that one instead of starting a second copy.\n")
+        # Deliberately not "--stop": that only knows about a copy started with --background,
+        # and the one usually holding the port was launched by auto-start, which has no window
+        # and no pid file. Point at the thing that can actually turn it off.
+        print("  It has no window if auto-start launched it. Turn that off on the Update data")
+        print("  page, or end the InTouchOTA-Analytics process in Task Manager.")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return 0
 
     print("InTouch OTA Analytics")
     print(f"  database   {config.DB_PATH}")

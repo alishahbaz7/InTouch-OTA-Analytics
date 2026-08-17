@@ -75,10 +75,15 @@ async def require_login(request: Request, call_next):
     return await call_next(request)
 
 
+# Identifies a running copy as *this* application, so a second launch can tell the difference
+# between our own dashboard already serving and some unrelated thing holding the port.
+APP_ID = "intouch-ota-analytics"
+
+
 @app.get("/healthz")
 def healthz():
     """Liveness for the service manager and the tunnel. Deliberately says nothing about data."""
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "app": APP_ID})
 
 
 @app.get("/login", response_class=HTMLResponse)

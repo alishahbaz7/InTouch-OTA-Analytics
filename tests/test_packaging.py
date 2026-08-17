@@ -243,6 +243,68 @@ def test_main_still_treats_dashboard_flags_as_its_own(monkeypatch):
     assert entry.main(["--status"]) == 7
 
 
+# ─── one app, one copy ──────────────────────────────────────────────────────
+
+def test_the_app_marker_matches_what_the_server_reports():
+    """Two constants, one meaning: if they drift, every launch starts a second copy again."""
+    import main as entry
+
+    from ota_analytics import api
+    assert entry.APP_MARKER == api.APP_ID
+
+
+def test_healthz_identifies_the_app_without_revealing_data():
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import api
+    payload = TestClient(api.app).get("/healthz").json()
+
+    assert payload["app"] == api.APP_ID
+    assert payload["status"] == "ok"
+    # It is public and unauthenticated, so it must stay free of anything about the fleet.
+    assert set(payload) == {"status", "app"}
+
+
+def test_a_second_launch_opens_the_running_copy(monkeypatch):
+    """Auto-start leaves a windowless copy holding the port. Double-clicking the app then
+    started a second one on 8001, with its own scheduler and no way to tell them apart."""
+    import main as entry
+
+    opened = {}
+    monkeypatch.setattr(entry, "already_serving", lambda host, port, **kw: True)
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.setdefault("url", url))
+    monkeypatch.setattr(entry, "load_new_exports",
+                        lambda: pytest.fail("a second copy started anyway"))
+
+    assert entry.main(["--port", "8000"]) == 0
+    assert opened["url"] == "http://127.0.0.1:8000"
+
+
+def test_nothing_listening_is_not_mistaken_for_our_app(monkeypatch):
+    """A closed port must read as 'not us' rather than raise on the way to starting up."""
+    import main as entry
+
+    assert entry.already_serving("127.0.0.1", 59999, timeout=0.2) is False
+
+
+def test_a_port_held_by_something_else_still_falls_back(monkeypatch):
+    """Only our own dashboard is deferred to; an unrelated service keeps the old behaviour
+    of quietly moving to the next free port."""
+    import http.server
+    import threading
+
+    import main as entry
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert entry.already_serving("127.0.0.1", server.server_port, timeout=2.0) is False
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # ─── the build definition itself ────────────────────────────────────────────
 
 def test_the_spec_ships_every_runtime_resource():
