@@ -177,6 +177,16 @@ h3 { font-size: 12px; font-weight: 600; margin: 12px 0 6px; color: var(--dim); }
 .hint { color: var(--muted); font-size: 11.5px; font-weight: 400; }
 .lede { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
 
+/* "You do not need to type anything here" — stated positively, because a blank password box
+   otherwise reads as a demand. */
+.saved-credential { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 4px;
+                    padding: 8px 10px; border-radius: 6px; font-size: 12px;
+                    background: rgba(53, 196, 138, .10); border: 1px solid var(--ok);
+                    color: var(--dim); }
+.saved-credential .dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+                         background: var(--ok); transform: translateY(-1px); }
+.saved-credential strong { color: var(--text); }
+
 /* First-run instructions: readable at a glance, not a wall of prose. */
 .getting-started { margin: 4px 0 16px; padding-left: 20px; color: var(--dim); font-size: 13px; }
 .getting-started li { margin-bottom: 8px; line-height: 1.55; }

@@ -127,11 +127,23 @@
           <input type="text" name="username" autocomplete="username"
                  value="{{ connection.username }}" placeholder="you@company.com">
         </label>
-        <label>Password
+        {# An empty password box reads as "type here" whatever the placeholder says, so when a
+           credential is already held the field is labelled as the exception rather than the
+           norm. Retyping a password that is already stored is wasted effort and one more chance
+           to get it wrong. #}
+        <label>{{ 'Change password' if connection.remembered else 'Password' }}
           <input type="password" name="password" autocomplete="current-password"
-                 placeholder="{{ 'saved — leave blank' if connection.remembered else '' }}">
+                 placeholder="{{ 'leave blank — already saved' if connection.remembered else '' }}">
         </label>
       </div>
+
+      {% if connection.remembered %}
+      <p class="saved-credential">
+        <span class="dot"></span>
+        Password already saved in <strong>{{ credential_store }}</strong> — leave the box empty
+        and press <em>Sign in &amp; fetch</em>. Only fill it in to replace it.
+      </p>
+      {% endif %}
 
       <label class="inline">
         <input type="checkbox" name="remember" value="true" {{ 'checked' if connection.remembered }}>

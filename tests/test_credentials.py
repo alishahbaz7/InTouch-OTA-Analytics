@@ -8,6 +8,40 @@ a secret there.
 
 from __future__ import annotations
 
+import pytest as _pytest
+
+
+def test_a_saved_password_is_announced_not_just_hinted(tmp_path, monkeypatch):
+    """A blank password box reads as "type here" however good the placeholder is.
+
+    The password is already in the OS credential store, so retyping it is wasted effort and one
+    more chance to get it wrong. The page has to say so in words, not only in grey placeholder
+    text inside the field.
+    """
+    _pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import api, config, db, scheduler, sources
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(scheduler, "STATE_PATH", tmp_path / "scheduler.json")
+    monkeypatch.setattr(sources, "SETTINGS_PATH", tmp_path / "connection.json")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    db.connect()
+
+    saved = sources.Connection(username="someone@example.com")
+    sources.save_connection(saved)
+    monkeypatch.setattr(sources, "load_password", lambda username: "secret-value")
+
+    body = TestClient(api.app, raise_server_exceptions=False).get("/update").text
+
+    assert "Password already saved in" in body
+    assert "leave the box empty" in body.lower()
+    assert "Change password" in body            # the field is the exception, not the norm
+    # And the secret itself never reaches the page.
+    assert "secret-value" not in body
+
 import json
 
 import pytest
