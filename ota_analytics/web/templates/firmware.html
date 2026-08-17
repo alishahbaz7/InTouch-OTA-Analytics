@@ -3,37 +3,43 @@
 {% block title %}Firmware — OTA Analytics{% endblock %}
 
 {% block content %}
-{# Model slicer. No selection means every model, so "all" is the default and narrowing is
-   opt-in. Ctrl/Shift-click picks any subset. #}
-<form class="filters slicer" method="get">
-  <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
-  <label class="grow">Models
-    <select name="model" multiple size="{{ [models | length, 6] | min }}">
-      {% for r in models %}
-      <option value="{{ r.label }}" {{ 'selected' if r.label in selected_models }}>
-        {{ r.label }} — {{ r.devices | comma }} devices
-      </option>
-      {% endfor %}
-    </select>
-    <small>
-      {% if selected_models %}
-        {{ selected_models | length }} of {{ models | length }} selected —
-        {{ mix_total | comma }} devices
-      {% else %}
-        All {{ models | length }} models — {{ mix_total | comma }} devices
-      {% endif %}
-      &middot; ctrl+click to pick several
-    </small>
-  </label>
-  <button type="submit">Apply</button>
-  <a class="clear" href="/firmware{{ qs() }}">All models</a>
-</form>
+{# Model slicer, the same one the overview uses. It was an always-open multi-select list box
+   here, which took six rows of chrome and needed "ctrl+click to pick several" explaining
+   underneath. A <details> dropdown holds it to a single line and behaves like every other
+   picker in the app. Empty selection means the whole fleet, so "all" is the default and
+   narrowing is opt-in. #}
+<div class="page-toolbar">
+  <span class="hint">{{ mix_total | comma }} devices
+    {%- if selected_models %} in {{ selected_models | length }} of
+      {{ models | length }} models{% else %} · all {{ models | length }} models{% endif %}
+    &middot; {{ mix | length }} firmware version{{ 's' if mix | length != 1 }}</span>
 
-{% if selected_models %}
-<div class="chips selection">
-  {% for name in selected_models %}<span class="chip">{{ name }}</span>{% endfor %}
+  <details class="dropdown" id="model-picker">
+    <summary>
+      {%- if selected_models -%}
+        {{ selected_models[0] }}{% if selected_models | length > 1 %}
+          +{{ selected_models | length - 1 }}{% endif %}
+      {%- else -%}All models{%- endif -%}
+    </summary>
+    <form method="get" class="dropdown-panel">
+      <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
+      <div class="dropdown-list">
+        {% for r in models %}
+        <label class="dropdown-item">
+          <input type="checkbox" name="model" value="{{ r.label }}"
+                 {{ 'checked' if r.label in selected_models }}>
+          <span>{{ r.label }}</span>
+          <em>{{ r.devices | comma }}</em>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="dropdown-actions">
+        <a href="/firmware{{ qs() }}">Clear</a>
+        <button type="submit">Apply</button>
+      </div>
+    </form>
+  </details>
 </div>
-{% endif %}
 
 {% if targets %}
 <div class="tiles">
@@ -46,7 +52,10 @@
 
 <section class="card">
   <h2>Devices per firmware version
-    <span class="count">{{ mix | length }} version{{ 's' if mix | length != 1 }}</span></h2>
+    <span class="count">{{ mix | length }} version{{ 's' if mix | length != 1 }}</span>
+    {%- if selected_models %}
+    <span class="hint">{{ selected_models | join(', ') }}</span>
+    {%- endif %}</h2>
   {% set biggest = mix[0].devices if mix else 1 %}
   <table>
     <thead>

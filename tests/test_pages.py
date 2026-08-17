@@ -71,6 +71,50 @@ PAGES = ["/", "/pending", "/firmware", "/changes", "/devices", "/reachability",
          "/groups", "/quality", "/update", "/errors"]
 
 
+def test_the_model_picker_is_the_same_control_on_every_page(client):
+    """Overview and Firmware both slice by model, so they must not do it two different ways.
+
+    Firmware used an always-open multi-select list box that needed "ctrl+click to pick several"
+    written underneath it; the overview had a dropdown. Same job, same control.
+    """
+    for path in ("/", "/firmware"):
+        body = client.get(path).text
+        assert 'id="model-picker"' in body, f"{path} has no model dropdown"
+        assert 'class="dropdown-list"' in body
+        assert 'type="checkbox" name="model"' in body
+        assert "ctrl+click" not in body, f"{path} still explains a multi-select"
+        assert "<select name=\"model\" multiple" not in body
+
+
+def test_the_firmware_picker_keeps_the_snapshot_being_viewed(client):
+    """Narrowing by model must not silently jump back to the latest snapshot."""
+    from ota_analytics import db, metrics
+
+    oldest = metrics.snapshots(db.connect())[-1]["id"]
+    body = client.get(f"/firmware?snapshot={oldest}").text
+    assert f'name="snapshot" value="{oldest}"' in body
+
+
+def test_selecting_a_model_on_the_firmware_page_filters_it(client):
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    models = [r["label"] for r in metrics.task_state_by(conn, metrics.latest_snapshot_id(conn),
+                                                        "model")]
+    assert len(models) > 1, "fixture needs at least two models to prove filtering"
+
+    body = client.get(f"/firmware?model={models[0]}").text
+    assert body.count(f'value="{models[0]}"') >= 1
+
+    # The summary reports the narrowing rather than still claiming the whole fleet. Compared
+    # with whitespace collapsed, because the template wraps the line and the exact run of
+    # spaces is not the thing under test.
+    import re
+    flat = re.sub(r"\s+", " ", body)
+    assert f"in 1 of {len(models)} models" in flat
+    assert "all {} models".format(len(models)) not in flat
+
+
 @pytest.mark.parametrize("path", PAGES)
 def test_every_page_renders(client, path):
     response = client.get(path)
