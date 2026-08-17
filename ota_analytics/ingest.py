@@ -1,21 +1,38 @@
-"""Ingest a platform export (.xlsx) into the snapshot warehouse.
+"""Ingest a platform export into the snapshot warehouse.
 
 Append-only and idempotent: a file is identified by the SHA-256 of its bytes, so re-ingesting
 the same export is a no-op rather than a duplicate. Reads are streamed because the exports run
 to tens of megabytes.
+
+**Two formats, one path.** `.xlsx` is what the platform produces; `.csv` is accepted because a
+colleague's data does not always arrive as a spreadsheet. Both go through the same header
+mapping and the same normalization, so a CSV cannot take a shortcut past a rule the spreadsheet
+obeys. Columns are matched by name, not position, so column order does not matter either way.
+
+A CSV holding a report *this dashboard* produced is loadable but second-hand, and ingest says
+so: its values have already been through normalization once, so `device_model_raw` holds a
+canonical name rather than the platform's original spelling, and columns the report does not
+carry (First Ping, the raw VIN) are absent rather than empty. A quality finding records that,
+because it is not visible from the numbers afterwards.
 """
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 from openpyxl import load_workbook
+
+# Formats ingest can read. Order matters only for reporting.
+EXPORT_SUFFIXES = (".xlsx", ".csv")
 
 from . import config, normalize, quality, registry
 
@@ -42,6 +59,7 @@ FIELD_ALIASES = {
     "lastseenat": "seen_at", "lastping": "seen_at", "lastcommunication": "seen_at",
     "iccid": "iccid", "simiccid": "iccid",
     "hwver": "hw_ver", "hwversion": "hw_ver", "hardwareversion": "hw_ver",
+    "hardware": "hw_ver",      # heading used by this dashboard's own CSV reports
     "vin": "vin_raw", "vinnumber": "vin_raw",
     "groups": "groups_raw", "groupname": "groups_raw", "groupnames": "groups_raw",
     "firstping": "first_ping", "firstseen": "first_ping", "commissionedat": "first_ping",
@@ -296,6 +314,45 @@ def _resolve_snapshot_at(path: Path) -> tuple[datetime, str]:
     return datetime.fromtimestamp(path.stat().st_mtime), "mtime"
 
 
+@contextmanager
+def _table_rows(path: Path) -> Iterator[Iterator[tuple]]:
+    """Stream an export's rows, whichever format it is in.
+
+    Both formats are streamed rather than loaded: the spreadsheets run to 22 MB and the CSVs to
+    5 MB, and there is no reason to hold either in memory. Everything downstream sees the same
+    shape — a header tuple followed by row tuples — so no rule can apply to one format and not
+    the other.
+    """
+    if path.suffix.lower() == ".csv":
+        # utf-8-sig because Excel writes a byte-order mark, and our own CSV export adds one so
+        # Excel reads accents correctly. Left in place it would become part of the first header
+        # name and stop 'IMEI' matching.
+        handle = open(path, "r", encoding="utf-8-sig", newline="")
+        try:
+            yield (tuple(row) for row in csv.reader(handle))
+        finally:
+            handle.close()
+        return
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        yield workbook[workbook.sheetnames[0]].iter_rows(values_only=True)
+    finally:
+        workbook.close()
+
+
+# Headings only this dashboard's own reports carry. They are derived columns, so their presence
+# means the file is a report rather than a platform export — worth recording, because a report's
+# values have already been normalized once and it drops columns the platform sends.
+REPORT_ONLY_HEADERS = {"previousfirmware", "hourssinceseen", "lastfirmwarechange", "lastchecked",
+                       "fallback"}
+
+
+def looks_like_dashboard_report(header_row: tuple) -> bool:
+    flattened = {flatten_key(cell) for cell in header_row if cell is not None}
+    return len(flattened & REPORT_ONLY_HEADERS) >= 2
+
+
 def _map_headers(header_row: tuple) -> tuple[dict[int, str], list[str]]:
     """Map column positions by header name. Unknown columns are reported, not fatal."""
     mapping: dict[int, str] = {}
@@ -331,15 +388,12 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
     snapshot_at, ts_source = _resolve_snapshot_at(path)
     snapshot_iso = snapshot_at.isoformat(sep=" ", timespec="seconds")
 
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook[workbook.sheetnames[0]]
-        rows = sheet.iter_rows(values_only=True)
-
+    with _table_rows(path) as rows:
         header = next(rows, None)
         if header is None:
             raise IngestError("export is empty")
         mapping, unknown = _map_headers(header)
+        from_report = looks_like_dashboard_report(header)
 
         cursor = conn.cursor()
         cursor.execute(
@@ -400,8 +454,6 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
                 "VALUES (?,?,?)", group_batch)
             result.groups += len(group_batch)
         result.changed_rows = _store_devices(conn, cursor, snapshot_id, provided_columns(mapping))
-    finally:
-        workbook.close()
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
     conn.execute(
@@ -415,6 +467,7 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
         duplicate_imei=result.duplicate_imei,
         unknown_columns=result.unknown_columns,
         ts_source=result.ts_source,
+        from_report=from_report,
     )
     conn.commit()
     registry.apply_snapshot(conn, snapshot_id)
@@ -532,12 +585,23 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
     return result
 
 
+def exports_in(directory: Path) -> list[Path]:
+    """Every loadable export in a folder, oldest snapshot first so diffs build in order.
+
+    `~$` files are Excel's lock files for a workbook someone has open — they are not exports and
+    openpyxl cannot read them.
+    """
+    files = [p for p in sorted(directory.iterdir())
+             if p.is_file() and p.suffix.lower() in EXPORT_SUFFIXES
+             and not p.name.startswith("~$")]
+    files.sort(key=lambda p: _resolve_snapshot_at(p)[0])
+    return files
+
+
 def ingest_dir(conn: sqlite3.Connection, directory: Path) -> list[IngestResult]:
-    """Ingest every .xlsx in a folder, oldest snapshot first so diffs build in order."""
+    """Ingest every export in a folder, oldest snapshot first so diffs build in order."""
     directory = Path(directory)
     if not directory.exists():
         raise IngestError(f"directory not found: {directory}")
 
-    files = [p for p in sorted(directory.glob("*.xlsx")) if not p.name.startswith("~$")]
-    files.sort(key=lambda p: _resolve_snapshot_at(p)[0])
-    return [ingest_file(conn, path) for path in files]
+    return [ingest_file(conn, path) for path in exports_in(directory)]

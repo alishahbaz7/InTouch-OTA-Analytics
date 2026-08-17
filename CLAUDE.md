@@ -309,6 +309,35 @@ here exists because a frozen build breaks assumptions that are invisible from so
 - One-folder, not one-file: one-file unpacks to a temp directory on every launch, and a single
   large unsigned binary is what antivirus quarantines hardest. UPX is off for the same reason.
 
+## Two upload routes, and the one thing they must not do
+
+`/update/import` and `/update/bundle-import` are the only `async def` handlers in `api.py` —
+they have to be, to `await file.read()`. **An `async` handler runs on the event loop, so calling
+a job that takes tens of seconds from one stops the server answering anything at all** — every
+page, and `/healthz` with it. It presented as "the import hung" when in fact the whole dashboard
+had, with the browser spinning on a request that would never return. Both now hand the blocking
+work to `run_in_threadpool`, and the sqlite connection is opened *inside* that function because
+sqlite3 objects belong to the thread that created them. Every other route is a plain `def`,
+which Starlette already runs in a threadpool — so if a new route does slow work, leave it `def`.
+
+## Loading a `.csv` as well as an `.xlsx`
+
+Both formats go through `ingest._table_rows`, then the same header mapping and the same
+normalization, so a CSV cannot bypass a rule the spreadsheet obeys — `tests/test_ingest_csv.py`
+checks that by loading identical rows through both and comparing every column.
+
+- CSV gives every cell as **text**. `normalize.clean`, `parse_queue` and `parse_dt` already
+  handle that (`parse_dt` accepts the platform's day-first form *and* ISO), which is why this
+  works without a second set of rules. Do not add string-specific branches.
+- Read with `utf-8-sig`: Excel writes a byte-order mark and so does our own CSV export, and left
+  in place it becomes part of the first header name and stops `IMEI` matching.
+- A CSV holding a **report this dashboard produced** is loadable but second-hand, and
+  `looks_like_dashboard_report` flags it as `loaded_from_report`: its values have been
+  normalized once already, so `device_model_raw` holds a canonical name rather than the
+  platform's spelling, and columns a report never carried are absent rather than empty. The
+  snapshot time is when the report was written. Prefer the platform's export or a bundle. This
+  is recorded because none of it is visible from the numbers afterwards.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

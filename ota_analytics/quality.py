@@ -32,6 +32,7 @@ def run_rules(
     duplicate_imei: int = 0,
     unknown_columns: list[str] | None = None,
     ts_source: str = "filename",
+    from_report: bool = False,
 ) -> list[Finding]:
     """Evaluate every rule against one ingested snapshot and persist the findings."""
     sid = (snapshot_id,)
@@ -59,6 +60,17 @@ def run_rules(
         findings.append((
             "unknown_columns", "medium", len(unknown_columns), list(unknown_columns),
             "Export contains columns this build does not map. They were ignored.",
+        ))
+
+    if from_report:
+        findings.append((
+            "loaded_from_report", "medium", 1, [],
+            "Loaded from a report this dashboard produced rather than a platform export, so the "
+            "values are second-hand: model and firmware names have already been canonicalized, "
+            "the raw spellings are lost, and columns a report does not carry (First Ping, the "
+            "unmodified VIN) are absent rather than empty. The snapshot time is when the report "
+            "was written, not necessarily when the data was true. Prefer the platform's own "
+            "export, or a shared bundle, when either is available.",
         ))
 
     # Control characters in an identifier. Found in the real export: 128 devices whose ICCID is

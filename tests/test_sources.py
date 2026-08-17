@@ -10,31 +10,42 @@ from ota_analytics import config, normalize, sources
 from tests.conftest import HEADERS, device
 
 
-def test_a_dashboard_report_is_named_as_such_not_just_rejected():
-    """The commonest wrong upload: a report this dashboard produced, offered back as a source.
+def test_a_csv_upload_is_stored_for_ingest(tmp_path, monkeypatch):
+    """A colleague's data does not always arrive as a spreadsheet."""
+    monkeypatch.setattr(sources.config, "EXPORT_DIR", tmp_path)
+    body = ("IMEI,STATUS,QUEUE,Device Model,FIRMWARE\n"
+            "111,Online,0,LOCAT140VB,7.5.0.51A\n").encode("utf-8")
 
-    The filenames look alike — devices_17Aug26_1029.csv against
-    Devices_35477_15Aug26_1511.xlsx — and the useful answer is not "save it as .xlsx". A report
-    is a filtered view with renamed headings and no snapshot time; re-ingesting one would invent
-    a snapshot that never happened.
+    stored = sources.store_upload("Devices_1_17Aug26_1029.csv", body)
+    assert stored.suffix == ".csv"
+    assert stored.parent == tmp_path
+    assert stored.read_bytes() == body
+
+
+def test_a_csv_with_no_imei_column_is_refused_clearly(tmp_path, monkeypatch):
+    """Columns are matched by name, so a file with no recognisable header cannot be read.
+
+    Caught here rather than in ingest: "missing required column(s)" sounds like the export is
+    wrong, when the real problem is that the file is not an export at all.
     """
-    report = ("﻿IMEI,Model,Firmware,Fallback,Previous firmware,Target firmware,"
-              "Configuration,Hardware,Status,Task state,Pending tasks,Last seen,"
-              "Hours since seen,Last checked,Groups,VIN,ICCID\n"
-              "111,LOCAT140VB,7.5.0.51A,,,,2.2.2,1.2.0,Online,completed,0,,,,,,\n")
-
-    with pytest.raises(sources.SourceError) as raised:
-        sources.store_upload("devices_17Aug26_1029.csv", report.encode("utf-8"))
-
-    message = str(raised.value)
-    assert "report this dashboard produced" in message
-    assert "bundle" in message.lower()       # points at the thing that does work
-
-
-def test_a_plain_csv_still_gets_the_ordinary_message():
-    """Only our own reports get the special explanation; anything else keeps the generic one."""
-    with pytest.raises(sources.SourceError, match="not an .xlsx"):
+    monkeypatch.setattr(sources.config, "EXPORT_DIR", tmp_path)
+    with pytest.raises(sources.SourceError, match="no IMEI column"):
         sources.store_upload("something.csv", b"a,b,c\n1,2,3\n")
+
+
+def test_a_csv_keeps_its_date_bearing_filename(tmp_path, monkeypatch):
+    """The snapshot time is read from the name — no column carries it, in either format."""
+    monkeypatch.setattr(sources.config, "EXPORT_DIR", tmp_path)
+    body = b"IMEI,STATUS,Device Model,FIRMWARE\n111,Online,LOCAT140VB,7.5.0.51A\n"
+
+    kept = sources.store_upload("Devices_1_17Aug26_1029.csv", body)
+    assert kept.name == "Devices_1_17Aug26_1029.csv"
+
+    # And a name with no date in it gets one, so the time never falls back to the upload moment.
+    renamed = sources.store_upload("colleague-dump.csv", body)
+    assert renamed.suffix == ".csv"
+    from ota_analytics import normalize
+    assert normalize.snapshot_at_from_filename(renamed.name) is not None
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +120,8 @@ def test_upload_never_overwrites_an_existing_file(make_export):
     assert first.exists() and second.exists()
 
 
-def test_upload_rejects_a_non_xlsx_file():
-    with pytest.raises(sources.SourceError, match="not an .xlsx"):
+def test_upload_rejects_a_file_that_is_neither_format():
+    with pytest.raises(sources.SourceError, match="not a spreadsheet or a CSV"):
         sources.store_upload("evil.xlsx", b"#!/bin/sh\nrm -rf /\n")
 
 

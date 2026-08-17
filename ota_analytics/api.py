@@ -18,6 +18,7 @@ from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics, registry,
                rollup, scheduler, sources, startup)
@@ -703,12 +704,29 @@ def update_page(request: Request):
     return templates.TemplateResponse(request, "update.html", _update_context(request))
 
 
+def _store_and_ingest(filename: str, content: bytes) -> dict:
+    """Save an upload and load it. Blocking, and deliberately off the event loop.
+
+    Opens its own connection by way of `_ingest_path`: sqlite3 objects are bound to the thread
+    that created them, so a connection made in the request handler cannot be used here.
+    """
+    return _ingest_path(sources.store_upload(filename, content))
+
+
 @app.post("/update/import", response_class=HTMLResponse)
 async def update_import(request: Request, file: UploadFile = File(...)):
+    """Load an uploaded export.
+
+    The work is handed to a worker thread rather than run here. This handler has to be `async`
+    to read the upload, and an `async` handler runs *on the event loop* — so calling a job that
+    takes tens of seconds directly would stop the server answering anything at all, including
+    the page the browser is waiting on and /healthz. It looked like the import had hung when in
+    fact the whole dashboard had. Every other route is a plain `def`, which Starlette already
+    runs in a threadpool; these two upload routes were the only ones that could freeze it.
+    """
     try:
         content = await file.read()
-        path = sources.store_upload(file.filename or "", content)
-        result = _ingest_path(path)
+        result = await run_in_threadpool(_store_and_ingest, file.filename or "", content)
     except (sources.SourceError, ingest.IngestError) as exc:
         result = {"level": "error", "message": str(exc)}
     return templates.TemplateResponse(request, "update.html",
@@ -892,13 +910,22 @@ def update_bundle_export(since: str | None = None):
                  f'attachment; filename="{bundle.suggested_filename(conn)}"'})
 
 
+def _merge_bundle(content: bytes, allow_interleave: bool) -> bundle.ImportResult:
+    """Merge a bundle. Blocking for minutes on a large history, so it runs off the event loop.
+
+    The connection is opened here, in the worker thread that uses it: sqlite3 objects cannot be
+    shared across threads.
+    """
+    return bundle.import_bundle(db.connect(), content, allow_interleave=allow_interleave)
+
+
 @app.post("/update/bundle-import", response_class=HTMLResponse)
 async def update_bundle_import(request: Request, file: UploadFile = File(...),
                                allow_interleave: bool = Form(False)):
-    conn = get_conn()
+    """Merge an uploaded bundle. See `update_import` for why the work leaves the event loop."""
     try:
-        outcome = bundle.import_bundle(conn, await file.read(),
-                                       allow_interleave=allow_interleave)
+        content = await file.read()
+        outcome = await run_in_threadpool(_merge_bundle, content, allow_interleave)
         # "Already loaded" is a correct answer, not a problem: showing it as a warning made a
         # successful no-op read as a failure.
         level = {"imported": "ok", "already_present": "ok",

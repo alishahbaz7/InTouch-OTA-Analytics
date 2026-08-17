@@ -188,9 +188,8 @@ def load_new_exports() -> int:
         print("    create it and drop the platform's .xlsx exports in there")
         return 0
 
-    files = [p for p in sorted(config.EXPORT_DIR.glob("*.xlsx")) if not p.name.startswith("~$")]
-    if not files:
-        print(f"  ! no .xlsx exports found in {config.EXPORT_DIR}")
+    if not ingest.exports_in(config.EXPORT_DIR):
+        print(f"  ! no .xlsx or .csv exports found in {config.EXPORT_DIR}")
         return 0
 
     added = 0

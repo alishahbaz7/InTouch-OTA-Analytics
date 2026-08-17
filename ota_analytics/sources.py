@@ -258,19 +258,21 @@ def credential_store_name() -> str:
 
 # ─── acquiring an export ────────────────────────────────────────────────────
 
-def safe_filename(name: str, fallback_stem: str = "Devices_online") -> str:
+def safe_filename(name: str, fallback_stem: str = "Devices_online",
+                  suffix: str = ".xlsx") -> str:
     """Reduce an untrusted filename to something safe to write into the export folder."""
     name = Path(name or "").name                      # strip any directory part
     name = SAFE_NAME.sub("_", name).lstrip(".")
-    if not name.lower().endswith(".xlsx"):
-        name = f"{fallback_stem}.xlsx"
-    return name or f"{fallback_stem}.xlsx"
+    if not name.lower().endswith(suffix):
+        name = f"{fallback_stem}{suffix}"
+    return name or f"{fallback_stem}{suffix}"
 
 
-def timestamped_name(prefix: str = "Devices_online", when: datetime | None = None) -> str:
+def timestamped_name(prefix: str = "Devices_online", when: datetime | None = None,
+                     suffix: str = ".xlsx") -> str:
     """Build a filename the snapshot-time parser understands: Devices_online_15Aug26_1530.xlsx"""
     when = when or datetime.now()
-    return f"{prefix}_{when.strftime('%d%b%y_%H%M')}.xlsx"
+    return f"{prefix}_{when.strftime('%d%b%y_%H%M')}{suffix}"
 
 
 def find_records(payload: object, depth: int = 0) -> list[dict] | None:
@@ -312,40 +314,60 @@ def _validate_xlsx(content: bytes, source: str, *, from_url: bool = False) -> No
             f"{source} is a web page, not a spreadsheet. This usually means a login page was "
             "saved instead of the export — download the file again from the platform.")
 
-    # A report this dashboard produced, being offered back as a source. Easy mistake — the
-    # filenames look similar (devices_17Aug26_1029.csv against Devices_35477_15Aug26_1511.xlsx) —
-    # and worth naming precisely, because the answer is not "convert it to .xlsx". A report is a
-    # filtered view with renamed headings and no snapshot time; re-ingesting one would invent a
-    # snapshot that never happened.
-    if not from_url and "imei," in head[:200] and (
-            "previous firmware" in head or "task state" in head or "hours since seen" in head):
-        raise SourceError(
-            f"{source} is a report this dashboard produced, not a platform export. Reports are "
-            "for reading, not for loading back in: they hold a filtered view with renamed "
-            "columns and no snapshot time. To bring in a colleague's data, either upload the "
-            ".xlsx they exported from the platform, or — for their whole accumulated history — "
-            "have them use 'Download bundle' under Share this data and import that file here.")
-
     hint = ("Check that the URL is the export endpoint." if from_url
-            else "Export it again from the platform as .xlsx.")
-    raise SourceError(f"{source} is not an .xlsx file (it starts with {content[:8]!r}). {hint}")
+            else "Upload the platform's .xlsx export, or a .csv with the same columns.")
+    raise SourceError(f"{source} is not a spreadsheet or a CSV "
+                      f"(it starts with {content[:8]!r}). {hint}")
+
+
+def _validate_csv(content: bytes, source: str) -> None:
+    """A CSV needs a header row naming the columns, since they are matched by name.
+
+    Cheap to check here and much clearer than the failure it prevents: without it a file with no
+    recognisable header reaches ingest and comes back as "missing required column(s)", which
+    sounds like the export is wrong rather than the file being the wrong kind of thing.
+    """
+    head = content[:2000].decode("utf-8-sig", errors="replace").splitlines()
+    if not head or not head[0].strip():
+        raise SourceError(f"{source} is empty.")
+    if "imei" not in head[0].lower():
+        raise SourceError(
+            f"{source} has no IMEI column in its first row, so its columns cannot be matched by "
+            f"name. The first line reads: {head[0][:120]!r}")
+
+
+def looks_like_csv(filename: str, content: bytes) -> bool:
+    """Whether to treat an upload as CSV rather than as a spreadsheet."""
+    if Path(filename or "").suffix.lower() == ".csv":
+        return True
+    # A misnamed file is judged on its bytes: a zip (xlsx) starts with PK, text does not.
+    return not content.startswith(XLSX_MAGIC) and b"," in content[:2000]
 
 
 def store_upload(filename: str, content: bytes) -> Path:
-    """Write an uploaded export into the export folder, ready to ingest."""
-    _validate_xlsx(content, "The uploaded file")
+    """Write an uploaded export into the export folder, ready to ingest.
 
-    name = safe_filename(filename)
+    Accepts the platform's .xlsx and a .csv carrying the same columns. Both are matched by
+    column name rather than position, so a CSV is a genuine second source and not a conversion
+    step — which matters when a colleague's data arrives as one.
+    """
+    suffix = ".csv" if looks_like_csv(filename, content) else ".xlsx"
+    if suffix == ".csv":
+        _validate_csv(content, "The uploaded file")
+    else:
+        _validate_xlsx(content, "The uploaded file")
+
+    name = safe_filename(filename, suffix=suffix)
     from . import normalize
     if normalize.snapshot_at_from_filename(name) is None:
         # Without a parseable date in the name the snapshot time would fall back to the file's
         # mtime, which is when it was uploaded rather than when the export was taken.
-        name = timestamped_name(Path(name).stem[:40] or "Devices_upload")
+        name = timestamped_name(Path(name).stem[:40] or "Devices_upload", suffix=suffix)
 
     config.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     target = config.EXPORT_DIR / name
     if target.exists():
-        target = config.EXPORT_DIR / f"{target.stem}_{datetime.now().strftime('%H%M%S')}.xlsx"
+        target = config.EXPORT_DIR / f"{target.stem}_{datetime.now():%H%M%S}{suffix}"
     target.write_bytes(content)
     return target
 

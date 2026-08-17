@@ -60,6 +60,26 @@ def make_export(tmp_path: Path):
 
 
 @pytest.fixture
+def make_csv(tmp_path: Path):
+    """Write rows to a .csv whose filename encodes the snapshot timestamp.
+
+    Mirrors make_export so the two formats can be checked against each other rather than each
+    against its own expectations.
+    """
+    import csv as _csv
+
+    def _make(rows: list[list], name: str = "Devices_3_15Aug26_1511.csv",
+              headers: list[str] | None = None) -> Path:
+        path = tmp_path / name
+        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = _csv.writer(handle, lineterminator="\n")
+            writer.writerow(headers if headers is not None else HEADERS)
+            writer.writerows(rows)
+        return path
+    return _make
+
+
+@pytest.fixture
 def conn(tmp_path: Path):
     connection = db.connect(tmp_path / "test.db")
     yield connection

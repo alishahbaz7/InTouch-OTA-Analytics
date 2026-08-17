@@ -76,6 +76,61 @@ def test_bundle_upload_round_trips_through_the_page(client, tmp_path):
     assert db.connect().execute("SELECT COUNT(*) FROM snapshot").fetchone()[0] == 2
 
 
+def test_a_long_import_does_not_freeze_the_dashboard(client, monkeypatch):
+    """The upload routes are the only `async` handlers, so they run on the event loop.
+
+    Calling a job that takes minutes directly from one stops the server answering *anything* —
+    not just the import, but every page and /healthz too. The symptom is a browser that spins
+    for ever, which reads as "the import hung" when the whole dashboard had.
+    """
+    import asyncio
+
+    from ota_analytics import bundle as bundle_module
+
+    ran_on_loop = []
+
+    def fake_import(conn, content, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass                      # no loop in this thread: correctly off the event loop
+        else:
+            ran_on_loop.append(True)
+        return bundle_module.ImportResult(status="empty", message="checked")
+
+    monkeypatch.setattr(bundle_module, "import_bundle", fake_import)
+    response = client.post("/update/bundle-import",
+                           files={"file": ("x.otabundle", b"PK\x03\x04stub", "application/zip")})
+
+    assert response.status_code == 200
+    assert not ran_on_loop, "the merge ran on the event loop and would freeze every page"
+
+
+def test_a_long_ingest_does_not_freeze_the_dashboard(client, monkeypatch):
+    """Same hazard on the .xlsx upload route, which also has to be async to read the file."""
+    import asyncio
+
+    from ota_analytics import api
+
+    ran_on_loop = []
+
+    def fake_store_and_ingest(filename, content):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            ran_on_loop.append(True)
+        return {"level": "ok", "message": "checked"}
+
+    monkeypatch.setattr(api, "_store_and_ingest", fake_store_and_ingest)
+    response = client.post("/update/import",
+                           files={"file": ("Devices_1_15Aug26_1511.xlsx", b"PK\x03\x04", "x")})
+
+    assert response.status_code == 200
+    assert not ran_on_loop, "the ingest ran on the event loop and would freeze every page"
+
+
 def test_uploading_something_that_is_not_a_bundle_is_reported_not_raised(client):
     response = client.post("/update/bundle-import",
                            files={"file": ("login.html", b"<html>Sign in</html>", "text/html")})

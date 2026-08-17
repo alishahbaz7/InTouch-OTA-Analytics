@@ -217,15 +217,15 @@
   </section>
 
   <section class="card {{ 'highlight' if tab == 'import' }}">
-    <h2>Import a file <span class="hint">.xlsx export — columns matched by name</span></h2>
+    <h2>Import a file <span class="hint">.xlsx or .csv — columns matched by name</span></h2>
     <form method="post" action="/update/import" enctype="multipart/form-data" class="stack-form">
       <label class="dropzone">
-        <input type="file" name="file" accept=".xlsx" required>
+        <input type="file" name="file" accept=".xlsx,.csv" required>
         <span class="dropzone-text">Choose an export file</span>
-        <small>The platform's own <code>.xlsx</code>, from you or a colleague — keep its
-          filename, the snapshot date is read from it. Not a report downloaded from this
-          dashboard: for a colleague's accumulated history use
-          <a href="#share">Share this data</a> instead.</small>
+        <small>The platform's <code>.xlsx</code>, or a <code>.csv</code> with the same columns —
+          yours or a colleague's. Keep the original filename: the snapshot date is read from it,
+          because no column carries it. For a colleague's whole accumulated history, a
+          <a href="#share">shared bundle</a> is better than a single file.</small>
       </label>
       <div class="form-actions"><button type="submit">Upload &amp; load</button></div>
     </form>

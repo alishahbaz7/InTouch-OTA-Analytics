@@ -58,6 +58,12 @@ Writing a full copy each time cost ~23 MB per fetch, or ~2.2 GB/day at a 15-minu
 row is written only when a device actually changes, and the `device_state` view reconstructs any
 snapshot from those rows. Same numbers, 88.5% fewer rows, and a database that stays nearly flat.
 
+**Both `.xlsx` and `.csv` load**, with columns matched by name rather than position, so a
+colleague's file works whatever order its columns are in. Keep the original filename either way —
+the snapshot time is read from it, because no column carries it. A CSV that turns out to be a
+report this dashboard produced still loads, but is marked second-hand on the quality page: its
+values have already been normalized once and it drops columns the platform sends.
+
 **Always read `device_state`, never `device_snapshot`.** The physical table holds only what
 changed in each fetch, so querying it directly returns a partial fleet — a query that looks
 correct and is silently wrong.
