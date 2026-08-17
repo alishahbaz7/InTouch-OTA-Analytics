@@ -61,9 +61,10 @@
       <button type="submit" class="ghost">Save</button>
     </form>
 
-    {% if startup.supported %}
-    {# Fetching that does not survive a reboot is not unattended. The delay keeps the first
-       fetch out of the logon rush, when antivirus and sync clients compete for the disk. #}
+    {# "Start with Windows" was withdrawn in 1.2.1. What it produced in practice was a copy of
+       the dashboard running with no window that nobody could see or account for — see
+       startup.AUTO_START_AVAILABLE. Auto-fetch above still works whenever the app is open. #}
+    {% if startup_available and startup.supported %}
     <form method="post" action="/update/startup" class="inline-schedule startup-toggle">
       <label class="switch" title="{{ startup.detail }}">
         <input type="checkbox" name="enabled" value="true" {{ 'checked' if startup.enabled }}

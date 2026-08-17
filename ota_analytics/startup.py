@@ -1,4 +1,4 @@
-"""Start with Windows, after a delay.
+"""Start with Windows, after a delay. **Withdrawn — see AUTO_START_AVAILABLE below.**
 
 Unattended fetching that does not survive a reboot is not unattended: a Windows update at 3am
 ends collection silently, and the gap is only noticed days later when a trend looks wrong.
@@ -26,6 +26,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+
+# Withdrawn in 1.2.1. The mechanism worked, but what it produced in practice was a copy of the
+# dashboard running with no window, holding the port, that nobody could see or account for:
+# launching the app then appeared to do nothing, and two schedulers fetched into one database.
+# Single-instance detection (main.already_serving) fixes the symptom, but an invisible process
+# that starts itself is the wrong default for a tool someone opens when they want to look at it.
+#
+# The code below is kept intact and tested. Turning this back on restores the feature — but it
+# should come back with the dashboard able to show that the hidden copy exists and stop it.
+AUTO_START_AVAILABLE = False
 
 ENTRY_NAME = "InTouch OTA Analytics.vbs"
 DEFAULT_DELAY_MINUTES = 30
@@ -300,6 +310,24 @@ def disable() -> StartupState:
         delete_task()
         entry_path().unlink(missing_ok=True)
     return status()
+
+
+def purge_if_withdrawn() -> str:
+    """Take down an entry left armed by a version that still offered auto-start.
+
+    Withdrawing the feature is not enough on its own: the entry lives in the Startup folder, not
+    in this program, so an install that had it switched on would go on launching a windowless
+    copy at every sign-in for ever — the exact thing being removed, now with no toggle to turn
+    it off. Returns what was removed, for the caller to report.
+    """
+    if AUTO_START_AVAILABLE or not is_supported():
+        return ""
+    state = status()
+    if not state.enabled:
+        return ""
+    mechanism = state.mechanism
+    disable()
+    return mechanism
 
 
 def run_now() -> bool:

@@ -102,16 +102,18 @@ def build() -> None:
         "delete it and you start from an empty database.\n\n"
         "Drop platform exports (.xlsx) into the 'Sample data' folder and they load\n"
         "on the next start, or use the Update Data page in the dashboard.\n\n"
-        "Start with Windows: turn it on from the Update Data page. If you later move\n"
-        "this folder, switch it off and on again so it points at the new location.\n\n"
+        "Auto-fetch keeps the data current on a schedule while the app is open — set it\n"
+        "on the Update Data page. Starting the app twice is safe: it opens the copy that\n"
+        "is already running rather than starting another.\n\n"
         "Command line (same program):\n"
         f"  {NAME}.exe db-info                 who this install is and what it holds\n"
         f"  {NAME}.exe db-export --out share.otabundle    hand your history to a colleague\n"
         f"  {NAME}.exe db-import share.otabundle          merge theirs into yours\n"
         f"  {NAME}.exe passwd --role admin     set a dashboard password\n"
         f"  {NAME}.exe --help                  everything else\n\n"
-        f"{NAME}-silent.exe is the same program with no console window. Auto-start\n"
-        "uses it; you do not need to run it yourself.\n",
+        f"{NAME}-silent.exe is the same program with no console window. Running it\n"
+        "shows nothing at all, which looks like it failed — use the one above instead.\n"
+        "It writes to data\\app.log.\n",
         encoding="utf-8")
 
     archive = ROOT / "dist" / f"{NAME}-v{version()}-win64.zip"

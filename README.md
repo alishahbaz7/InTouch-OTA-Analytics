@@ -121,10 +121,17 @@ The zip contains two executables, the same way Python ships `python.exe` and `py
 The CLI is the same executable: `InTouchOTA-Analytics.exe db-info`, `... db-export --out
 share.otabundle`, `... passwd --role admin`.
 
-Auto-start is set from the Update Data page and works in the packaged build. Because the app is
-portable, moving the folder afterwards leaves the entry pointing at the old location — the page
-detects that and tells you to switch it off and on again. The windowless copy has no console,
-so it writes to `data\app.log`; that is where to look if a scheduled start fails.
+**Run the console one.** `-silent` exists only so a background launch does not leave a terminal
+window on the desktop; double-clicking it starts the app with no visible sign that anything
+happened. It logs to `data\app.log`.
+
+Launching the app twice does not start a second copy: it detects the one already running and
+opens that, rather than quietly serving on another port with a second scheduler behind it.
+
+**"Start with Windows" was withdrawn in 1.2.1.** It worked, but what it produced was a copy of
+the dashboard running with no window — holding the port, fetching on its own schedule, and
+impossible to see or stop from the dashboard itself. Auto-fetch still runs on its schedule
+whenever the app is open. An entry left armed by an earlier version is removed on next start.
 
 ## Hosting it
 

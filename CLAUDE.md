@@ -282,14 +282,22 @@ here exists because a frozen build breaks assumptions that are invisible from so
   installs a logging handler on `sys.stdout`, so the silent exe exited a few seconds after
   launch, every reboot, recording nothing. `main.attach_log_when_headless()` points both
   streams at `data\app.log` — which is also the only log that copy will ever produce.
+- **Only one copy runs.** `main.already_serving()` asks `/healthz` whether the port belongs to
+  this app and, if so, opens that URL and exits. Without it a second launch quietly moved to
+  8001 and ran a second scheduler against the same database, while the copy on 8000 might have
+  no window at all — which reads as "I ran it and nothing happened". A port held by anything
+  else still falls back to the next one, so this defers only to our own dashboard.
+- **"Start with Windows" is withdrawn** (`startup.AUTO_START_AVAILABLE = False`). The mechanism
+  works and is still tested; what made it wrong was the result — an invisible process that
+  starts itself, holds the port and cannot be seen or stopped from the dashboard. Bringing it
+  back means first giving the UI a way to show and stop the hidden copy. `purge_if_withdrawn()`
+  takes down an entry armed by an older version, because that entry lives in the Startup folder
+  and would otherwise outlive the feature with no toggle left to remove it.
 - **Auto-start builds one argv, not `(interpreter, script)`.** A packaged build has no
   `main.py`; the program *is* the executable. `startup.launch_command()` is the single source
   for the Startup-folder entry, the scheduled task and "Test it", so they cannot drift apart.
   Paths are quoted **unconditionally** — whoever unpacks the app chooses where it lives, and an
   unquoted `C:\Program Files\...` breaks at boot with nobody watching.
-- **Portable data means the folder gets moved, and the auto-start entry does not follow it.**
-  `startup.status()` reads back the program the armed mechanism actually runs and warns when it
-  is not this one. Without that, moving the folder silently stops collection.
 - **The CLI must be reachable from the .exe.** `main.main()` delegates to `ota_analytics.cli`
   when argv[0] is a known subcommand, derived from the parser via `cli.command_names()` so a
   new command cannot be left unreachable. Otherwise `db-export`, `db-import` and `passwd` would

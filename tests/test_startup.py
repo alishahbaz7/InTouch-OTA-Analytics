@@ -180,19 +180,36 @@ def test_disabling_clears_both_mechanisms(task_allowed, monkeypatch, tmp_path):
 
 
 # ─── the toggle in the UI ───────────────────────────────────────────────────
+#
+# The feature is withdrawn (startup.AUTO_START_AVAILABLE), so the route no longer arms it. The
+# mechanism below is still exercised directly, because turning it back on has to be a one-line
+# change rather than a rewrite — and because an entry left behind by an older version still has
+# to be removable.
 
-def test_the_toggle_turns_it_on_and_off(fake_startup, monkeypatch):
+def test_the_route_no_longer_arms_it(fake_startup, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    from ota_analytics import api
+    from ota_analytics import api, startup as startup_module
+    assert startup_module.AUTO_START_AVAILABLE is False
     client = TestClient(api.app, follow_redirects=False)
 
     response = client.post("/update/startup", data={"enabled": "true", "startup_delay": "30"})
     assert response.status_code == 200
-    assert fake_startup.exists()
-    assert "start with Windows" in response.text
+    assert not fake_startup.exists()
+    assert "has been removed" in response.text
 
-    response = client.post("/update/startup", data={"startup_delay": "30"})   # unchecked
+
+def test_the_route_still_turns_an_old_entry_off(fake_startup, monkeypatch):
+    """Withdrawing the feature must not strand someone who already had it switched on."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import api
+    startup.enable(30)                                  # as an older version left it
+    assert fake_startup.exists()
+
+    response = TestClient(api.app, follow_redirects=False).post(
+        "/update/startup", data={"startup_delay": "30"})   # unchecked
     assert response.status_code == 200
     assert not fake_startup.exists()

@@ -638,6 +638,7 @@ def _update_context(request: Request, **extra) -> dict:
         export_dir=str(config.EXPORT_DIR),
         is_local=_is_local(request),
         startup=startup.status(),
+        startup_available=startup.AUTO_START_AVAILABLE,
         **extra,
     )
     return ctx
@@ -799,7 +800,21 @@ def update_schedule(request: Request,
 @app.post("/update/startup", response_class=HTMLResponse)
 def update_startup(request: Request, enabled: bool = Form(False),
                    startup_delay: int = Form(startup.DEFAULT_DELAY_MINUTES)):
-    """Turn 'start with Windows' on or off."""
+    """Turn 'start with Windows' on or off.
+
+    Still reachable while the feature is withdrawn, because the route outlives the button: a
+    bookmark or an old page left open in a tab would otherwise re-arm the very thing being
+    removed. Turning it *off* is always allowed.
+    """
+    if enabled and not startup.AUTO_START_AVAILABLE:
+        return templates.TemplateResponse(request, "update.html", _update_context(
+            request, tab="agent", result={
+                "level": "warn",
+                "message": "Start with Windows has been removed. It ran a copy of the "
+                           "dashboard with no window, which held the port and could not be "
+                           "seen or stopped. Auto-fetch still runs on its schedule whenever "
+                           "the app is open."}))
+
     state = startup.enable(startup_delay) if enabled else startup.disable()
 
     if not state.supported:

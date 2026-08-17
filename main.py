@@ -469,10 +469,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"InTouch OTA Analytics is already running at {url}")
         print("  Opening that one instead of starting a second copy.\n")
         # Deliberately not "--stop": that only knows about a copy started with --background,
-        # and the one usually holding the port was launched by auto-start, which has no window
-        # and no pid file. Point at the thing that can actually turn it off.
-        print("  It has no window if auto-start launched it. Turn that off on the Update data")
-        print("  page, or end the InTouchOTA-Analytics process in Task Manager.")
+        # so it would be wrong advice for the common cases (a window left open on another
+        # desktop, or the windowless build started by hand).
+        print("  Close the window it is running in, or end InTouchOTA-Analytics in Task")
+        print("  Manager, if you meant to restart it.")
         if not args.no_browser:
             webbrowser.open(url)
         return 0
@@ -480,6 +480,14 @@ def main(argv: list[str] | None = None) -> int:
     print("InTouch OTA Analytics")
     print(f"  database   {config.DB_PATH}")
     print(f"  exports    {config.EXPORT_DIR}")
+
+    # An entry armed by an earlier version outlives the feature being withdrawn: it lives in the
+    # Startup folder, not in this program. Left alone it would keep launching a windowless copy
+    # at every sign-in, with nothing in the UI to switch it off.
+    from ota_analytics import startup
+    removed = startup.purge_if_withdrawn()
+    if removed:
+        print(f"  * removed the old start-with-Windows entry ({removed.replace('-', ' ')})")
 
     if args.no_ingest:
         db.connect()

@@ -305,6 +305,75 @@ def test_a_port_held_by_something_else_still_falls_back(monkeypatch):
         server.server_close()
 
 
+# ─── auto-start, withdrawn ──────────────────────────────────────────────────
+
+def test_the_start_with_windows_toggle_is_gone(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import db, scheduler, sources
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(scheduler, "STATE_PATH", tmp_path / "scheduler.json")
+    monkeypatch.setattr(sources, "SETTINGS_PATH", tmp_path / "connection.json")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    db.connect()
+
+    from ota_analytics import api
+    body = TestClient(api.app, raise_server_exceptions=False).get("/update").text
+    assert "Start with Windows" not in body
+    assert startup.AUTO_START_AVAILABLE is False
+
+
+def test_the_route_refuses_to_re_arm_it(tmp_path, monkeypatch):
+    """The button is gone, but a bookmark or a stale open tab can still post to the route."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from ota_analytics import db, scheduler, sources
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(scheduler, "STATE_PATH", tmp_path / "scheduler.json")
+    monkeypatch.setattr(sources, "SETTINGS_PATH", tmp_path / "connection.json")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    monkeypatch.setattr(startup, "startup_dir", lambda: tmp_path / "Startup")
+    monkeypatch.setattr(startup, "is_supported", lambda: True)
+    monkeypatch.setattr(startup, "create_task", lambda delay: False)
+    monkeypatch.setattr(startup, "task_exists", lambda: False)
+    db.connect()
+
+    from ota_analytics import api
+    response = TestClient(api.app, raise_server_exceptions=False).post(
+        "/update/startup", data={"enabled": "true", "startup_delay": "30"})
+
+    assert response.status_code == 200
+    assert "has been removed" in response.text
+    assert not (tmp_path / "Startup" / startup.ENTRY_NAME).exists()
+
+
+def test_an_entry_armed_by_an_older_version_is_taken_down(tmp_path, monkeypatch):
+    """The entry lives in the Startup folder, not in this program.
+
+    Withdrawing the feature does not reach it: an install that had it switched on would go on
+    launching a windowless copy at every sign-in, with nothing left in the UI to stop it.
+    """
+    monkeypatch.setattr(startup, "startup_dir", lambda: tmp_path / "Startup")
+    monkeypatch.setattr(startup, "is_supported", lambda: True)
+    monkeypatch.setattr(startup, "create_task", lambda delay: False)
+    monkeypatch.setattr(startup, "task_exists", lambda: False)
+    monkeypatch.setattr(startup, "_environment_warning", lambda: "")
+
+    startup.enable(30)                            # as an older version left it
+    entry = tmp_path / "Startup" / startup.ENTRY_NAME
+    assert entry.exists()
+
+    assert startup.purge_if_withdrawn() == "startup-folder"
+    assert not entry.exists()
+    assert startup.purge_if_withdrawn() == ""     # nothing left to do, and no error
+
+
 # ─── the build definition itself ────────────────────────────────────────────
 
 def test_the_spec_ships_every_runtime_resource():
