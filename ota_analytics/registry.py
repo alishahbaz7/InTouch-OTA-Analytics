@@ -44,6 +44,18 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
         return {"changes": 0, "new_devices": 0, "checked": 0}
     snapshot_at = taken["snapshot_at"]
 
+    # `device_state` is a view: every reference to it re-resolves each device's most recent row
+    # at or before this snapshot, across the whole fleet. This function referred to it fifteen
+    # times — once per tracked field, plus the upsert and two counts — so a single fetch paid for
+    # fifteen full resolutions. Measured on the real database that was ~14s per snapshot, which
+    # made replaying 37 snapshots take nearly nine minutes and put the same cost on every
+    # ordinary fetch. Resolving it once into a temp table leaves fourteen scans of a plain
+    # 35,000-row table instead.
+    conn.execute("DROP TABLE IF EXISTS _state")
+    conn.execute("CREATE TEMP TABLE _state AS SELECT * FROM device_state WHERE snapshot_id = ?",
+                 (snapshot_id,))
+    conn.execute("CREATE UNIQUE INDEX ix_state_imei ON _state(imei)")
+
     # 1. Record every tracked value that differs from what we currently hold. Devices we have
     #    never seen produce no rows here — their arrival is the 'new device' case below.
     changes = 0
@@ -51,16 +63,15 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
         cursor = conn.execute(f"""
             INSERT INTO device_change (imei, changed_at, field, old_value, new_value, snapshot_id)
             SELECT d.imei, ?, ?, r.{field}, d.{field}, ?
-            FROM device_state d
+            FROM _state d
             JOIN device r ON r.imei = d.imei
-            WHERE d.snapshot_id = ?
-              -- A change needs a known value on BOTH sides. NULL -> value is a first
-              -- observation and value -> NULL means the source stopped reporting the field;
-              -- neither is the device changing. Without this, switching from the spreadsheet
-              -- export to the API logs ~35k false "changes" per missing column.
-              AND r.{field} IS NOT NULL AND d.{field} IS NOT NULL
+            -- A change needs a known value on BOTH sides. NULL -> value is a first observation
+            -- and value -> NULL means the source stopped reporting the field; neither is the
+            -- device changing. Without this, switching from the spreadsheet export to the API
+            -- logs ~35k false "changes" per missing column.
+            WHERE r.{field} IS NOT NULL AND d.{field} IS NOT NULL
               AND r.{field} <> d.{field}
-        """, (snapshot_at, field, snapshot_id, snapshot_id))
+        """, (snapshot_at, field, snapshot_id))
         changes += cursor.rowcount
 
     # 2. Which devices changed at all, and which changed firmware specifically.
@@ -89,9 +100,9 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
         """, (snapshot_id, field, snapshot_id, field))
 
     new_devices = conn.execute("""
-        SELECT COUNT(*) FROM device_state d
-        WHERE d.snapshot_id = ? AND NOT EXISTS (SELECT 1 FROM device r WHERE r.imei = d.imei)
-    """, (snapshot_id,)).fetchone()[0]
+        SELECT COUNT(*) FROM _state d
+        WHERE NOT EXISTS (SELECT 1 FROM device r WHERE r.imei = d.imei)
+    """).fetchone()[0]
 
     # 3. Upsert current state. last_checked_at always advances; last_changed_at only when this
     #    device actually moved, so "unchanged since" stays truthful across thousands of polls.
@@ -102,7 +113,9 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
             first_seen_at, last_checked_at, last_changed_at, last_fw_change_at, checks, changes)
         SELECT d.imei, {', '.join('d.' + f for f in CARRIED)},
                ?, ?, ?, ?, 1, 0
-        FROM device_state d WHERE d.snapshot_id = ?
+        -- `WHERE 1` is required, not decorative: with no WHERE clause on the SELECT, SQLite's
+        -- parser cannot tell this ON CONFLICT from the ON of a join and refuses the statement.
+        FROM _state d WHERE 1
         ON CONFLICT(imei) DO UPDATE SET
             {assignments},
             last_checked_at = excluded.last_checked_at,
@@ -115,10 +128,12 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
             last_fw_change_at = CASE
                 WHEN EXISTS (SELECT 1 FROM _changed c WHERE c.imei = device.imei AND c.fw = 1)
                 THEN excluded.last_checked_at ELSE device.last_fw_change_at END
-    """, (snapshot_at, snapshot_at, None, None, snapshot_id))
+    """, (snapshot_at, snapshot_at, None, None))
 
-    checked = conn.execute("SELECT COUNT(*) FROM device_state WHERE snapshot_id = ?",
-                           (snapshot_id,)).fetchone()[0]
+    checked = conn.execute("SELECT COUNT(*) FROM _state").fetchone()[0]
+    # Dropped rather than left behind: the scheduler holds one connection for the life of the
+    # process, and this is a full copy of the fleet.
+    conn.execute("DROP TABLE IF EXISTS _state")
     conn.commit()
     return {"changes": changes, "new_devices": new_devices, "checked": checked}
 

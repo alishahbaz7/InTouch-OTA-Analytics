@@ -297,6 +297,11 @@ def _stage(conn: sqlite3.Connection, archive: zipfile.ZipFile, columns: list[str
           PRIMARY KEY (seq, imei)
         ) WITHOUT ROWID
     """)
+    # Resolving the chain looks a device up across sequences, which the (seq, imei) primary key
+    # cannot serve — it would scan the whole staging table once per snapshot. On the real
+    # database that alone took a 37-snapshot merge past ten minutes without finishing. This
+    # mirrors ix_ds_imei_snap on the physical table, which exists for the same lookup.
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_stage_bundle_imei ON stage_bundle(imei, seq)")
 
     insert = (f"INSERT OR REPLACE INTO stage_bundle (seq, {', '.join(columns)}) "
               f"VALUES ({','.join('?' * (len(columns) + 1))})")
@@ -327,15 +332,60 @@ def _stage(conn: sqlite3.Connection, archive: zipfile.ZipFile, columns: list[str
     return staged
 
 
-def _densify_stage(conn: sqlite3.Connection, columns: list[str], sequences: list[int]) -> int:
-    """Give every staged snapshot a full row set, resolved within the bundle's own chain.
+def plan_densify(local: list[tuple[str, int]],
+                 bundle: list[tuple[str, int]]) -> tuple[set[int], set[int]]:
+    """Decide which snapshots stop being self-sufficient once the two timelines merge.
 
-    Only needed when interleaving: once a local snapshot sits between two of the bundle's, the
-    later one can no longer inherit from the earlier one through `device_state`, because the
-    local snapshot in the gap would answer first.
+    A change-row snapshot only means anything relative to the snapshot that came before it when
+    it was written. Merging changes that predecessor for some snapshots and leaves it alone for
+    others — a snapshot whose neighbour is unchanged still resolves correctly and needs nothing
+    done to it.
+
+    Densifying everything is also correct, and was what this did first. It is quadratic: on the
+    real database a 37-snapshot merge became 1.3 M staged rows and had not finished in ten
+    minutes. In the common shape — one side simply holds older history than the other — the two
+    runs of snapshots barely interleave at all and this returns almost nothing.
+
+    `local` is (snapshot_at, id) in local order; `bundle` is (snapshot_at, seq) in bundle order.
+    Ties put the local snapshot first, matching the id order renumbering will produce.
+    """
+    merged = sorted([(when, 0, key) for when, key in local]
+                    + [(when, 1, key) for when, key in bundle])
+
+    # The bundle's first snapshot is exported as a full resolved state, so it inherits nothing
+    # and can never need materializing — however the merge reorders things around it. This is
+    # the whole reason a bundle carries a baseline.
+    baseline = bundle[0][1] if bundle else None
+
+    previous: dict[int, int | None] = {0: None, 1: None}
+    merged_previous: tuple | None = None
+    needs: dict[int, set[int]] = {0: set(), 1: set()}
+
+    for entry in merged:
+        _, side, key = entry
+        own = previous[side]
+        # Same neighbour as when the row was written => nothing to materialize.
+        if merged_previous is None:
+            unchanged = own is None
+        else:
+            unchanged = merged_previous[1] == side and merged_previous[2] == own
+        if not unchanged and not (side == 1 and key == baseline):
+            needs[side].add(key)
+        previous[side] = key
+        merged_previous = entry
+
+    return needs[0], needs[1]
+
+
+def _densify_stage(conn: sqlite3.Connection, columns: list[str], sequences: set[int]) -> int:
+    """Write out the inherited rows of the staged snapshots that need them.
+
+    Resolved within the bundle's own chain, on its own terms. Resolving against the merged table
+    instead would hand foreign snapshots values from local fetches they never saw, which is the
+    exact corruption this module exists to prevent.
     """
     added = 0
-    for seq in sequences[1:]:                 # the baseline is already complete by construction
+    for seq in sorted(sequences):
         cursor = conn.execute(f"""
             INSERT OR IGNORE INTO stage_bundle (seq, {', '.join(columns)})
             SELECT ?, {', '.join('s.' + c for c in columns)}
@@ -493,27 +543,32 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
 
     order = {s["sha"]: seq for seq, s in enumerate(
         sorted(new, key=lambda s: s["snapshot_at"]), start=1)}
-    sequences = sorted(order.values())
 
     # Steps 1-4 are one transaction: until they commit together, a failure leaves no trace.
     # The rebuild that follows cannot join them — renumbering has to toggle PRAGMA
     # foreign_keys, which SQLite ignores inside a transaction — so it is written to be
     # resumable instead, and re-running the same import finishes it.
+    local_densify: set[int] = set()
+    bundle_densify: set[int] = set()
+    if interleaved:
+        local_chain = [(r["snapshot_at"], r["id"]) for r in conn.execute(
+            "SELECT id, snapshot_at FROM snapshot ORDER BY snapshot_at, id")]
+        when_by_sha = {s["sha"]: s["snapshot_at"] for s in new}
+        bundle_chain = [(when_by_sha[sha], seq)
+                        for sha, seq in sorted(order.items(), key=lambda kv: kv[1])]
+        local_densify, bundle_densify = plan_densify(local_chain, bundle_chain)
+
     try:
-        # 1. Make the local snapshots around the insertion point self-sufficient, using the
-        #    table as it stands — before a single foreign row lands in it.
-        if interleaved:
-            affected = [r["id"] for r in conn.execute(
-                "SELECT id FROM snapshot WHERE snapshot_at >= ? ORDER BY snapshot_at, id",
-                (bundle_start,))]
-            for snapshot_id in affected:
-                retention.densify(conn, snapshot_id)
+        # 1. Make the affected local snapshots self-sufficient, using the table as it stands —
+        #    before a single foreign row lands in it.
+        for snapshot_id in sorted(local_densify):
+            retention.densify(conn, snapshot_id)
 
         # 2. Stage the bundle and resolve it on its own terms.
         with _open(source) as archive:
             staged = _stage(conn, archive, columns, order)
-        if interleaved:
-            staged += _densify_stage(conn, columns, sequences)
+        if bundle_densify:
+            staged += _densify_stage(conn, columns, bundle_densify)
 
         # 3. Insert the snapshot rows, oldest first, and map bundle position -> local id.
         meta_by_sha = {}

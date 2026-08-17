@@ -349,6 +349,23 @@ here exists because a frozen build breaks assumptions that are invisible from so
   every API fetch — while also making every device look changed at the source boundary.
   `ingest.provided_columns()` decides this, and it must include *derived* columns (`firmware`
   from `firmware_raw`, and so on) or a real change gets written next to a stale canonical value.
+- **`device_state` is a view, so referring to it twice costs twice.** Each reference re-resolves
+  every device's most recent row across the whole fleet. `registry.apply_snapshot` referred to
+  it fifteen times — once per tracked field, plus the upsert and two counts — which cost ~14s
+  per snapshot and was paid on *every fetch*, not just on a rebuild. It now materializes the
+  snapshot once into an indexed temp table: replaying 37 snapshots went from 533s to 66s with
+  byte-identical output. When a function needs the same snapshot more than twice, resolve it
+  once. (Note the `WHERE 1` before `ON CONFLICT` in that upsert: without a WHERE clause SQLite
+  cannot tell `ON CONFLICT` from a join's `ON` and rejects the statement.)
+- **Merging only has to materialize what actually lost its neighbour.** `bundle.plan_densify`
+  compares each snapshot's predecessor before and after the merge; only those that differ need
+  their inherited rows written out. Densifying everything is also correct and is what the first
+  version did — it turned a 37-snapshot merge into 1.3M staged rows that never finished. The
+  bundle's baseline is dense by construction and is never in the plan.
+- **A staging table needs the same indexes as the table it stands in for.** `stage_bundle`'s
+  primary key is `(seq, imei)`, but resolving a chain looks a device up *across* sequences, so
+  it also needs `(imei, seq)` — mirroring `ix_ds_imei_snap`. Without it every snapshot scanned
+  the whole staging table.
 - **Never open a write transaction on a read path.** `db.connect()` migrates once per process,
   not once per request: re-applying the schema on every page load cost 0.25s and, because it
   writes, serialized every concurrent reader behind it. `busy_timeout` is 30s because a whole

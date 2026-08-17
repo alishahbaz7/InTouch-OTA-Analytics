@@ -3,13 +3,16 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-08-17"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.2.2", "2026-08-17", "Interleaved bundle merge finishes instead of hanging, and is 5.6x "
+                            "faster; every fetch is faster too — the registry resolved the "
+                            "device_state view fifteen times per snapshot instead of once"),
     ("1.2.1", "2026-08-17", "Launching the app shows the copy already running instead of "
                             "starting a second one; 'Start with Windows' withdrawn — it left a "
                             "windowless copy holding the port that could not be seen or stopped"),

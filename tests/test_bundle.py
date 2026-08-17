@@ -359,6 +359,68 @@ def test_group_membership_is_rebuilt_on_import(tmp_path: Path, make_export):
     target.close()
 
 
+# ─── deciding what actually has to be materialized ──────────────────────────
+
+def test_appending_needs_no_densifying():
+    """Newer snapshots after older ones: every neighbour is unchanged, so nothing to do."""
+    local = [("10:00", 1), ("11:00", 2)]
+    incoming = [("12:00", 1), ("13:00", 2)]
+    assert bundle.plan_densify(local, incoming) == (set(), set())
+
+
+def test_older_history_arriving_only_disturbs_the_join():
+    """The common real shape: one side holds older history than the other.
+
+    The two runs meet at exactly one point, so only the snapshot at that seam loses its
+    neighbour. Densifying all of them is what took a 37-snapshot merge past ten minutes.
+    """
+    local = [("12:00", 7), ("13:00", 8)]
+    incoming = [("09:00", 1), ("10:00", 2), ("11:00", 3)]
+    local_needs, bundle_needs = bundle.plan_densify(local, incoming)
+
+    assert local_needs == {7}          # 12:00 now follows 11:00 instead of nothing
+    assert bundle_needs == set()       # the incoming run is untouched and self-contained
+
+
+def test_a_fetch_slotted_into_a_gap_disturbs_only_what_follows_it():
+    local = [("10:00", 1), ("12:00", 2)]
+    incoming = [("11:00", 1)]
+    local_needs, bundle_needs = bundle.plan_densify(local, incoming)
+
+    assert local_needs == {2}          # 12:00 used to follow 10:00, now follows the newcomer
+    assert bundle_needs == set()       # the newcomer is the bundle's dense baseline
+
+
+def test_fully_alternating_timelines_need_almost_everything():
+    """The worst case still has to be handled, just not paid for in the common one."""
+    local = [("10:00", 1), ("12:00", 2), ("14:00", 3)]
+    incoming = [("11:00", 1), ("13:00", 2), ("15:00", 3)]
+    local_needs, bundle_needs = bundle.plan_densify(local, incoming)
+
+    assert local_needs == {2, 3}       # not 1: it is still first overall
+    assert bundle_needs == {2, 3}      # not 1: the baseline is already dense
+
+
+def test_a_tie_puts_the_local_snapshot_first():
+    """Matches the id order renumbering produces, so the plan and the result agree."""
+    local = [("10:00", 1)]
+    incoming = [("10:00", 1), ("11:00", 2)]
+    local_needs, bundle_needs = bundle.plan_densify(local, incoming)
+
+    assert local_needs == set()
+    # seq 1 is the bundle's dense baseline: reordered around, but it inherits nothing.
+    assert bundle_needs == set()
+
+
+def test_the_baseline_is_never_materialized():
+    """It is exported as a full resolved state, so there is nothing for it to inherit."""
+    local = [("10:00", 1), ("12:00", 2), ("14:00", 3)]
+    incoming = [("11:00", 1), ("13:00", 2)]
+    _, bundle_needs = bundle.plan_densify(local, incoming)
+    assert 1 not in bundle_needs
+    assert bundle_needs == {2}
+
+
 # ─── the physical operations merging relies on ──────────────────────────────
 
 def test_densify_then_compact_is_a_round_trip(tmp_path: Path, make_export):
