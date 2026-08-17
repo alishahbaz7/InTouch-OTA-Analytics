@@ -441,8 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--inspect", action="store_true", help="describe it, import nothing")
     p.add_argument("--dry-run", action="store_true", help="report what would happen")
     p.add_argument("--allow-interleave", action="store_true",
-                   help="permit snapshots dated inside history already held; rewrites the "
-                        "surrounding snapshots and rebuilds everything")
+                   help="accept fetches dated BEFORE your newest one; rewrites the surrounding "
+                        "snapshots and rebuilds the change log (minutes, pauses collection)")
     p.set_defaults(func=cmd_db_import)
 
     p = sub.add_parser("serve", help="run the dashboard")

@@ -320,13 +320,19 @@
         reports "nothing to merge". Catching up on a few fetches takes seconds; a first import
         of months of history can take a few minutes and the page will wait for it.</small>
     </label>
+    {# The old label named the mechanism ("snapshots dated inside history already held") rather
+       than the decision, and had to be explained every time. State the situation instead. #}
     <label class="inline">
       <input type="checkbox" name="allow_interleave" value="true">
-      <span>Allow snapshots dated inside history already held
-        <span class="opt">— off by default: slotting a fetch into the middle of a timeline
-          changes what every unchanged device appears to have been doing, so it rewrites the
-          surrounding snapshots and rebuilds everything. Slower, and only needed when their
-          data is older than yours.</span></span>
+      <span>Their data is <strong>older</strong> than mine
+        <span class="opt">— tick this only if their fetches are dated before your newest one
+          ({{ identity.last_snapshot_at or 'your latest' }}). Leave it off when they are ahead of
+          you, which is the usual case and takes seconds. Older fetches have to be slotted into
+          a timeline that already exists, and because this database stores only what changed at
+          each fetch, that alters what unchanged devices appear to have been doing — so it
+          rewrites the surrounding snapshots and rebuilds the change log. A few minutes, and it
+          pauses collection while it runs. If you leave it off when it was needed, the import
+          refuses and tells you rather than getting it wrong.</span></span>
     </label>
     <div class="form-actions"><button type="submit">Merge bundle</button></div>
   </form>

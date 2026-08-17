@@ -3,13 +3,15 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-08-17"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.3.1", "2026-08-17", "The interleave option asks the question it means — 'their data is "
+                            "older than mine' — instead of naming the mechanism"),
     ("1.3.0", "2026-08-17", "CSV exports can be loaded as well as .xlsx, columns matched by "
                             "name; uploads and merges no longer freeze the whole dashboard "
                             "while they run"),

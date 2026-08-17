@@ -540,12 +540,14 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
             snapshots_new=len(new), interleaved=True,
             digest_before=digest_before, digest_after=digest_before,
             message=(
-                f"This bundle starts at {bundle_start}, which is inside history this database "
-                f"already holds (newest local snapshot {local_latest}). Slotting a fetch into "
-                f"the middle of a timeline changes what every unchanged device appears to have "
-                f"been doing, so it is not done silently. Re-run allowing interleave to have "
-                f"the surrounding snapshots rewritten safely first — it rebuilds the whole "
-                f"database and takes longer."))
+                f"This bundle is older than what you already have, so nothing was changed.\n\n"
+                f"Its earliest new fetch is {bundle_start}; your newest is {local_latest}. "
+                f"Slotting older fetches into a timeline that already exists alters what "
+                f"unchanged devices appear to have been doing, because this database stores "
+                f"only what changed at each fetch — so it is never done without being asked.\n\n"
+                f"To go ahead, tick “Their data is older than mine” and import again. That "
+                f"rewrites the surrounding snapshots first and rebuilds the change log: a few "
+                f"minutes, and collection pauses while it runs."))
 
     if dry_run:
         return ImportResult(

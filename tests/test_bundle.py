@@ -170,6 +170,13 @@ def test_interleave_is_refused_by_default(tmp_path: Path, exports):
     assert result.interleaved is True
     assert identity.fleet_digest(mine) == before
     assert mine.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0] == 2
+
+    # The refusal has to say which dates clash and name the option that proceeds, in the same
+    # words the checkbox uses — this is the message someone reads when the import stops.
+    assert "older than what you already have" in result.message
+    assert "2026-08-15 11:00:00" in result.message      # their earliest new fetch
+    assert "2026-08-15 12:00:00" in result.message      # my newest
+    assert "older than mine" in result.message          # the wording on the checkbox
     mine.close()
     theirs.close()
 
