@@ -368,12 +368,20 @@ working merge came to be reported as "no action, only loading".
 
 ## Never let a build touch data (`build.py`)
 
-`dist/` is deleted to start a build clean, and someone running the app from `dist/` has their
-real database in `dist/InTouchOTA-Analytics/data`. That cost 48 snapshots of live fleet history
-more than once. Printing a warning first was not enough — it scrolled past. `rescue_data()` now
-moves the folder out before the delete and `restore_data()` puts it back *after the zip is
-written*, so a handover file cannot carry someone's database either. An interrupted rescue
-refuses rather than overwriting the parked copy.
+`dist/` is deleted to start a build clean, and **this install keeps its data there by choice** —
+the database in `dist/InTouchOTA-Analytics/data`, bundles beside it in `dist/`, reports below it.
+A build used to delete all of it: 48 snapshots of live fleet history, more than once. A printed
+warning was tried first and was not enough, because it scrolled past.
+
+So the rule is **inverted**: `build.BUILD_OUTPUTS` declares what the build itself produced, and
+`user_files()` treats everything else in `dist/` as the user's. It is moved aside before the
+delete and put back after the zip is written, so a handover file cannot carry a database either.
+Listing what to *delete* rather than what to keep is the point — the first version rescued a
+hard-coded `data` folder, so the database survived and the bundles and reports beside it did
+not. Now a kind of file nobody anticipated is preserved by omission instead of destroyed by it,
+for the same reason `auth.py` denies by default. An interrupted rescue refuses rather than
+overwriting the parked copy, and on a name collision the rescued copy wins — a fresh build ships
+an empty `data` folder, and theirs is the only real one.
 
 ## Hard rules
 

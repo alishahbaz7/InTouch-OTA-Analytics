@@ -65,43 +65,90 @@ def clear(folder: Path) -> None:
         raise SystemExit(1)
 
 
-# Where a data folder found inside dist\ is parked while the build runs. Outside dist, because
-# dist itself is deleted.
+# Where anything of yours found inside dist\ is parked while the build runs. Outside dist,
+# because dist itself is deleted.
 PRESERVE = ROOT / ".build-preserved-data"
 
+# The only things in dist\ that this build put there. Everything else belongs to whoever is
+# using the app, and is moved out of the way rather than deleted.
+#
+# Listed as what to *delete* rather than what to keep, deliberately. The first version of this
+# rescued a hard-coded `data` folder and nothing else, so a database survived a build but the
+# bundles and reports sitting beside it did not. With the rule inverted, a kind of file nobody
+# thought about is preserved by omission instead of destroyed by it — the same reason auth.py
+# denies by default.
+BUILD_OUTPUTS = {"_internal", f"{NAME}.exe", f"{NAME}-silent.exe", "READ ME FIRST.txt"}
 
-def rescue_data() -> Path | None:
-    r"""Move any live data folder out of dist before the build deletes it.
 
-    This is not a nicety. Someone who unpacks the app and runs it from dist\ has their real
-    database in dist\InTouchOTA-Analytics\data, and a build used to delete it without asking,
-    taking weeks of fleet history with it. Printing a warning first was not enough: the warning
-    scrolled past and the data went anyway.
+def user_files() -> list[Path]:
+    """Everything in dist that this build did not create."""
+    root = ROOT / "dist"
+    if not root.exists():
+        return []
 
-    So the folder is moved aside and put back. A build rebuilds the *program*; it has no
-    business touching data at all.
+    theirs: list[Path] = []
+    for entry in sorted(root.iterdir()):
+        if entry.name == NAME and entry.is_dir():
+            theirs.extend(inner for inner in sorted(entry.iterdir())
+                          if inner.name not in BUILD_OUTPUTS)
+        elif not (entry.name.startswith(f"{NAME}-v") and entry.suffix == ".zip"):
+            theirs.append(entry)
+    return theirs
+
+
+def rescue_data() -> list[Path] | None:
+    r"""Move anything of the user's out of dist before the build deletes it.
+
+    This is not a nicety. Someone who runs the app from dist\ keeps their database in
+    dist\InTouchOTA-Analytics\data, their bundles beside it, and their reports below it — and a
+    build deleted the lot without asking, taking weeks of fleet history with it. Printing a
+    warning first was not enough: the warning scrolled past and the data went anyway.
+
+    A build rebuilds the *program*. It has no business touching anything else.
     """
-    live = DIST / "data"
-    if not live.exists():
+    theirs = user_files()
+    if not theirs:
         return None
     if PRESERVE.exists():
         raise SystemExit(
             f"{PRESERVE} already exists — an earlier build was interrupted before it could put\n"
-            f"the data back. Move it somewhere safe by hand before building again.")
-    shutil.move(str(live), str(PRESERVE))
-    size = sum(f.stat().st_size for f in PRESERVE.rglob("*") if f.is_file())
-    print(f"Your database is inside dist ({size / 1024 / 1024:.0f} MB).")
-    print(f"  moved to {PRESERVE} for the build, and put back afterwards.")
-    print("  Run the app from a folder outside this repo so builds cannot reach it.\n")
-    return PRESERVE
+            f"your files back. Move that folder somewhere safe by hand before building again.")
+
+    parked: list[Path] = []
+    total = 0
+    for item in theirs:
+        relative = item.relative_to(ROOT / "dist")
+        target = PRESERVE / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(item), str(target))
+        parked.append(relative)
+        total += sum(f.stat().st_size for f in target.rglob("*") if f.is_file()) \
+            if target.is_dir() else target.stat().st_size
+
+    print(f"Your files are inside dist ({total / 1024 / 1024:.0f} MB). Moved aside for the")
+    print(f"build and put back afterwards — nothing here is deleted:")
+    for relative in parked:
+        print(f"    {relative}")
+    print()
+    return parked
 
 
-def restore_data(parked: Path | None) -> None:
-    if parked is None or not parked.exists():
+def restore_data(parked: list[Path] | None) -> None:
+    """Put back everything rescue_data moved, at the same relative path."""
+    if not parked:
         return
-    DIST.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(parked), str(DIST / "data"))
-    print(f"  database put back in {DIST / 'data'}")
+    for relative in parked:
+        source = PRESERVE / relative
+        if not source.exists():
+            continue
+        target = ROOT / "dist" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            # The build produced something with the same name. Theirs wins: it is the only copy.
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+        shutil.move(str(source), str(target))
+        print(f"  put back  dist\\{relative}")
+    shutil.rmtree(PRESERVE, ignore_errors=True)
 
 
 def build() -> None:
