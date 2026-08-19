@@ -121,9 +121,16 @@ def rollup_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> None:
     conn.commit()
 
 
-def rollup_all(conn: sqlite3.Connection) -> int:
-    """Rebuild facts for every snapshot. Returns the number of snapshots processed."""
+def rollup_all(conn: sqlite3.Connection, on_step=None) -> int:
+    """Rebuild facts for every snapshot. Returns the number of snapshots processed.
+
+    `on_step(done, total)` is called after each snapshot, so a caller can report progress.
+    """
     ids = [r["id"] for r in conn.execute("SELECT id FROM snapshot ORDER BY snapshot_at")]
-    for snapshot_id in ids:
+    if on_step:
+        on_step(0, len(ids))
+    for position, snapshot_id in enumerate(ids, start=1):
         rollup_snapshot(conn, snapshot_id)
+        if on_step:
+            on_step(position, len(ids))
     return len(ids)

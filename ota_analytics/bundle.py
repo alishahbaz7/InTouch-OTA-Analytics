@@ -65,6 +65,32 @@ class BundleError(Exception):
     """Raised when a bundle cannot be read or safely merged."""
 
 
+# Phases of a merge and what each is worth on the progress bar. The weights are measured, not
+# guessed: on the real database a 37-snapshot interleave spent 110s as roughly 3s staging, 6s
+# reordering, 1s compacting, 4s on groups, 66s replaying the change log and 29s on metrics.
+# Even weights would leave the bar apparently stuck for a minute at the exact point people give
+# up and kill the process.
+MERGE_STEPS = [
+    ("Reading the bundle", 1.0),
+    ("Loading snapshots", 4.0),
+    ("Putting the timeline in order", 6.0),
+    ("Removing duplicate rows", 1.0),
+    ("Rebuilding group membership", 4.0),
+    ("Replaying the change log", 60.0),
+    ("Rebuilding metrics", 26.0),
+]
+
+
+class _Silent:
+    """Stands in for a job when nobody is watching, so the code has no `if job` branches."""
+
+    def begin(self, name, total=0, detail=""):
+        pass
+
+    def advance(self, done=None, detail=None):
+        pass
+
+
 @dataclass
 class ExportResult:
     path: Path | None
@@ -401,7 +427,7 @@ def _densify_stage(conn: sqlite3.Connection, columns: list[str], sequences: set[
     return added
 
 
-def _rebuild_groups(conn: sqlite3.Connection, snapshot_ids: list[int]) -> int:
+def _rebuild_groups(conn: sqlite3.Connection, snapshot_ids: list[int], on_step=None) -> int:
     """Re-derive group membership for the imported snapshots.
 
     device_group is not carried in the bundle: it is fully derivable from `groups_raw`, which
@@ -409,7 +435,9 @@ def _rebuild_groups(conn: sqlite3.Connection, snapshot_ids: list[int]) -> int:
     than the raw rows, because a device that did not change carries no row of its own.
     """
     written = 0
-    for snapshot_id in snapshot_ids:
+    for position, snapshot_id in enumerate(snapshot_ids, start=1):
+        if on_step:
+            on_step(position)
         rows = conn.execute(
             "SELECT imei, groups_raw FROM device_state "
             "WHERE snapshot_id = ? AND groups_raw IS NOT NULL", (snapshot_id,)).fetchall()
@@ -423,7 +451,8 @@ def _rebuild_groups(conn: sqlite3.Connection, snapshot_ids: list[int]) -> int:
 
 
 def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
-                  shas: list[str] | None = None, *, full_rebuild: bool = True) -> dict:
+                  shas: list[str] | None = None, *, full_rebuild: bool = True,
+                  job=None) -> dict:
     """Put the database back in order after foreign rows have landed, and rebuild everything.
 
     Split out so an import interrupted partway can be completed on the next attempt rather
@@ -437,8 +466,11 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
     import's total time, so paying it only when it is needed is most of what makes handing
     someone the fetches they are missing quick.
     """
+    job = job or _Silent()
+
     # `device_state` resolves state by comparing snapshot ids, not timestamps, so an id that
     # sits out of chronological order does not look untidy — it returns the wrong row.
+    job.begin("Putting the timeline in order")
     renumbered = retention.renumber_snapshots(conn)
 
     # Squeeze out the rows densify materialized, plus any row the bundle repeated because its
@@ -447,6 +479,7 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
     if bundle_start:
         first_id = conn.execute("SELECT MIN(id) AS id FROM snapshot WHERE snapshot_at >= ?",
                                 (bundle_start,)).fetchone()["id"]
+    job.begin("Removing duplicate rows")
     compacted = retention.compact(conn, first_id)
     conn.commit()
 
@@ -456,17 +489,28 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
         ids = [r["id"] for r in conn.execute(
             f"SELECT id FROM snapshot WHERE file_sha256 IN ({placeholders}) "
             f"ORDER BY snapshot_at, id", shas)]
-        _rebuild_groups(conn, ids)
+        job.begin("Rebuilding group membership", total=len(ids))
+        _rebuild_groups(conn, ids, on_step=job.advance)
 
     # Renumbering drops the fact tables rather than remapping them, so it forces the full path
     # whatever the caller asked for.
+    def replay(done, total):
+        job.begin("Replaying the change log", total=total)
+        job.advance(done, detail=f"snapshot {done:,} of {total:,}")
+
+    def metrics(done, total):
+        job.begin("Rebuilding metrics", total=total)
+        job.advance(done, detail=f"snapshot {done:,} of {total:,}")
+
     if full_rebuild or renumbered or not ids:
-        registry.rebuild(conn)
-        rollup.rollup_all(conn)
+        registry.rebuild(conn, on_step=replay)
+        rollup.rollup_all(conn, on_step=metrics)
     else:
-        for snapshot_id in ids:               # oldest first, so the change log reads in order
+        job.begin("Replaying the change log", total=len(ids))
+        for position, snapshot_id in enumerate(ids, start=1):
             registry.apply_snapshot(conn, snapshot_id)
             rollup.rollup_snapshot(conn, snapshot_id)
+            job.advance(position, detail=f"snapshot {position:,} of {len(ids):,}")
     conn.commit()
     return {"renumbered": renumbered, "compacted": compacted}
 

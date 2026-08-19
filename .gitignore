@@ -30,3 +30,6 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# A data folder rescued from dist during a build; put back when the build finishes.
+.build-preserved-data/

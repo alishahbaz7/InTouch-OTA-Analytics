@@ -65,17 +65,55 @@ def clear(folder: Path) -> None:
         raise SystemExit(1)
 
 
+# Where a data folder found inside dist\ is parked while the build runs. Outside dist, because
+# dist itself is deleted.
+PRESERVE = ROOT / ".build-preserved-data"
+
+
+def rescue_data() -> Path | None:
+    r"""Move any live data folder out of dist before the build deletes it.
+
+    This is not a nicety. Someone who unpacks the app and runs it from dist\ has their real
+    database in dist\InTouchOTA-Analytics\data, and a build used to delete it without asking,
+    taking weeks of fleet history with it. Printing a warning first was not enough: the warning
+    scrolled past and the data went anyway.
+
+    So the folder is moved aside and put back. A build rebuilds the *program*; it has no
+    business touching data at all.
+    """
+    live = DIST / "data"
+    if not live.exists():
+        return None
+    if PRESERVE.exists():
+        raise SystemExit(
+            f"{PRESERVE} already exists — an earlier build was interrupted before it could put\n"
+            f"the data back. Move it somewhere safe by hand before building again.")
+    shutil.move(str(live), str(PRESERVE))
+    size = sum(f.stat().st_size for f in PRESERVE.rglob("*") if f.is_file())
+    print(f"Your database is inside dist ({size / 1024 / 1024:.0f} MB).")
+    print(f"  moved to {PRESERVE} for the build, and put back afterwards.")
+    print("  Run the app from a folder outside this repo so builds cannot reach it.\n")
+    return PRESERVE
+
+
+def restore_data(parked: Path | None) -> None:
+    if parked is None or not parked.exists():
+        return
+    DIST.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(parked), str(DIST / "data"))
+    print(f"  database put back in {DIST / 'data'}")
+
+
 def build() -> None:
     check_pyinstaller()
+    parked = rescue_data()
 
-    # Anyone testing from dist\ has a database in there, and it is about to be deleted.
-    stale_db = DIST / "data"
-    if stale_db.exists():
-        print(f"Note: removing the test database in {stale_db}")
-        print("      (a real install keeps its data beside its own copy of the .exe)\n")
-
-    for stale in (ROOT / "build", ROOT / "dist"):
-        clear(stale)
+    try:
+        for stale in (ROOT / "build", ROOT / "dist"):
+            clear(stale)
+    except BaseException:
+        restore_data(parked)
+        raise
 
     print(f"Building {NAME} v{version()} with {sys.executable}\n")
     result = subprocess.run(
@@ -89,6 +127,7 @@ def build() -> None:
     for required in (console, silent):
         if not required.exists():
             print(f"Build finished but {required.name} is missing.", file=sys.stderr)
+            restore_data(parked)
             raise SystemExit(1)
 
     # A README next to the exe, because the person who receives the zip has no other
@@ -121,6 +160,9 @@ def build() -> None:
         for path in sorted(DIST.rglob("*")):
             if path.is_file():
                 bundle.write(path, Path(NAME) / path.relative_to(DIST))
+
+    # Only now the zip is written, so the handover file cannot carry a database with it.
+    restore_data(parked)
 
     size = sum(f.stat().st_size for f in DIST.rglob("*") if f.is_file())
     print(f"\n  folder  {DIST}  ({size / 1024 / 1024:.0f} MB)")

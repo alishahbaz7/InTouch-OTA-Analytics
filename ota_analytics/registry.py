@@ -138,18 +138,28 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
     return {"changes": changes, "new_devices": new_devices, "checked": checked}
 
 
-def rebuild(conn: sqlite3.Connection) -> dict:
-    """Replay every snapshot in order to rebuild the registry from scratch."""
+def rebuild(conn: sqlite3.Connection, on_step=None) -> dict:
+    """Replay every snapshot in order to rebuild the registry from scratch.
+
+    `on_step(done, total)` is called after each snapshot. This is the slowest phase of a merge —
+    around 60% of it — so it is the one that most needs to be visible while it runs.
+    """
     conn.execute("DELETE FROM device_change")
     conn.execute("DELETE FROM device")
     conn.commit()
 
+    rows = conn.execute("SELECT id FROM snapshot ORDER BY snapshot_at, id").fetchall()
+    if on_step:
+        on_step(0, len(rows))
+
     totals = {"changes": 0, "new_devices": 0, "snapshots": 0}
-    for row in conn.execute("SELECT id FROM snapshot ORDER BY snapshot_at, id").fetchall():
+    for row in rows:
         result = apply_snapshot(conn, row["id"])
         totals["changes"] += result["changes"]
         totals["new_devices"] += result["new_devices"]
         totals["snapshots"] += 1
+        if on_step:
+            on_step(totals["snapshots"], len(rows))
     return totals
 
 
