@@ -33,3 +33,6 @@ venv/
 
 # A data folder rescued from dist during a build; put back when the build finishes.
 .build-preserved-data/
+
+# Version resources, generated per build from __version__.
+version_InTouchOTA-Analytics*.txt

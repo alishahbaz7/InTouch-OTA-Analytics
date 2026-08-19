@@ -31,6 +31,61 @@ def version() -> str:
     return __version__
 
 
+# Windows reads the version out of a resource compiled into the .exe, not out of its name.
+# Generated here from __version__ rather than kept as a file of its own, so the number on the
+# file cannot drift from the number in the code — a version that lags is worse than none, because
+# a bug report then points at the wrong build.
+#
+# The filenames stay unversioned on purpose. startup.launch_command() finds the windowless build
+# by exact name, and a name carrying the version would break that lookup at every release unless
+# it were derived; the zip already carries the version for handover.
+VERSION_RESOURCE = """VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({parts}),
+    prodvers=({parts}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [StringStruct('CompanyName', 'MapmyIndia'),
+         StringStruct('FileDescription', '{description}'),
+         StringStruct('FileVersion', '{version}'),
+         StringStruct('InternalName', '{internal}'),
+         StringStruct('OriginalFilename', '{filename}'),
+         StringStruct('ProductName', 'InTouch OTA Analytics'),
+         StringStruct('ProductVersion', '{version}')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+
+
+def write_version_resources() -> dict[str, Path]:
+    """One resource per executable, so the two are told apart in Explorer and Task Manager."""
+    number = version()
+    parts = ", ".join((number.split(".") + ["0", "0", "0", "0"])[:4])
+
+    written = {}
+    for internal, description in (
+        (NAME, "InTouch OTA Analytics - dashboard and CLI"),
+        (f"{NAME}-silent", "InTouch OTA Analytics - no console window"),
+    ):
+        path = ROOT / f"version_{internal}.txt"
+        path.write_text(VERSION_RESOURCE.format(
+            parts=parts, version=number, description=description,
+            internal=internal, filename=f"{internal}.exe"), encoding="utf-8")
+        written[internal] = path
+    return written
+
+
 def check_pyinstaller() -> None:
     try:
         import PyInstaller  # noqa: F401
@@ -162,7 +217,9 @@ def build() -> None:
         restore_data(parked)
         raise
 
-    print(f"Building {NAME} v{version()} with {sys.executable}\n")
+    resources = write_version_resources()
+    print(f"Building {NAME} v{version()} with {sys.executable}")
+    print(f"  stamping {len(resources)} version resource(s) with {version()}\n")
     result = subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)],
         cwd=str(ROOT))
@@ -207,6 +264,9 @@ def build() -> None:
         for path in sorted(DIST.rglob("*")):
             if path.is_file():
                 bundle.write(path, Path(NAME) / path.relative_to(DIST))
+
+    for path in resources.values():
+        path.unlink(missing_ok=True)      # generated per build; nothing kept in the tree
 
     # Only now the zip is written, so the handover file cannot carry a database with it.
     restore_data(parked)
