@@ -534,6 +534,19 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
 - **Never query the platform's production DB from a request path** (applies from Phase 6 on).
 - No secrets in the repo. `ANTHROPIC_API_KEY` comes from the environment or `.env` (gitignored).
 
+## Working rules for this repo
+
+- **Branch per version, and `main` only on request.** Work happens on a branch named exactly the
+  app version (`1.7.0`), and the version in `ota_analytics/__init__.py` matches the branch it is
+  on. Once something is pushed to `main`, the next change starts on a new branch — never carry on
+  committing to `main`.
+- **Never build unless asked.** `python build.py` is not part of finishing a change. It is asked
+  for separately, at a release.
+- **Never leave scratch scripts in the tree.** Patch helpers written to make an edit are deleted
+  in the same step, not committed.
+- **`dist/` holds live data on this machine** — the database, bundles and reports. Treat anything
+  in it as the user's; see the build-safety section.
+
 ## Commands
 
 `main.py` at the repo root is the one-click entry point: it creates the database, ingests any
