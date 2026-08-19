@@ -6,6 +6,25 @@ device snapshots, a dashboard over them, and downloadable reports.
 
 Local-first, single file database, no Node build step, works offline.
 
+## One vocabulary
+
+Every task state has one name and one colour, everywhere — tile, chart, table, download,
+CLI:
+
+| State | Colour |
+|---|---|
+| Task completed | green |
+| **Task pending — Online** | **yellow** — reachable and still not updated, the actionable one |
+| Task pending — Offline | orange — parked until the device is switched on |
+| No pending task | grey |
+| **Activation-Pending** | grey — onboarded, IMEI only, has never pinged |
+
+Nothing here is called "stuck" or "failed". The platform assigns tasks in bulk to devices that
+are switched off, so a pending task is *parked*; the word would carry a judgement the data does
+not support. `Activation-Pending` is the platform's `Inactive` renamed for what it is — on the
+real fleet those 645 devices are exactly the ones with no last-ping, no VIN, no ICCID and no
+task ever assigned. The stored value stays `Inactive`, because that is what the export said.
+
 ## The question it exists to answer
 
 The platform assigns update tasks in bulk, including to devices that are switched off. A pending
@@ -38,7 +57,7 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 408 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 484 tests
 ```
 
 ## How the data works
@@ -122,7 +141,7 @@ The zip contains two executables, the same way Python ships `python.exe` and `py
 | | |
 |---|---|
 | `InTouchOTA-Analytics.exe` | console — interactive use and the CLI, prints its log |
-| `InTouchOTA-Analytics-silent.exe` | no window — what **Start with Windows** runs after a reboot |
+| `InTouchOTA-Analytics-silent.exe` | no window — logs to `data\app.log` |
 
 The CLI is the same executable: `InTouchOTA-Analytics.exe db-info`, `... db-export --out
 share.otabundle`, `... passwd --role admin`.
@@ -138,6 +157,39 @@ opens that, rather than quietly serving on another port with a second scheduler 
 the dashboard running with no window — holding the port, fetching on its own schedule, and
 impossible to see or stop from the dashboard itself. Auto-fetch still runs on its schedule
 whenever the app is open. An entry left armed by an earlier version is removed on next start.
+
+**A build cannot delete your data.** `dist/` is cleared to start clean, and an install that lives
+there keeps its database, bundles and reports in it. `build.py` declares the four files it
+produces and moves everything else aside, putting it back after the zip is written — so the
+handover file cannot carry a database either. Warning about it first was tried and was not
+enough: the warning scrolled past and the data went anyway.
+
+## While it works
+
+A merge takes minutes and a fetch takes tens of seconds, so both report a **determinate progress
+bar** — the width comes from work completed (snapshots folded, devices read), never from elapsed
+time. The job runs on the server, so closing the tab does not stop it and reopening **Update
+data** finds it mid-flight. One job at a time; they all write to the database.
+
+The header carries one freshness chip — `Updated 09:06 · 3 hr ago · auto 1 hour` — and a theme
+switch cycling **auto / light / dark**, applied before first paint so there is no flash of the
+wrong theme.
+
+## Speed
+
+`device_state` is a view: every reference re-resolves each device's most recent row across the
+whole fleet. At 48 snapshots that is **1.0s per reference**, and a page calls six to ten metrics.
+`metrics.snapshot_source()` resolves the snapshot once per request into a temp table instead:
+
+| Page | Before | After |
+|---|---|---|
+| Overview | 12.7s | **1.05s** |
+| Pending | 9.3s | 2.5s |
+| Firmware | 5.2s | 0.9s |
+| Devices | 4.3s | 1.5s |
+
+Every metric keeps its own `WHERE snapshot_id = ?`, so a mismatched snapshot returns nothing
+rather than the wrong rows, and any metric still reading the view is merely slow.
 
 ## Hosting it
 
@@ -165,10 +217,13 @@ Set the passwords with `python -m ota_analytics.cli passwd --role admin`.
 
 ## Status
 
-Working: ingest (spreadsheet and platform API), snapshot diffing, the dashboard, data-quality
-rules, scheduled fetching, retention, XLSX reports, authentication, and database identity plus
-snapshot bundles for keeping two installs in sync. AI-written insight summaries are the next
-phase.
+Working: ingest (`.xlsx` and `.csv`, columns matched by name), snapshot diffing, the dashboard,
+data-quality rules, scheduled fetching, retention, XLSX reports, authentication, database
+identity plus snapshot bundles for keeping two installs in sync, progress reporting for long
+jobs, and a packaged Windows build. AI-written insight summaries are the next phase.
+
+Next up: consistent table behaviour across every list — page size, pinned headers, per-column
+filter and sort, and search — starting with **Firmware moves** on the Changes page.
 
 Data note: the exports contain IMEIs, VINs and ICCIDs of customer vehicles. `data/`,
 `Sample data/` and `*.otabundle` are gitignored, and they should stay that way — a bundle holds
