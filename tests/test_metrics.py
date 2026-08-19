@@ -106,3 +106,42 @@ def test_staleness_buckets_cover_the_whole_fleet(snapshot):
     conn, sid = snapshot
     buckets = metrics.staleness_buckets(conn, sid)
     assert sum(b["devices"] for b in buckets) == 6
+
+
+# ─── Activation-Pending: onboarded, IMEI only, never pinged ─────────────────
+
+def test_activation_pending_is_the_never_pinged_state(snapshot):
+    """The platform calls it "Inactive", which reads like a device that stopped working.
+
+    These have never started: on the real fleet the 645 devices with `status = 'Inactive'` are
+    exactly the 645 with `seen_at IS NULL`, and they carry an IMEI and nothing else — no VIN, no
+    ICCID, no first ping, never tasked. They are waiting to be activated. The stored value keeps
+    the platform's word, because that is what the export said; only the reading changes.
+    """
+    from ota_analytics import normalize
+
+    assert normalize.status_label("Inactive") == "Activation-Pending"
+    assert normalize.status_label("Online") == "Online"
+    assert normalize.status_label("Offline") == "Offline"
+    # An unrecognised value is shown as it is rather than silently relabelled or hidden.
+    assert normalize.status_label("Something else") == "Something else"
+    assert normalize.status_label(None) == "—"
+
+
+def test_the_stored_status_is_left_alone(snapshot):
+    """Re-labelling stored data would make the database and the platform disagree."""
+    conn, sid = snapshot
+    stored = {r[0] for r in conn.execute(
+        "SELECT DISTINCT status FROM device_state WHERE snapshot_id = ?", (sid,))}
+    assert "Activation-Pending" not in stored
+    assert stored <= {"Online", "Offline", "Inactive"}
+
+
+def test_a_download_uses_the_same_word_as_the_screen(snapshot):
+    """Two names for one number turns one source of truth into two."""
+    from ota_analytics import exports
+
+    body = exports.to_csv([{"imei": "1", "status": "Inactive"}],
+                          [("imei", "IMEI"), ("status", "Status")])
+    assert "Activation-Pending" in body
+    assert "Inactive" not in body

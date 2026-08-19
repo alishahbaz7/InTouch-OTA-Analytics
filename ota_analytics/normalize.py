@@ -46,6 +46,29 @@ def clean(value: object) -> str | None:
     return text
 
 
+# What each stored status is called on screen. The database keeps the platform's own word,
+# because that is what the export said and re-labelling stored data would make the two disagree.
+# Only the reading changes.
+#
+# "Inactive" is the platform's term for a device that has never pinged, and on the real fleet the
+# two are exactly the same 645 devices: `seen_at IS NULL` and `status = 'Inactive'` select an
+# identical set. Those devices are onboarded and carry an IMEI and nothing else — no VIN, no
+# ICCID, no first ping, never tasked — so they are waiting to be activated, not inactive in the
+# sense of having gone quiet. "Inactive" reads like a device that stopped working; these have
+# never started.
+STATUS_LABELS = {
+    "Online": "Online",
+    "Offline": "Offline",
+    "Inactive": "Activation-Pending",
+}
+
+
+def status_label(value: object) -> str:
+    """The name for a stored status. Unknown values are shown as they are, not hidden."""
+    text = clean(value)
+    return STATUS_LABELS.get(text or "", text or "—")
+
+
 def canon_status(value: object) -> str | None:
     """Canonical device status.
 

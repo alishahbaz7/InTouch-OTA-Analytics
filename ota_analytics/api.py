@@ -21,8 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics, progress,
-               registry, rollup, scheduler, sources, startup)
+from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics,
+               normalize, progress, registry, rollup, scheduler, sources, startup)
 
 from . import __version__, build_info      # noqa: E402  (kept beside the app metadata)
 
@@ -151,6 +151,8 @@ def _pct(value: float | int | None, total: float | int | None) -> float:
 templates.env.filters["pct"] = _pct
 templates.env.filters["comma"] = lambda v: f"{v:,}" if isinstance(v, (int, float)) else v
 templates.env.filters["from_json"] = lambda v: json.loads(v) if v else []
+# One mapping from stored status to the word on screen, so no template invents its own.
+templates.env.filters["status"] = normalize.status_label
 
 
 def _relative_age(timestamp: str | None) -> str:

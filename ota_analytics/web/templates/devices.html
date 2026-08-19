@@ -26,16 +26,21 @@
   <label>Status
     <select name="status">
       <option value="">All</option>
+      {# The stored value is the platform's word; the label is ours. See
+         normalize.STATUS_LABELS — a device that has never pinged is waiting to be
+         activated, not one that has gone quiet. #}
       {% for s in ['Online', 'Offline', 'Inactive'] %}
-      <option value="{{ s }}" {{ 'selected' if s == filters.status }}>{{ s }}</option>
+      <option value="{{ s }}" {{ 'selected' if s == filters.status }}>{{ s | status }}</option>
       {% endfor %}
     </select>
   </label>
   <label>Task state
     <select name="queue_state">
       <option value="">All</option>
-      {% for s in ['pending', 'completed', 'never_tasked'] %}
-      <option value="{{ s }}" {{ 'selected' if s == filters.queue_state }}>{{ s }}</option>
+      {# Same four names the tiles use, so filtering and reading agree. #}
+      {% for value, text in [('pending', 'Task pending'), ('completed', 'Task completed'),
+                             ('never_tasked', 'No pending task')] %}
+      <option value="{{ value }}" {{ 'selected' if value == filters.queue_state }}>{{ text }}</option>
       {% endfor %}
     </select>
   </label>
@@ -134,8 +139,8 @@
         <td class="dim">{{ d.update_firmware or '—' }}</td>
         <td class="dim">{{ d.configuration or '—' }}</td>
         <td class="dim">{{ d.hw_ver or '—' }}</td>
-        <td><span class="pill pill-{{ d.status | lower }}">{{ d.status }}</span></td>
-        <td><span class="pill pill-{{ d.queue_state }}">{{ d.queue_state }}</span></td>
+        <td><span class="pill pill-{{ d.status | lower }}">{{ d.status | status }}</span></td>
+        <td><span class="pill pill-{{ d.queue_state }}">{{ {'pending': 'Task pending', 'completed': 'Task completed', 'never_tasked': 'No pending task'}.get(d.queue_state, d.queue_state) }}</span></td>
         <td>{{ m.dark_days(d.seen_age_hours) }}</td>
         <td class="dim small">{{ (d.last_checked_at or '')[11:16] }}</td>
       </tr>

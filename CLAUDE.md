@@ -395,6 +395,23 @@ donut, table header, download filename, CLI summary.
 | `Task pending — Offline` | orange `#e8893c` | parked until the device is switched on |
 | `No pending task` | grey `--muted` | never targeted, which for an EOL model is correct |
 
+**`Activation-Pending`** is the never-pinged state. The platform calls it `Inactive`, which reads
+like a device that stopped working; these have never started. On the real fleet the 645 devices
+with `status = 'Inactive'` are exactly the 645 with `seen_at IS NULL`, and they carry an IMEI and
+nothing else — no VIN, no ICCID, no first ping, never tasked. They are onboarded and waiting to be
+activated, and the fleet-health question is whether that number is falling.
+
+- **The stored value stays `Inactive`.** That is the word the export used, and re-labelling stored
+  data would make the database and the platform disagree. Only the reading changes, through
+  `normalize.STATUS_LABELS` and the `status` Jinja filter — one mapping, so no template invents
+  its own.
+- **Downloads carry the same word as the screen** (`exports._label_status`). A file saying
+  "Inactive" where the dashboard says "Activation-Pending" turns one source of truth into two.
+- An unrecognised status is shown as it is, not hidden behind a fallback.
+- Note this is *not* the same set as the `(unknown)` model/firmware rows: 674 devices report
+  neither, of which 645 have never pinged and 29 have pinged but the platform sends no model or
+  firmware for them. The second group is a data gap, not activation-pending.
+
 - **Do not write "stuck", "stalled" or "failed" about a pending task.** The platform assigns
   tasks in bulk to devices that are switched off, so a pending task is *parked*, and the word
   carries a judgement the data does not support. The page previously said "Stuck while

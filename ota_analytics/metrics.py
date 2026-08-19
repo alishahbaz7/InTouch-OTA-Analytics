@@ -475,7 +475,7 @@ def hourly_activity(conn: sqlite3.Connection, snapshot_id: int, hours: int = 24,
 
 def status_breakdown(conn: sqlite3.Connection, snapshot_id: int,
                      models: list[str] | None = None) -> list[dict]:
-    """Online / Offline / Inactive, in a fixed order so colours stay stable."""
+    """Online / Offline / Activation-Pending, in a fixed order so colours stay stable."""
     clause, params = model_filter(models)
     counts = {r["status"]: r["n"] for r in conn.execute(at(conn, snapshot_id, f"""
         SELECT COALESCE(status, 'Unknown') AS status, COUNT(*) AS n
@@ -484,7 +484,11 @@ def status_breakdown(conn: sqlite3.Connection, snapshot_id: int,
     return [
         {"label": "Online", "value": counts.get("Online", 0), "tone": "seg-ok"},
         {"label": "Offline", "value": counts.get("Offline", 0), "tone": "seg-warn"},
-        {"label": "Never pinged", "value": counts.get("Inactive", 0), "tone": "seg-dim"},
+        # Not "Never pinged", which describes the symptom. These devices are onboarded and
+        # waiting to be activated; the fleet-health question is whether that number is
+        # falling.
+        {"label": "Activation-Pending", "value": counts.get("Inactive", 0),
+         "tone": "seg-dim"},
     ]
 
 

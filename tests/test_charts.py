@@ -53,7 +53,7 @@ def test_hourly_activity_excludes_old_and_never_seen_devices(snapshot):
 def test_status_breakdown_is_fixed_order(snapshot):
     conn, sid = snapshot
     segments = metrics.status_breakdown(conn, sid)
-    assert [s["label"] for s in segments] == ["Online", "Offline", "Never pinged"]
+    assert [s["label"] for s in segments] == ["Online", "Offline", "Activation-Pending"]
     assert sum(s["value"] for s in segments) == 7
 
 

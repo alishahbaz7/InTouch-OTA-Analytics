@@ -81,6 +81,7 @@ def describe(filters: dict) -> str:
 
 
 def to_csv(rows: list[dict], columns) -> str:
+    _label_status(rows)
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow([header for _, header in columns])
@@ -141,6 +142,7 @@ def to_xlsx(rows: list[dict], columns, sheet_name: str = "Devices",
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    _label_status(rows)
     workbook = Workbook(write_only=False)
     sheet = workbook.active
     sheet.title = sheet_name[:31]
@@ -176,6 +178,19 @@ def to_xlsx(rows: list[dict], columns, sheet_name: str = "Devices",
     stream = io.BytesIO()
     workbook.save(stream)
     return stream.getvalue()
+
+
+def _label_status(rows: list[dict]) -> None:
+    """Rewrite the status column to the name used on screen.
+
+    A download that says "Inactive" where the dashboard says "Activation-Pending" makes two
+    sources of truth out of one number. The stored value is untouched; only the file changes.
+    """
+    from . import normalize
+
+    for row in rows:
+        if "status" in row:
+            row["status"] = normalize.status_label(row["status"])
 
 
 def _clean(value):
