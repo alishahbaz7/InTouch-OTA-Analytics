@@ -144,6 +144,33 @@ Compare this with a colleague before comparing numbers.">
   setInterval(tick, 1000);
 })();
 
+// How far down the page a sticky table header has to sit: the height of the page header
+// above it, which changes when the window is narrow enough for the header to wrap. A
+// hard-coded offset would leave the column names either overlapped or floating.
+(function () {
+  var header = document.querySelector('header');
+  if (!header) return;
+
+  function measure() {
+    var root = document.documentElement;
+    root.style.setProperty('--sticky-top', header.offsetHeight + 'px');
+    // A two-tier header needs the height of its first row too, so the second can sit
+    // directly under it instead of on top of it.
+    var group = document.querySelector('table.grouped thead .group-row');
+    if (group) root.style.setProperty('--group-row-h', group.offsetHeight + 'px');
+    // And the second tier, so a pinned totals row lands under both rather than over
+    // the column names.
+    var sub = document.querySelector('table.grouped thead .sub-row');
+    if (sub) root.style.setProperty('--sub-row-h', sub.offsetHeight + 'px');
+  }
+
+  measure();
+  window.addEventListener('resize', measure);
+  // Fonts land after first paint and change the header height, so measure again once the
+  // page has settled.
+  window.addEventListener('load', measure);
+})();
+
 // Close any open dropdown when clicking elsewhere — <details> otherwise stays open until it
 // is clicked again, which reads as broken.
 document.addEventListener('click', function (event) {

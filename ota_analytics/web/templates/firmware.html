@@ -80,6 +80,19 @@
         <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
         <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
       </tr>
+      <tr class="totals-row">
+        <td colspan="2">Total</td>
+        <td class="n">{{ mix_total | comma }}</td>
+        <td class="n dim">100%</td>
+        <td class="n dim">{{ mix | sum(attribute='pending') | comma }}</td>
+        <td class="n">{{ mix | sum(attribute='online') | comma }}</td>
+        <td class="n dim">{{ m.ratio(mix | sum(attribute='online'), mix_total) }}</td>
+        <td class="n">{{ mix | sum(attribute='pending_online') | comma }}</td>
+        <td class="n">{{ mix | sum(attribute='offline') | comma }}</td>
+        <td class="n dim">{{ m.ratio(mix | sum(attribute='offline'), mix_total) }}</td>
+        <td class="n">{{ mix | sum(attribute='pending_offline') | comma }}</td>
+        <td></td>
+      </tr>
     </thead>
     <tbody>
       {% for r in mix %}
@@ -108,21 +121,6 @@
       </tr>
       {% endfor %}
     </tbody>
-    <tfoot>
-      <tr>
-        <td colspan="2">Total</td>
-        <td class="n">{{ mix_total | comma }}</td>
-        <td class="n dim">100%</td>
-        <td class="n dim">{{ mix | sum(attribute='pending') | comma }}</td>
-        <td class="n">{{ mix | sum(attribute='online') | comma }}</td>
-        <td class="n dim">{{ m.ratio(mix | sum(attribute='online'), mix_total) }}</td>
-        <td class="n">{{ mix | sum(attribute='pending_online') | comma }}</td>
-        <td class="n">{{ mix | sum(attribute='offline') | comma }}</td>
-        <td class="n dim">{{ m.ratio(mix | sum(attribute='offline'), mix_total) }}</td>
-        <td class="n">{{ mix | sum(attribute='pending_offline') | comma }}</td>
-        <td></td>
-      </tr>
-    </tfoot>
   </table>
 </section>
 

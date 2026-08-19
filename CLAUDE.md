@@ -408,6 +408,36 @@ donut, table header, download filename, CLI summary.
 - `seg-yellow` / `seg-orange` reuse the tile hex values exactly, so a chart and a tile for the
   same state cannot drift apart.
 
+## Reading a snapshot: resolve the view once, not once per metric
+
+`device_state` is a view. Every reference re-resolves each device's most recent row at or before
+the snapshot, across the whole fleet. Measured on the real 48-snapshot database: **1.0s per
+reference**, against 0.01s for a plain count off the physical table — and a page calls six to ten
+metrics. The overview took 12.7s and switching pages felt broken.
+
+`metrics.snapshot_source()` materializes the requested snapshot once into a temp table `_snap`
+and every per-snapshot metric reads that instead. Result: overview 12.7s → **1.05s**, pending
+9.3s → 2.5s, firmware 5.2s → 0.9s, devices 4.3s → 1.5s.
+
+- **Every metric keeps its own `WHERE snapshot_id = ?`.** A caller asking for a different
+  snapshot than the one held gets *nothing* rather than the wrong rows, and a metric that still
+  reads the view is merely slow. Both failure modes are safe; neither is silent wrongness.
+- **The temp table is in SQLite's temp schema, not the main database**, so building it takes no
+  write lock on `ota_analytics.db`. A read path stays a read path.
+- **Which snapshot is held is read back out of `_snap` itself.** `sqlite3.Connection` does not
+  accept attributes and a dict keyed on the connection would outlive it; the rows carry
+  `snapshot_id` anyway.
+- `metrics.at(conn, snapshot_id, sql)` swaps the table name on the finished SQL rather than
+  interpolating into the literal. That is deliberate: the query text in the file is exactly what
+  runs. Editing inside the literals corrupted them twice while this was being written — once
+  turning SQL's `'Online'` into `'Onlinef'`, once rewriting the helper's own query into a
+  reference to itself.
+- Anything that spans **all** snapshots — `registry.stalled_devices` — must keep using the view,
+  and is what the pending page still spends its time on.
+- If you touch metrics.py: Python 3.12 tokenizes f-strings as `FSTRING_START/MIDDLE/END`, not
+  `STRING` (PEP 701), and adjacent literals are one implicit concatenation. Any script that
+  rewrites SQL here has to handle both.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

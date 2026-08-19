@@ -37,6 +37,58 @@ def model_filter(models: list[str] | None) -> tuple[str, list]:
     return f" AND device_model IN ({','.join('?' * len(models))})", list(models)
 
 
+# Named once, so the helper below can build its own query without the SQL rewriter matching it.
+VIEW = "device_state"
+
+
+def snapshot_source(conn: sqlite3.Connection, snapshot_id: int | None) -> str:
+    """Materialize one snapshot once, and return the table to read it from.
+
+    `device_state` is a view: it resolves, for every device, its most recent row at or before a
+    given snapshot. Every reference to it re-runs that resolution across the whole fleet.
+    Measured on the real 48-snapshot database, **1.0s per reference** against 0.01s for a plain
+    count off the physical table — and a page asks for it six to ten times, once per metric.
+    That is what made the overview take twelve seconds and switching pages feel broken.
+
+    So it is resolved once and kept in a temp table for the life of the connection, which is the
+    life of one request. Every metric here is scoped to one snapshot and keeps its own
+    `WHERE snapshot_id = ?`, so a caller asking for a different snapshot gets nothing rather than
+    the wrong thing, and a metric still reading the view is merely slow. Both failure modes are
+    safe ones.
+
+    The temp table lives in SQLite's temp schema rather than the main database, so building it
+    takes no write lock on `ota_analytics.db` — a read path stays a read path.
+    """
+    if snapshot_id is None:
+        return VIEW
+
+    # Which snapshot is already held is read back out of the table rather than tracked beside it:
+    # sqlite3.Connection does not accept attributes, and a dict keyed on the connection would
+    # outlive it. The rows carry snapshot_id anyway, so they can answer for themselves.
+    try:
+        held = conn.execute("SELECT snapshot_id FROM _snap LIMIT 1").fetchone()
+        if held is not None and held[0] == snapshot_id:
+            return "_snap"
+    except sqlite3.OperationalError:
+        pass                    # not built on this connection yet
+
+    conn.execute("DROP TABLE IF EXISTS _snap")
+    conn.execute("CREATE TEMP TABLE _snap AS SELECT * FROM " + VIEW
+                 + " WHERE snapshot_id = ?", (snapshot_id,))
+    # The columns the metrics group and filter by. A few milliseconds each, and each saves a scan
+    # per metric.
+    conn.execute("CREATE UNIQUE INDEX ix_snap_imei ON _snap(imei)")
+    conn.execute("CREATE INDEX ix_snap_model_fw ON _snap(device_model, firmware)")
+    conn.execute("CREATE INDEX ix_snap_status ON _snap(status, queue_state)")
+    return "_snap"
+
+
+def at(conn: sqlite3.Connection, snapshot_id: int | None, sql: str) -> str:
+    """Point a per-snapshot query at the materialized copy of the view."""
+    source = snapshot_source(conn, snapshot_id)
+    return sql if source == VIEW else sql.replace(VIEW, source)
+
+
 def latest_snapshot_id(conn: sqlite3.Connection) -> int | None:
     row = conn.execute("SELECT id FROM snapshot WHERE row_count > 0 "
                        "ORDER BY snapshot_at DESC, id DESC LIMIT 1").fetchone()
@@ -64,7 +116,7 @@ def kpis(conn: sqlite3.Connection, snapshot_id: int,
     aggregates carry no model dimension and the page needs to be filterable by model.
     """
     clause, params = model_filter(models)
-    row = conn.execute(f"""
+    row = conn.execute(at(conn, snapshot_id, f"""
         SELECT COUNT(*) AS devices_total,
                SUM(status = 'Online')   AS devices_online,
                SUM(status = 'Offline')  AS devices_offline,
@@ -81,7 +133,7 @@ def kpis(conn: sqlite3.Connection, snapshot_id: int,
                SUM(seen_age_hours > {config.STALE_30D_HOURS}) AS stale_30d,
                SUM(seen_at IS NULL) AS never_seen
         FROM device_state WHERE snapshot_id = ?{clause}
-    """, [snapshot_id, *params]).fetchone()
+    """), [snapshot_id, *params]).fetchone()
 
     if not row or not row["devices_total"]:
         return {}
@@ -121,8 +173,8 @@ def pending_by_reason(conn: sqlite3.Connection, snapshot_id: int,
                 clauses.append("seen_age_hours <= ?")
                 params.append(high)
         row = conn.execute(
-            f"SELECT COUNT(*) n, COALESCE(SUM(queue), 0) tasks FROM device_state "
-            f"WHERE {' AND '.join(clauses)}{model_clause}", [*params, *model_params]).fetchone()
+            at(conn, snapshot_id, f"SELECT COUNT(*) n, COALESCE(SUM(queue), 0) tasks FROM device_state "
+            f"WHERE {' AND '.join(clauses)}{model_clause}"), [*params, *model_params]).fetchone()
         actionable = label == "online now"
         out.append({
             "bucket": label,
@@ -138,10 +190,10 @@ def pending_by_reason(conn: sqlite3.Connection, snapshot_id: int,
             "tone": "pending-online" if actionable else f"grad-{len(out)}",
         })
 
-    never = conn.execute(f"""
+    never = conn.execute(at(conn, snapshot_id, f"""
         SELECT COUNT(*) n, COALESCE(SUM(queue), 0) tasks FROM device_state
         WHERE snapshot_id = ? AND queue_state = 'pending' AND seen_at IS NULL{model_clause}
-    """, [snapshot_id, *model_params]).fetchone()
+    """), [snapshot_id, *model_params]).fetchone()
     if never["n"]:
         out.append({"bucket": "never pinged", "label": "Pending — never pinged",
                     "devices": never["n"], "tasks": never["tasks"],
@@ -194,14 +246,14 @@ def fallback_summary(conn: sqlite3.Connection, snapshot_id: int,
                      models: list[str] | None = None) -> dict:
     """How many devices completed their task yet sit on base firmware."""
     clause, params = model_filter(models)
-    row = conn.execute(f"""
+    row = conn.execute(at(conn, snapshot_id, f"""
         SELECT COUNT(*) AS total,
                SUM(update_firmware IS NOT NULL AND update_firmware <> firmware) AS missed_target,
                SUM(update_firmware IS NULL OR update_firmware = firmware) AS target_was_base,
                SUM(status = 'Online') AS online
         FROM device_state
         WHERE snapshot_id = ? AND {fallback_rule()}{clause}
-    """, [snapshot_id, *params]).fetchone()
+    """), [snapshot_id, *params]).fetchone()
     return {k: (row[k] or 0) for k in row.keys()}
 
 
@@ -211,7 +263,7 @@ def fallback_devices(conn: sqlite3.Connection, snapshot_id: int, *,
     """The devices themselves, newest contact first."""
     clause, params = model_filter(models)
     extra = f" AND {missed_target_rule()}" if missed_target_only else ""
-    rows = conn.execute(f"""
+    rows = conn.execute(at(conn, snapshot_id, f"""
         SELECT imei, device_model, firmware, base_firmware, update_firmware, configuration,
                hw_ver, status, queue_state, queue, seen_at, seen_age_hours, groups_raw,
                vin, iccid,
@@ -221,7 +273,7 @@ def fallback_devices(conn: sqlite3.Connection, snapshot_id: int, *,
         WHERE snapshot_id = ? AND {fallback_rule()}{extra}{clause}
         ORDER BY seen_age_hours IS NULL, seen_age_hours, device_model
         LIMIT ?
-    """, [snapshot_id, *params, limit]).fetchall()
+    """), [snapshot_id, *params, limit]).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -229,14 +281,14 @@ def fallback_breakdown(conn: sqlite3.Connection, snapshot_id: int,
                        models: list[str] | None = None) -> list[dict]:
     """Grouped by the version path, which is where a pattern would show."""
     clause, params = model_filter(models)
-    rows = conn.execute(f"""
+    rows = conn.execute(at(conn, snapshot_id, f"""
         SELECT device_model, firmware AS base_firmware, update_firmware,
                COUNT(*) AS devices, SUM(status = 'Online') AS online
         FROM device_state
         WHERE snapshot_id = ? AND {fallback_rule()}{clause}
         GROUP BY device_model, firmware, update_firmware
         ORDER BY devices DESC
-    """, [snapshot_id, *params]).fetchall()
+    """), [snapshot_id, *params]).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -246,14 +298,14 @@ def pending_online_devices(conn: sqlite3.Connection, snapshot_id: int,
 
     Powered, connected, and not updating — the population the platform cannot currently show.
     """
-    rows = conn.execute("""
+    rows = conn.execute(at(conn, snapshot_id, """
         SELECT imei, device_model, firmware, hw_ver, queue AS pending_tasks,
                seen_at, seen_age_hours, groups_raw
         FROM device_state
         WHERE snapshot_id = ? AND queue_state = 'pending' AND status = 'Online'
         ORDER BY queue DESC, device_model, firmware
         LIMIT ?
-    """, (snapshot_id, limit)).fetchall()
+    """), (snapshot_id, limit)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -262,7 +314,7 @@ def task_state_by(conn: sqlite3.Connection, snapshot_id: int, dimension: str,
     """Task state broken down by model, firmware or hardware revision."""
     column = {"model": "device_model", "firmware": "firmware", "hw_ver": "hw_ver"}[dimension]
     model_clause, model_params = model_filter(models)
-    rows = conn.execute(f"""
+    rows = conn.execute(at(conn, snapshot_id, f"""
         SELECT COALESCE({column}, '(unknown)') AS label,
                COUNT(*) AS devices,
                SUM(queue_state = 'never_tasked') AS never_tasked,
@@ -275,7 +327,7 @@ def task_state_by(conn: sqlite3.Connection, snapshot_id: int, dimension: str,
         WHERE snapshot_id = ?{model_clause}
         GROUP BY label
         ORDER BY devices DESC
-    """, [snapshot_id, *model_params]).fetchall()
+    """), [snapshot_id, *model_params]).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -293,7 +345,7 @@ def firmware_mix(conn: sqlite3.Connection, snapshot_id: int,
     if models:
         where += f" AND device_model IN ({','.join('?' * len(models))})"
         params.extend(models)
-    rows = conn.execute(f"""
+    rows = conn.execute(at(conn, snapshot_id, f"""
         SELECT COALESCE(firmware, '(unknown)') AS firmware,
                COALESCE(device_model, '(unknown)') AS device_model,
                COUNT(*) AS devices,
@@ -316,7 +368,7 @@ def firmware_mix(conn: sqlite3.Connection, snapshot_id: int,
         FROM device_state WHERE {where}
         GROUP BY device_model, firmware
         ORDER BY devices DESC
-    """, params).fetchall()
+    """), params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -327,7 +379,7 @@ def reachability_by_firmware(conn: sqlite3.Connection, snapshot_id: int,
     The pairing is the point: a low online rate with very old last-contact means retired
     hardware, while a low rate with recent contact means devices are dropping off now.
     """
-    rows = conn.execute("""
+    rows = conn.execute(at(conn, snapshot_id, """
         SELECT COALESCE(firmware, '(unknown)') AS firmware,
                COALESCE(device_model, '(unknown)') AS device_model,
                COUNT(*) AS devices,
@@ -341,7 +393,7 @@ def reachability_by_firmware(conn: sqlite3.Connection, snapshot_id: int,
         GROUP BY device_model, firmware
         HAVING devices >= ?
         ORDER BY (CAST(online AS REAL) / devices) ASC, devices DESC
-    """, (snapshot_id, min_devices)).fetchall()
+    """), (snapshot_id, min_devices)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -364,12 +416,12 @@ def staleness_buckets(conn: sqlite3.Connection, snapshot_id: int,
                 clauses.append("seen_age_hours <= ?")
                 params.append(high)
         n = conn.execute(
-            f"SELECT COUNT(*) FROM device_state WHERE {' AND '.join(clauses)}{model_clause}",
+            at(conn, snapshot_id, f"SELECT COUNT(*) FROM device_state WHERE {' AND '.join(clauses)}{model_clause}"),
             [*params, *model_params]).fetchone()[0]
         out.append({"bucket": label, "devices": n})
     never = conn.execute(
-        f"SELECT COUNT(*) FROM device_state WHERE snapshot_id = ? AND seen_at IS NULL"
-        f"{model_clause}", [snapshot_id, *model_params]).fetchone()[0]
+        at(conn, snapshot_id, f"SELECT COUNT(*) FROM device_state WHERE snapshot_id = ? AND seen_at IS NULL"
+        f"{model_clause}"), [snapshot_id, *model_params]).fetchone()[0]
     out.append({"bucket": "never pinged", "devices": never})
     return out
 
@@ -394,13 +446,13 @@ def hourly_activity(conn: sqlite3.Connection, snapshot_id: int, hours: int = 24,
     snapshot_at = datetime.fromisoformat(row["snapshot_at"])
 
     model_clause, model_params = model_filter(models)
-    counts = {r["hour_key"]: r["n"] for r in conn.execute(f"""
+    counts = {r["hour_key"]: r["n"] for r in conn.execute(at(conn, snapshot_id, f"""
         SELECT strftime('%Y-%m-%d %H', seen_at) AS hour_key, COUNT(*) AS n
         FROM device_state
         WHERE snapshot_id = ? AND seen_at IS NOT NULL
           AND seen_age_hours IS NOT NULL AND seen_age_hours < ?{model_clause}
         GROUP BY hour_key
-    """, [snapshot_id, hours + 1, *model_params])}
+    """), [snapshot_id, hours + 1, *model_params])}
 
     end = snapshot_at.replace(minute=0, second=0, microsecond=0)
     out = []
@@ -425,10 +477,10 @@ def status_breakdown(conn: sqlite3.Connection, snapshot_id: int,
                      models: list[str] | None = None) -> list[dict]:
     """Online / Offline / Inactive, in a fixed order so colours stay stable."""
     clause, params = model_filter(models)
-    counts = {r["status"]: r["n"] for r in conn.execute(f"""
+    counts = {r["status"]: r["n"] for r in conn.execute(at(conn, snapshot_id, f"""
         SELECT COALESCE(status, 'Unknown') AS status, COUNT(*) AS n
         FROM device_state WHERE snapshot_id = ?{clause} GROUP BY status
-    """, [snapshot_id, *params])}
+    """), [snapshot_id, *params])}
     return [
         {"label": "Online", "value": counts.get("Online", 0), "tone": "seg-ok"},
         {"label": "Offline", "value": counts.get("Offline", 0), "tone": "seg-warn"},
@@ -440,14 +492,14 @@ def task_breakdown(conn: sqlite3.Connection, snapshot_id: int,
                    models: list[str] | None = None) -> list[dict]:
     """Task state, with pending split by whether the device is actually reachable."""
     clause, params = model_filter(models)
-    counts = {r["queue_state"]: r["n"] for r in conn.execute(f"""
+    counts = {r["queue_state"]: r["n"] for r in conn.execute(at(conn, snapshot_id, f"""
         SELECT queue_state, COUNT(*) AS n FROM device_state
         WHERE snapshot_id = ?{clause} GROUP BY queue_state
-    """, [snapshot_id, *params])}
-    reachable = conn.execute(f"""
+    """), [snapshot_id, *params])}
+    reachable = conn.execute(at(conn, snapshot_id, f"""
         SELECT COUNT(*) FROM device_state
         WHERE snapshot_id = ? AND queue_state = 'pending' AND status = 'Online'{clause}
-    """, [snapshot_id, *params]).fetchone()[0]
+    """), [snapshot_id, *params]).fetchone()[0]
     pending = counts.get("pending", 0)
     return [
         # The same four names and the same four colours the overview tiles use. A device
@@ -463,11 +515,11 @@ def task_breakdown(conn: sqlite3.Connection, snapshot_id: int,
 
 def model_breakdown(conn: sqlite3.Connection, snapshot_id: int, top: int = 5) -> list[dict]:
     """Device models, with the long tail folded into one slice so the donut stays readable."""
-    rows = conn.execute("""
+    rows = conn.execute(at(conn, snapshot_id, """
         SELECT COALESCE(device_model, '(unknown)') AS label, COUNT(*) AS value
         FROM device_state WHERE snapshot_id = ?
         GROUP BY label ORDER BY value DESC
-    """, (snapshot_id,)).fetchall()
+    """), (snapshot_id,)).fetchall()
 
     out = [{"label": r["label"], "value": r["value"], "tone": f"seg-{i}"}
            for i, r in enumerate(rows[:top])]
@@ -518,10 +570,10 @@ def compliance_summary(conn: sqlite3.Connection, snapshot_id: int) -> dict:
         if target["eol"] and not target["target_firmware"]:
             eol_ok += row["devices"]
             continue
-        matched = conn.execute("""
+        matched = conn.execute(at(conn, snapshot_id, """
             SELECT COUNT(*) FROM device_state
             WHERE snapshot_id = ? AND device_model = ? AND firmware = ?
-        """, (snapshot_id, model, target["target_firmware"])).fetchone()[0]
+        """), (snapshot_id, model, target["target_firmware"])).fetchone()[0]
         on_target += matched
         off_target += row["devices"] - matched
 
@@ -541,14 +593,14 @@ def coverage_gaps(conn: sqlite3.Connection, snapshot_id: int) -> list[dict]:
     for model, target in declared.items():
         if target["eol"] and not target["target_firmware"]:
             continue
-        rows = conn.execute("""
+        rows = conn.execute(at(conn, snapshot_id, """
             SELECT COALESCE(firmware, '(unknown)') AS firmware, COUNT(*) AS devices,
                    SUM(status = 'Online') AS online
             FROM device_state
             WHERE snapshot_id = ? AND device_model = ? AND firmware IS NOT ?
               AND queue_state = 'never_tasked'
             GROUP BY firmware ORDER BY devices DESC
-        """, (snapshot_id, model, target["target_firmware"])).fetchall()
+        """), (snapshot_id, model, target["target_firmware"])).fetchall()
         for row in rows:
             out.append({"device_model": model, "target": target["target_firmware"],
                         **dict(row)})
@@ -566,7 +618,7 @@ def quality_issues(conn: sqlite3.Connection, snapshot_id: int) -> list[dict]:
 
 def groups(conn: sqlite3.Connection, snapshot_id: int, limit: int = 50) -> list[dict]:
     """Cohort composition — the closest thing to a campaign dimension in this data."""
-    rows = conn.execute("""
+    rows = conn.execute(at(conn, snapshot_id, """
         SELECT g.group_name,
                COUNT(*) AS devices,
                SUM(d.status = 'Online') AS online,
@@ -579,6 +631,6 @@ def groups(conn: sqlite3.Connection, snapshot_id: int, limit: int = 50) -> list[
         GROUP BY g.group_name
         ORDER BY devices DESC
         LIMIT ?
-    """, (snapshot_id, limit)).fetchall()
+    """), (snapshot_id, limit)).fetchall()
     return [dict(r) for r in rows]
 
