@@ -3,13 +3,15 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-08-19"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.6.0", "2026-08-19", "In progress: consistent table behaviour — page size, pinned "
+                            "headers, per-column filter and sort, and search"),
     ("1.5.0", "2026-08-19", "Determinate progress bars for import, merge and fetch; one name "
                             "and one colour per task state everywhere; per-group task counts "
                             "on the firmware table; a build can no longer delete data"),
