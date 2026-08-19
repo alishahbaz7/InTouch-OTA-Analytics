@@ -251,9 +251,11 @@ table.grouped thead .group-row th[colspan] + th[colspan] {
 #firmware-mix thead .totals-row td:nth-child(8),
 #firmware-mix thead .sub-row th:nth-child(4),
 #firmware-mix thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
-#model-states tbody td:nth-child(3), #model-states tbody td:nth-child(7),
-#model-states thead .sub-row th:nth-child(1),
-#model-states thead .sub-row th:nth-child(5) { border-left: 1px solid var(--line); }
+#model-states tbody td:nth-child(5), #model-states tbody td:nth-child(8),
+#model-states thead .totals-row td:nth-child(5),
+#model-states thead .totals-row td:nth-child(8),
+#model-states thead .sub-row th:nth-child(4),
+#model-states thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
 
 /* Progress for a long job. Determinate on purpose: the width tracks work completed, never
    elapsed time, so it can be trusted at the moment someone is deciding whether to kill it. */
@@ -301,7 +303,6 @@ h2 [data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
    flagged as a fault: the task is parked until the device comes back. */
 .tone-yellow-text { color: #e8c33c; font-weight: 600; }
 .tone-orange-text { color: #e8893c; }
-.tone-green-text { color: #35c48a; }
 .ok { color: var(--ok); }
 
 /* Tiles */

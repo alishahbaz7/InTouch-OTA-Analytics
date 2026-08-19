@@ -322,6 +322,14 @@ def task_state_by(conn: sqlite3.Connection, snapshot_id: int, dimension: str,
                SUM(queue_state = 'pending')      AS pending,
                SUM(queue_state = 'pending' AND status = 'Online') AS pending_reachable,
                SUM(status = 'Online')            AS online,
+               SUM(status = 'Offline')           AS offline,
+               -- Carried so a row can account for itself: online + offline does not reach
+               -- the total, because a device that has never pinged is neither.
+               SUM(status = 'Inactive')          AS inactive,
+               -- Pending split the same way the fleet is, so each group can report its own
+               -- outstanding tasks. The two do not have to sum to `pending`: a device that has
+               -- never pinged can carry a task too, and on the real fleet two of them do.
+               SUM(queue_state = 'pending' AND status = 'Offline') AS pending_offline,
                SUM(seen_age_hours > {config.STALE_30D_HOURS}) AS stale_30d
         FROM device_state
         WHERE snapshot_id = ?{model_clause}

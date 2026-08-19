@@ -296,26 +296,84 @@ def test_a_theme_can_be_chosen_or_left_to_the_system(client):
     assert ':root:not([data-theme="dark"])' in css
 
 
-def test_both_grouped_tables_use_the_same_idiom(client):
-    """Firmware and the model table group their columns the same way, and say the same words."""
+def test_both_grouped_tables_have_the_same_shape(client):
+    """Firmware and the model table read the same way: Count / % / Task, three times over.
+
+    They answer the same question about different dimensions, so the eye should not have to
+    relearn the layout between them. The structure is compared rather than the text, so this
+    fails if one gains a column the other does not.
+    """
     import re
 
-    firmware = re.sub(r"\s+", " ", client.get("/firmware").text)
-    overview = re.sub(r"\s+", " ", client.get("/").text)
+    def header_of(path, table_id):
+        flat = re.sub(r"\s+", " ", client.get(path).text)
+        assert f'id="{table_id}"' in flat, f"{path} has no {table_id} table"
+        block = flat[flat.index(f'id="{table_id}"'):]
+        return block[:block.index("</thead>")]
 
-    for flat, table_id in ((firmware, "firmware-mix"), (overview, "model-states")):
-        assert f'id="{table_id}"' in flat
-        assert 'class="group-row"' in flat and 'class="sub-row"' in flat
+    firmware = header_of("/firmware", "firmware-mix")
+    models = header_of("/", "model-states")
 
-    # The model table colours each task state the way the tiles do, so the actionable one is
-    # findable without reading a number. Completed and pending always render; the yellow one is
-    # conditional on there being a reachable pending device, which this fixture has none of — so
-    # that one is asserted against the template rather than pretended to be on the page.
-    assert "tone-green-text" in overview
-    assert "tone-orange-text" in overview
-    template = Path("ota_analytics/web/templates/overview.html").read_text(encoding="utf-8")
-    assert "tone-yellow-text" in template
-    assert "if r.pending_reachable" in template
+    for header in (firmware, models):
+        # Three groups of three, plus the labels that span both rows.
+        assert header.count('colspan="3"') == 3
+        assert header.count("Count") == 3
+        assert header.count(">Task<") == 3
+        for group in ("Devices", "Online", "Offline"):
+            assert f">{group}<" in header
+        # A pinned totals row, so the figure every row is read against does not scroll away.
+        assert 'class="totals-row"' in header
 
-    # And the old undifferentiated header is gone.
-    assert ">Never tasked<" not in overview
+    # Percentages are named by their denominator, never repeated as a bare "Share".
+    assert "% of fleet" in firmware and "% of version" in firmware
+    assert "% of fleet" in models and "% of model" in models
+    assert "Share (%)" not in firmware and "Share (%)" not in models
+
+
+def test_the_model_table_colours_the_actionable_figures(client):
+    """Pending-while-online is the number worth acting on, and pending-while-offline is not.
+
+    Both are conditional on being non-zero, so they are asserted against the template — this
+    fixture has no reachable pending device to render one.
+    """
+    from pathlib import Path as _Path
+
+    template = _Path("ota_analytics/web/templates/overview.html").read_text(encoding="utf-8")
+    assert "tone-yellow-text" in template and "if r.pending_reachable" in template
+    assert "tone-orange-text" in template and "if r.pending_offline" in template
+    # Completed and never-tasked lost their columns, so the bar is the only place the whole
+    # split still shows. It has to keep them.
+    assert "Task completed" in template and "No pending task" in template
+
+
+def test_each_group_in_the_model_table_reports_its_own_pending(client):
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    for row in metrics.task_state_by(conn, metrics.latest_snapshot_id(conn), "model"):
+        assert row["online"] + row["offline"] <= row["devices"]
+        assert row["pending_reachable"] <= row["online"]
+        assert row["pending_offline"] <= row["offline"]
+        # They may sum to less than the row's total pending — a device that has never pinged can
+        # carry a task too — but never to more.
+        assert row["pending_reachable"] + row["pending_offline"] <= row["pending"]
+
+
+def test_the_model_table_accounts_for_devices_that_never_pinged(client):
+    """Online + Offline does not reach the row total, and the gap has to be nameable.
+
+    On the real fleet the (unknown) row holds 681 devices of which 36 are offline and 645 have
+    never pinged — so without this the row loses most of itself with nothing to explain it. The
+    same reasoning as the firmware table: a marker, not a column of zeros.
+    """
+    from pathlib import Path as _Path
+
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    for row in metrics.task_state_by(conn, metrics.latest_snapshot_id(conn), "model"):
+        assert row["online"] + row["offline"] + row["inactive"] == row["devices"], row
+
+    template = _Path("ota_analytics/web/templates/overview.html").read_text(encoding="utf-8")
+    assert "Activation-Pending" in template
+    assert "footmark" in template
