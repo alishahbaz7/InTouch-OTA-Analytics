@@ -155,17 +155,30 @@
      cell carries the colour its state has everywhere else, so the eye can find the yellow one —
      reachable and still not updated — without reading a single number. #}
   {% set fleet = by_model | sum(attribute='devices') %}
+  {# Two accountings of the same devices, side by side, and each adds up to the row total:
+       Completed + Pending + No task  = Devices     (what the platform was asked to do)
+       Online + Offline + Act-Pending = Devices     (whether the device can be reached)
+     That is the point of showing Activation-Pending as a column here rather than a marker: it
+     is zero on five of six rows, but without it the (unknown) row reads 0 online and 36 offline
+     out of 513 and loses 477 devices with nothing to explain them. Six rows can afford the
+     column; the firmware table's hundred could not.
+
+     There is deliberately no Task figure under Devices — that number is Pending, and printing
+     it twice under two headings would invite the reader to look for a difference. #}
   <table class="grouped" id="model-states">
     <thead>
       <tr class="group-row">
         <th rowspan="2">Model</th>
-        <th class="n" colspan="3">Devices</th>
+        <th class="n" colspan="2">Devices</th>
+        <th class="n" colspan="3">Task state</th>
         <th class="n" colspan="3">Online</th>
         <th class="n" colspan="3">Offline</th>
+        <th class="n" rowspan="2">Activation-<br>Pending</th>
         <th rowspan="2">Mix</th>
       </tr>
       <tr class="sub-row">
-        <th class="n">Count</th><th class="n">% of fleet</th><th class="n">Task</th>
+        <th class="n">Count</th><th class="n">% of fleet</th>
+        <th class="n">Completed</th><th class="n">Pending</th><th class="n">No task</th>
         <th class="n">Count</th><th class="n">% of model</th><th class="n">Task</th>
         <th class="n">Count</th><th class="n">% of model</th><th class="n">Task</th>
       </tr>
@@ -173,13 +186,16 @@
         <td>All models</td>
         <td class="n">{{ fleet | comma }}</td>
         <td class="n dim">100%</td>
-        <td class="n dim">{{ by_model | sum(attribute='pending') | comma }}</td>
+        <td class="n">{{ by_model | sum(attribute='completed') | comma }}</td>
+        <td class="n">{{ by_model | sum(attribute='pending') | comma }}</td>
+        <td class="n dim">{{ by_model | sum(attribute='never_tasked') | comma }}</td>
         <td class="n">{{ by_model | sum(attribute='online') | comma }}</td>
         <td class="n dim">{{ m.ratio(by_model | sum(attribute='online'), fleet) }}</td>
         <td class="n">{{ by_model | sum(attribute='pending_reachable') | comma }}</td>
         <td class="n">{{ by_model | sum(attribute='offline') | comma }}</td>
         <td class="n dim">{{ m.ratio(by_model | sum(attribute='offline'), fleet) }}</td>
         <td class="n">{{ by_model | sum(attribute='pending_offline') | comma }}</td>
+        <td class="n dim">{{ by_model | sum(attribute='inactive') | comma }}</td>
         <td></td>
       </tr>
     </thead>
@@ -187,12 +203,11 @@
     {% for r in by_model %}
       <tr>
         <td><a href="/firmware?snapshot={{ snapshot_id }}&model={{ r.label }}">{{ r.label }}</a></td>
-        {# Online and Offline do not always reach the total: a device that has never pinged
-           is neither. It is 0 on all but one row, so a column of its own would be noise —
-           but the (unknown) row would otherwise lose 645 of its 681 devices in silence. #}
-        <td class="n"{% if r.inactive %} title="{{ r.inactive | comma }} of these are Activation-Pending — onboarded but never pinged, so neither online nor offline"{% endif %}>{{ r.devices | comma }}{% if r.inactive %}<span class="footmark">*</span>{% endif %}</td>
+        <td class="n">{{ r.devices | comma }}</td>
         <td class="n dim">{{ m.ratio(r.devices, fleet) }}</td>
-        <td class="n dim">{{ r.pending | comma }}</td>
+        <td class="n">{{ r.completed | comma }}</td>
+        <td class="n tone-orange-text">{{ r.pending | comma }}</td>
+        <td class="n dim">{{ r.never_tasked | comma }}</td>
         <td class="n">{{ r.online | comma }}</td>
         <td class="n dim">{{ m.ratio(r.online, r.devices) }}</td>
         {# The actionable figure on the page: powered, connected, task still not taken. Yellow
@@ -201,11 +216,9 @@
           {{ r.pending_reachable | comma }}</td>
         <td class="n">{{ r.offline | comma }}</td>
         <td class="n dim">{{ m.ratio(r.offline, r.devices) }}</td>
-        <td class="n {{ 'tone-orange-text' if r.pending_offline }}">
-          {{ r.pending_offline | comma }}</td>
+        <td class="n">{{ r.pending_offline | comma }}</td>
+        <td class="n {{ 'dim' if not r.inactive }}">{{ r.inactive | comma }}</td>
         <td class="mix">
-          {# Completed and never-tasked no longer have columns of their own, so the bar is the
-             only place the whole split is visible. It keeps them. #}
           {{ m.stack([('Task completed', r.completed, 'ok'),
                       ('Task pending', r.pending, 'orange'),
                       ('No pending task', r.never_tasked, 'neutral')], r.devices) }}

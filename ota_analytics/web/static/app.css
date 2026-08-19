@@ -237,6 +237,7 @@ table.grouped thead .group-row th[rowspan] { box-shadow: none; }
 table.grouped thead .group-row th[colspan] { text-align: center; color: var(--text);
                                              letter-spacing: .3px; }
 table.grouped thead .group-row th[rowspan] { vertical-align: bottom; }
+table.grouped thead .group-row th[rowspan] br { line-height: 1.1; }
 table.grouped thead .sub-row th { font-weight: 400; font-size: 10.5px; color: var(--muted);
                                   text-transform: none; letter-spacing: 0; padding-top: 4px; }
 /* A faint rule between groups so the eye can tell which count each percentage belongs to. */
@@ -251,11 +252,15 @@ table.grouped thead .group-row th[colspan] + th[colspan] {
 #firmware-mix thead .totals-row td:nth-child(8),
 #firmware-mix thead .sub-row th:nth-child(4),
 #firmware-mix thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
-#model-states tbody td:nth-child(5), #model-states tbody td:nth-child(8),
-#model-states thead .totals-row td:nth-child(5),
-#model-states thead .totals-row td:nth-child(8),
-#model-states thead .sub-row th:nth-child(4),
-#model-states thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
+#model-states tbody td:nth-child(4), #model-states tbody td:nth-child(7),
+#model-states tbody td:nth-child(10), #model-states tbody td:nth-child(13),
+#model-states thead .totals-row td:nth-child(4),
+#model-states thead .totals-row td:nth-child(7),
+#model-states thead .totals-row td:nth-child(10),
+#model-states thead .totals-row td:nth-child(13),
+#model-states thead .sub-row th:nth-child(3),
+#model-states thead .sub-row th:nth-child(6),
+#model-states thead .sub-row th:nth-child(9) { border-left: 1px solid var(--line); }
 
 /* Progress for a long job. Determinate on purpose: the width tracks work completed, never
    elapsed time, so it can be trusted at the moment someone is deciding whether to kill it. */
