@@ -1,5 +1,9 @@
 /* OTA Analytics dashboard. No external fonts or assets — must render on an offline box. */
 
+/* Three theme states, and the ordering below is what makes all three work:
+   dark is the default, the system preference applies only while no explicit choice has been
+   made, and an explicit choice wins in *both* directions. A light palette defined only inside
+   the media query could never be turned on by someone whose system is dark. */
 :root {
   --bg: #0f1216;
   --panel: #171b21;
@@ -15,11 +19,22 @@
   --alert: #ff6b5e;
 }
 
+/* Only the colours that differ are restated, so the two palettes cannot drift on the rest. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dde1e7;
     --text: #14181d; --dim: #5a6674; --muted: #8a96a4; --accent: #1266d6;
   }
+}
+
+:root[data-theme="light"] {
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dde1e7;
+  --text: #14181d; --dim: #5a6674; --muted: #8a96a4; --accent: #1266d6;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0f1216; --panel: #171b21; --panel-2: #1d222a; --line: #2a313b;
+  --text: #e6e9ee; --dim: #93a0b1; --muted: #64707f; --accent: #4d9dff;
 }
 
 * { box-sizing: border-box; }
@@ -53,6 +68,15 @@ nav a.on { background: var(--accent); color: #fff; }
 }
 .btn-update:hover { filter: brightness(1.1); }
 .btn-update.on { background: var(--ok); }
+
+/* Theme switch. A single button cycling auto -> light -> dark, because three states do not
+   warrant a menu and the current one is readable from the glyph. */
+.theme-btn { background: var(--panel-2); color: var(--dim); border: 1px solid var(--line);
+             border-radius: 20px; padding: 5px 11px; font: inherit; font-size: 12px;
+             cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+             white-space: nowrap; }
+.theme-btn:hover { color: var(--text); border-color: var(--accent); }
+.theme-btn .theme-icon { font-size: 13px; line-height: 1; }
 
 /* Collapsed advanced settings */
 .advanced { border: 1px solid var(--line); border-radius: 8px; padding: 0 14px; }
@@ -216,13 +240,20 @@ table.grouped thead .group-row th[rowspan] { vertical-align: bottom; }
 table.grouped thead .sub-row th { font-weight: 400; font-size: 10.5px; color: var(--muted);
                                   text-transform: none; letter-spacing: 0; padding-top: 4px; }
 /* A faint rule between groups so the eye can tell which count each percentage belongs to. */
-table.grouped thead .group-row th[colspan] + th[colspan],
-table.grouped tbody td:nth-child(6), table.grouped tbody td:nth-child(9),
-table.grouped tfoot td:nth-child(6), table.grouped tfoot td:nth-child(9) {
+/* A rule between groups so the eye can tell which count each figure belongs to. The
+   column positions differ per table, so each names its own rather than sharing a rule
+   that would stripe the other one in the wrong places. */
+table.grouped thead .group-row th[colspan] + th[colspan] {
   border-left: 1px solid var(--line);
 }
-table.grouped thead .sub-row th:nth-child(4),
-table.grouped thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
+#firmware-mix tbody td:nth-child(6), #firmware-mix tbody td:nth-child(9),
+#firmware-mix thead .totals-row td:nth-child(5),
+#firmware-mix thead .totals-row td:nth-child(8),
+#firmware-mix thead .sub-row th:nth-child(4),
+#firmware-mix thead .sub-row th:nth-child(7) { border-left: 1px solid var(--line); }
+#model-states tbody td:nth-child(3), #model-states tbody td:nth-child(7),
+#model-states thead .sub-row th:nth-child(1),
+#model-states thead .sub-row th:nth-child(5) { border-left: 1px solid var(--line); }
 
 /* Progress for a long job. Determinate on purpose: the width tracks work completed, never
    elapsed time, so it can be trusted at the moment someone is deciding whether to kill it. */
@@ -270,6 +301,7 @@ h2 [data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
    flagged as a fault: the task is parked until the device comes back. */
 .tone-yellow-text { color: #e8c33c; font-weight: 600; }
 .tone-orange-text { color: #e8893c; }
+.tone-green-text { color: #35c48a; }
 .ok { color: var(--ok); }
 
 /* Tiles */
@@ -342,6 +374,9 @@ h2 [data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
 .stack-seg { height: 100%; }
 .stack-seg.ok { background: var(--ok); }
 .stack-seg.warn { background: var(--warn); }
+/* Orange for pending, matching the tile and the donut. `warn` amber was close enough to
+   read as a third colour and made the mix bar disagree with everything beside it. */
+.stack-seg.orange { background: #e8893c; }
 .stack-seg.neutral { background: var(--muted); }
 .stack-legend { display: none; }
 

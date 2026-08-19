@@ -5,6 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}OTA Analytics{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
+  <script>
+  // Applied before the stylesheet paints, so a reader who chose light does not get a flash of
+  // dark on every page load. Inline and tiny for that reason — an external file would arrive
+  // too late to prevent it.
+  (function () {
+    try {
+      var choice = localStorage.getItem('ota-theme');
+      if (choice === 'light' || choice === 'dark') {
+        document.documentElement.setAttribute('data-theme', choice);
+      }
+    } catch (e) { /* private browsing blocks localStorage; the system theme still applies */ }
+  })();
+  </script>
 </head>
 <body>
 <header>
@@ -29,24 +42,25 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
       <span class="dot"></span>
       <span class="status-text">{{ auth.label }}</span>
     </a>
-    <a class="status-chip status-{{ 'ok' if agent.enabled else 'idle' }}" href="/update"
-       id="agent-chip"
-       title="{% if agent.enabled %}Fetching every {{ describe_interval(agent.interval_seconds) }}{% else %}Auto-fetch is off{% endif %}">
+    {# One chip, not two. "Updated 11:08 · 8 min ago" and "Next 4:02" answer the same
+       question — how current is what I am looking at — and side by side they read as two
+       unrelated clocks. Together they say when the data was true and when it will next be
+       checked. #}
+    <a class="status-chip status-{{ 'warn' if viewing_history else ('ok' if agent.enabled else 'idle') }}"
+       href="/update" id="agent-chip"
+       title="{% if updated_at %}Data last refreshed {{ updated_at }}{% else %}No data loaded yet{% endif %}
+{% if agent.enabled %}Fetching every {{ describe_interval(agent.interval_seconds) }}{% else %}Auto-fetch is off{% endif %}">
       <span class="dot"></span>
-      <span class="status-text" id="agent-text">
-        {%- if agent.enabled %}Auto {{ describe_interval(agent.interval_seconds) }}
-        {%- else %}Auto off{% endif -%}
+      <span class="status-text">
+        {%- if updated_at %}Updated {{ updated_at[11:16] }}
+          <span class="dim">· {{ updated_age }}</span>
+        {%- else %}No data{% endif %}
+        <span class="dim" id="agent-text">
+          {%- if agent.enabled %} · auto {{ describe_interval(agent.interval_seconds) }}
+          {%- endif -%}
+        </span>
       </span>
     </a>
-
-    {% if updated_at %}
-    <a class="status-chip status-{{ 'warn' if viewing_history else 'idle' }}"
-       href="/update" title="Data last refreshed {{ updated_at }}">
-      <span class="dot"></span>
-      <span class="status-text">Updated {{ updated_at[11:16] }}
-        <span class="dim">· {{ updated_age }}</span></span>
-    </a>
-    {% endif %}
     {% if error_summary.last_24h %}
     <a class="status-chip status-error" href="/errors"
        title="{{ error_summary.last_24h }} error(s) in the last 24 hours, latest {{ error_summary.latest }}">
@@ -54,6 +68,10 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
       <span class="status-text">{{ error_summary.last_24h }} error{{ 's' if error_summary.last_24h != 1 }}</span>
     </a>
     {% endif %}
+    <button type="button" class="theme-btn" id="theme-btn"
+            title="Switch between following the system theme, light and dark">
+      <span class="theme-icon" id="theme-icon">◐</span><span id="theme-label">Auto</span>
+    </button>
     <a class="btn-update {{ 'on' if request.url.path.startswith('/update') }}"
        href="/update">Update data</a>
   </div>
@@ -106,12 +124,14 @@ Compare this with a colleague before comparing numbers.">
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
 
+  // Writes only the trailing half of the merged chip; the "Updated HH:MM" half is rendered
+  // by the server and does not change until a fetch lands.
   function tick() {
     if (!enabled || !nextRun) return;
     var secs = Math.round((nextRun - Date.now()) / 1000);
-    if (secs <= 0) { text.textContent = 'Fetching…'; return; }
+    if (secs <= 0) { text.textContent = ' · fetching…'; return; }
     var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-    text.textContent = 'Next ' + (h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s));
+    text.textContent = ' · next ' + (h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s));
   }
 
   function poll() {
@@ -119,9 +139,13 @@ Compare this with a colleague before comparing numbers.">
       .then(function (r) { return r.json(); })
       .then(function (d) {
         enabled = d.enabled;
-        chip.className = 'status-chip status-' + (d.last_status === 'error' ? 'error'
-                                                  : d.enabled ? 'ok' : 'idle');
-        if (!d.enabled) { text.textContent = 'Auto off'; nextRun = null; return; }
+        // Left alone while viewing history: that warning is about which snapshot is on
+        // screen, and the fetch schedule must not overwrite it.
+        if (!chip.classList.contains('status-warn')) {
+          chip.className = 'status-chip status-' + (d.last_status === 'error' ? 'error'
+                                                    : d.enabled ? 'ok' : 'idle');
+        }
+        if (!d.enabled) { text.textContent = ' · auto off'; nextRun = null; return; }
         nextRun = d.next_run ? new Date(d.next_run.replace(' ', 'T')).getTime() : null;
         chip.title = 'Fetching every ' + d.interval_label +
                      (d.last_message ? ' — last: ' + d.last_message : '');
@@ -169,6 +193,46 @@ Compare this with a colleague before comparing numbers.">
   // Fonts land after first paint and change the header height, so measure again once the
   // page has settled.
   window.addEventListener('load', measure);
+})();
+
+// Theme switch: follow the system, or override it. Three states rather than two, because
+// "auto" is the right default and is not the same as either fixed choice — a reader whose
+// machine switches at dusk should switch with it unless they said otherwise.
+(function () {
+  var button = document.getElementById('theme-btn');
+  if (!button) return;
+
+  var icon = document.getElementById('theme-icon');
+  var label = document.getElementById('theme-label');
+  var ORDER = ['auto', 'light', 'dark'];
+  var FACE = { auto: ['◐', 'Auto'], light: ['☀', 'Light'], dark: ['☾', 'Dark'] };
+
+  function read() {
+    try {
+      var stored = localStorage.getItem('ota-theme');
+      return FACE[stored] ? stored : 'auto';
+    } catch (e) { return 'auto'; }
+  }
+
+  function apply(mode) {
+    if (mode === 'auto') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', mode);
+    }
+    icon.textContent = FACE[mode][0];
+    label.textContent = FACE[mode][1];
+    button.title = mode === 'auto'
+      ? 'Following the system theme — click for light'
+      : 'Theme: ' + FACE[mode][1] + ' — click for ' +
+        FACE[ORDER[(ORDER.indexOf(mode) + 1) % ORDER.length]][1].toLowerCase();
+    try { localStorage.setItem('ota-theme', mode); } catch (e) { /* not persisted */ }
+  }
+
+  apply(read());
+  button.addEventListener('click', function () {
+    apply(ORDER[(ORDER.indexOf(read()) + 1) % ORDER.length]);
+  });
 })();
 
 // Close any open dropdown when clicking elsewhere — <details> otherwise stays open until it

@@ -253,3 +253,69 @@ def test_version_is_reported_everywhere(client):
 
     assert client.get("/api/version").json()["version"] == __version__
     assert f"v{__version__}" in client.get("/").text
+
+
+# ─── one status chip, one theme switch, one table idiom ─────────────────────
+
+def test_the_header_carries_one_freshness_chip_not_two(client):
+    """"Updated 11:08 · 8 min ago" and "Next 4:02" answer the same question.
+
+    Side by side they read as two unrelated clocks; together they say when the data was true and
+    when it will next be checked.
+    """
+    import re
+
+    flat = re.sub(r"\s+", " ", client.get("/").text)
+    assert flat.count('class="status-chip') == 2      # connection state, and this one
+    assert flat.count('id="agent-chip"') == 1
+    assert "Updated" in flat
+    # The countdown writes into the same chip rather than a second one.
+    assert 'id="agent-text"' in flat
+    chip = flat[flat.index('id="agent-chip"'):]
+    chip = chip[:chip.index("</a>")]
+    assert "Updated" in chip and 'id="agent-text"' in chip
+
+
+def test_a_theme_can_be_chosen_or_left_to_the_system(client):
+    """Three states, and the CSS ordering is what makes all three reachable.
+
+    A light palette defined only inside a prefers-color-scheme query could never be turned on by
+    someone whose system is dark, so each explicit choice is stated on its own.
+    """
+    from pathlib import Path
+
+    body = client.get("/").text
+    assert 'id="theme-btn"' in body
+    # Applied before the stylesheet paints, or a reader who chose light gets a flash of dark.
+    assert body.index("ota-theme") < body.index("</head>")
+
+    css = Path("ota_analytics/web/static/app.css").read_text(encoding="utf-8")
+    assert ':root[data-theme="light"]' in css
+    assert ':root[data-theme="dark"]' in css
+    # The system preference must not override an explicit choice.
+    assert ':root:not([data-theme="dark"])' in css
+
+
+def test_both_grouped_tables_use_the_same_idiom(client):
+    """Firmware and the model table group their columns the same way, and say the same words."""
+    import re
+
+    firmware = re.sub(r"\s+", " ", client.get("/firmware").text)
+    overview = re.sub(r"\s+", " ", client.get("/").text)
+
+    for flat, table_id in ((firmware, "firmware-mix"), (overview, "model-states")):
+        assert f'id="{table_id}"' in flat
+        assert 'class="group-row"' in flat and 'class="sub-row"' in flat
+
+    # The model table colours each task state the way the tiles do, so the actionable one is
+    # findable without reading a number. Completed and pending always render; the yellow one is
+    # conditional on there being a reachable pending device, which this fixture has none of — so
+    # that one is asserted against the template rather than pretended to be on the page.
+    assert "tone-green-text" in overview
+    assert "tone-orange-text" in overview
+    template = Path("ota_analytics/web/templates/overview.html").read_text(encoding="utf-8")
+    assert "tone-yellow-text" in template
+    assert "if r.pending_reachable" in template
+
+    # And the old undifferentiated header is gone.
+    assert ">Never tasked<" not in overview

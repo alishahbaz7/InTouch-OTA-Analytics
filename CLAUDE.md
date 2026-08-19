@@ -455,6 +455,21 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
   `STRING` (PEP 701), and adjacent literals are one implicit concatenation. Any script that
   rewrites SQL here has to handle both.
 
+## Theme: three states, and the CSS order that makes them work
+
+`:root` carries the dark palette. `@media (prefers-color-scheme: light)` applies the light one
+**only** through `:root:not([data-theme="dark"])`, and each explicit choice is then restated in
+`:root[data-theme="light"]` and `:root[data-theme="dark"]`.
+
+- A light palette defined *only* inside the media query could never be switched on by someone
+  whose system is dark — an explicit choice has to win in both directions.
+- The chosen theme is applied by a tiny **inline script in `<head>`**, before the stylesheet
+  paints. An external file arrives too late and the reader gets a flash of the wrong theme on
+  every page load.
+- "Auto" is a real third state, not the absence of a choice: it removes the attribute so a
+  machine that switches at dusk switches with it. `localStorage` is wrapped in try/catch because
+  private browsing blocks it, and the system theme must still work there.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

@@ -148,26 +148,47 @@
 </div>
 
 <section class="card">
-  <h2>Task state by model</h2>
-  <table>
+  <h2>Task state by model
+    <span class="hint">every column is a link into the firmware view for that model</span></h2>
+  {# Grouped like the firmware table, and coloured like the tiles: the four task states are one
+     subject, so they sit under one heading instead of reading as four unrelated columns. Each
+     cell carries the colour its state has everywhere else, so the eye can find the yellow one —
+     reachable and still not updated — without reading a single number. #}
+  <table class="grouped" id="model-states">
     <thead>
-      <tr><th>Model</th><th class="n">Devices</th><th class="n">Never tasked</th>
-          <th class="n">Completed</th><th class="n">Pending</th>
-          <th class="n">Pending — Online</th><th class="n">Online</th><th>Mix</th></tr>
+      <tr class="group-row">
+        <th rowspan="2">Model</th>
+        <th class="n" rowspan="2">Devices</th>
+        <th class="n" colspan="4">Task state</th>
+        <th class="n" colspan="2">Reachable</th>
+        <th rowspan="2">Mix</th>
+      </tr>
+      <tr class="sub-row">
+        <th class="n">Completed</th>
+        <th class="n">Pending</th>
+        <th class="n">of which Online</th>
+        <th class="n">No task</th>
+        <th class="n">Online</th>
+        <th class="n">% of model</th>
+      </tr>
     </thead>
     <tbody>
     {% for r in by_model %}
       <tr>
         <td><a href="/firmware?snapshot={{ snapshot_id }}&model={{ r.label }}">{{ r.label }}</a></td>
         <td class="n">{{ r.devices | comma }}</td>
-        <td class="n">{{ r.never_tasked | comma }}</td>
-        <td class="n">{{ r.completed | comma }}</td>
-        <td class="n">{{ r.pending | comma }}</td>
-        <td class="n {{ 'alert-text' if r.pending_reachable }}">{{ r.pending_reachable | comma }}</td>
-        <td class="n">{{ m.ratio(r.online, r.devices) }}</td>
+        <td class="n tone-green-text">{{ r.completed | comma }}</td>
+        <td class="n tone-orange-text">{{ r.pending | comma }}</td>
+        {# The actionable figure: powered, connected, task still not taken. #}
+        <td class="n {{ 'tone-yellow-text' if r.pending_reachable }}">
+          {{ r.pending_reachable | comma }}</td>
+        <td class="n dim">{{ r.never_tasked | comma }}</td>
+        <td class="n">{{ r.online | comma }}</td>
+        <td class="n dim">{{ m.ratio(r.online, r.devices) }}</td>
         <td class="mix">
-          {{ m.stack([('completed', r.completed, 'ok'), ('pending', r.pending, 'warn'),
-                      ('never tasked', r.never_tasked, 'neutral')], r.devices) }}
+          {{ m.stack([('Task completed', r.completed, 'ok'),
+                      ('Task pending', r.pending, 'orange'),
+                      ('No pending task', r.never_tasked, 'neutral')], r.devices) }}
         </td>
       </tr>
     {% endfor %}
