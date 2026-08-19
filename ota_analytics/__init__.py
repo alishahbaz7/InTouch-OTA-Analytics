@@ -3,13 +3,16 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-08-17"
+RELEASED = "2026-08-19"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.4.0", "2026-08-19", "Devices-per-firmware table gains online, offline, inactive and "
+                            "task-pending columns, under a grouped header that names each "
+                            "percentage's denominator"),
     ("1.3.3", "2026-08-17", "The Firmware page uses the same model dropdown as the overview, "
                             "instead of an always-open multi-select list"),
     ("1.3.2", "2026-08-17", "The connection form says when a password is already saved, instead "

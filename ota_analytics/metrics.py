@@ -296,6 +296,12 @@ def firmware_mix(conn: sqlite3.Connection, snapshot_id: int,
                COALESCE(device_model, '(unknown)') AS device_model,
                COUNT(*) AS devices,
                SUM(status = 'Online') AS online,
+               SUM(status = 'Offline') AS offline,
+               -- Reported separately rather than left as the remainder: STATUS has three
+               -- values, so online + offline does NOT reach the row total. Without this column
+               -- the (unknown) firmware row reads 0% online and 4.3% offline and looks broken,
+               -- when in fact 643 of its 672 devices have simply never pinged at all.
+               SUM(status = 'Inactive') AS inactive,
                SUM(queue_state = 'pending') AS pending,
                MAX(fw_sortkey) AS sortkey
         FROM device_state WHERE {where}

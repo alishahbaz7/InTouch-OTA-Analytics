@@ -115,6 +115,47 @@ def test_selecting_a_model_on_the_firmware_page_filters_it(client):
     assert "all {} models".format(len(models)) not in flat
 
 
+def test_the_firmware_table_names_each_denominator(client):
+    """Three percentage columns sit side by side and measure against different totals.
+
+    One repeated "Share (%)" would put the same word on three different meanings in adjacent
+    columns. The group row carries the subject, the row under it carries the denominator.
+    """
+    import re
+
+    body = client.get("/firmware").text
+    flat = re.sub(r"\s+", " ", body)
+
+    assert "% of fleet" in flat and "% of version" in flat
+    assert flat.count("% of version") == 2          # online and offline, not the fleet share
+    assert "Share (%)" not in flat                  # the ambiguous label it replaced
+
+    # Read the group row itself rather than searching the whole page, so a heading appearing
+    # somewhere else cannot make this pass.
+    header = flat[flat.index('<tr class="group-row">'):flat.index("</thead>")]
+    for heading in ("Model", "Firmware", "Devices", "Online", "Offline", "Inactive",
+                    "Task pending", "Distribution"):
+        assert f">{heading}<" in header, f"{heading} is missing from the header"
+    assert header.count("Count") == 3               # one under each two-column group
+
+
+def test_inactive_is_shown_rather_than_left_as_the_remainder(client):
+    """Online + Offline does not reach the row total: STATUS has a third value.
+
+    On the real fleet 643 devices have never pinged, so a row showing only online and offline
+    percentages appears to lose 1.8% of the fleet with no explanation.
+    """
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    rows = metrics.firmware_mix(conn, metrics.latest_snapshot_id(conn))
+    assert rows, "fixture has no firmware rows"
+    for row in rows:
+        assert row["online"] + row["offline"] + row["inactive"] == row["devices"], row
+
+    assert "Inactive" in client.get("/firmware").text
+
+
 @pytest.mark.parametrize("path", PAGES)
 def test_every_page_renders(client, path):
     response = client.get(path)

@@ -57,11 +57,31 @@
     <span class="hint">{{ selected_models | join(', ') }}</span>
     {%- endif %}</h2>
   {% set biggest = mix[0].devices if mix else 1 %}
-  <table>
+  {# Grouped header. Three percentage columns sit next to each other and they do NOT share a
+     denominator: the first is a share of the whole fleet, the other two are shares of that one
+     version. Labelling all three "Share (%)" would put the same word on three different
+     meanings in adjacent columns, which is how a table ends up lying quietly. The group row
+     carries the subject and the second row carries the denominator.
+
+     Inactive is shown rather than left as the remainder, because online + offline does not
+     reach 100%: STATUS has a third value for devices that have never pinged. #}
+  <table class="grouped">
     <thead>
-      <tr><th>Model</th><th>Firmware</th><th class="n">Devices</th>
-          <th class="n">Share</th><th>Distribution</th>
-          <th class="n">Online</th><th class="n">Pending</th></tr>
+      <tr class="group-row">
+        <th rowspan="2">Model</th>
+        <th rowspan="2">Firmware</th>
+        <th class="n" colspan="2">Devices</th>
+        <th class="n" colspan="2">Online</th>
+        <th class="n" colspan="2">Offline</th>
+        <th class="n" rowspan="2">Inactive</th>
+        <th class="n" rowspan="2">Task pending</th>
+        <th rowspan="2">Distribution</th>
+      </tr>
+      <tr class="sub-row">
+        <th class="n">Count</th><th class="n">% of fleet</th>
+        <th class="n">Count</th><th class="n">% of version</th>
+        <th class="n">Count</th><th class="n">% of version</th>
+      </tr>
     </thead>
     <tbody>
       {% for r in mix %}
@@ -69,19 +89,33 @@
         <td class="dim">{{ r.device_model }}</td>
         <td><strong>{{ r.firmware }}</strong></td>
         <td class="n">{{ r.devices | comma }}</td>
-        <td class="n">{{ '%.1f' % (r.devices / mix_total * 100 if mix_total else 0) }}%</td>
+        <td class="n dim">{{ '%.1f' % (r.devices / mix_total * 100 if mix_total else 0) }}%</td>
+        <td class="n">{{ r.online | comma }}</td>
+        <td class="n dim">{{ m.ratio(r.online, r.devices) }}</td>
+        <td class="n">{{ r.offline | comma }}</td>
+        <td class="n dim">{{ m.ratio(r.offline, r.devices) }}</td>
+        <td class="n {{ 'dim' if not r.inactive }}">{{ r.inactive | comma }}</td>
+        <td class="n {{ 'alert-text' if r.pending }}">{{ r.pending | comma }}</td>
         <td class="barcell">
           <div class="bar-track slim"><div class="bar-fill neutral"
                style="width: {{ '%.2f' % (r.devices / biggest * 100) }}%"></div></div>
         </td>
-        <td class="n">{{ m.ratio(r.online, r.devices) }}</td>
-        <td class="n">{{ r.pending | comma }}</td>
       </tr>
       {% endfor %}
     </tbody>
     <tfoot>
-      <tr><td colspan="2">Total</td><td class="n">{{ mix_total | comma }}</td>
-          <td class="n">100%</td><td colspan="3"></td></tr>
+      <tr>
+        <td colspan="2">Total</td>
+        <td class="n">{{ mix_total | comma }}</td>
+        <td class="n dim">100%</td>
+        <td class="n">{{ mix | sum(attribute='online') | comma }}</td>
+        <td class="n dim">{{ m.ratio(mix | sum(attribute='online'), mix_total) }}</td>
+        <td class="n">{{ mix | sum(attribute='offline') | comma }}</td>
+        <td class="n dim">{{ m.ratio(mix | sum(attribute='offline'), mix_total) }}</td>
+        <td class="n">{{ mix | sum(attribute='inactive') | comma }}</td>
+        <td class="n">{{ mix | sum(attribute='pending') | comma }}</td>
+        <td></td>
+      </tr>
     </tfoot>
   </table>
 </section>

@@ -187,6 +187,24 @@ h3 { font-size: 12px; font-weight: 600; margin: 12px 0 6px; color: var(--dim); }
                          background: var(--ok); transform: translateY(-1px); }
 .saved-credential strong { color: var(--text); }
 
+/* Two-tier table header. The group row names the subject, the row under it names the
+   denominator — needed because adjacent percentage columns here measure against different
+   totals, and one repeated "Share" would hide that. */
+table.grouped thead .group-row th { border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+table.grouped thead .group-row th[colspan] { text-align: center; color: var(--text);
+                                             letter-spacing: .3px; }
+table.grouped thead .group-row th[rowspan] { vertical-align: bottom; }
+table.grouped thead .sub-row th { font-weight: 400; font-size: 10.5px; color: var(--muted);
+                                  text-transform: none; letter-spacing: 0; padding-top: 4px; }
+/* A faint rule between groups so the eye can tell which count each percentage belongs to. */
+table.grouped thead .group-row th[colspan] + th[colspan],
+table.grouped tbody td:nth-child(5), table.grouped tbody td:nth-child(7),
+table.grouped tfoot td:nth-child(5), table.grouped tfoot td:nth-child(7) {
+  border-left: 1px solid var(--line);
+}
+table.grouped thead .sub-row th:nth-child(3),
+table.grouped thead .sub-row th:nth-child(5) { border-left: 1px solid var(--line); }
+
 /* First-run instructions: readable at a glance, not a wall of prose. */
 .getting-started { margin: 4px 0 16px; padding-left: 20px; color: var(--dim); font-size: 13px; }
 .getting-started li { margin-bottom: 8px; line-height: 1.55; }
