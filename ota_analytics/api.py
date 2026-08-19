@@ -13,7 +13,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -359,12 +359,13 @@ def _download(payload, fmt: str, stem: str):
 def devices_export(
     snapshot: int | None = None,
     model: str | None = None,
-    firmware: str | None = None,
+    firmware: list[str] = Query(default=[]),
     status: str | None = None,
     queue_state: str | None = None,
     group: str | None = None,
     changed: str | None = None,
     fallback: str | None = None,
+    q: str = "",
     sort: str = "seen",
     dir: str = "desc",
     format: str = "csv",
@@ -373,8 +374,8 @@ def devices_export(
     conn = get_conn()
     snapshot_id = snapshot or metrics.latest_snapshot_id(conn)
     rows, _ = _device_rows(conn, snapshot_id, model=model, firmware=firmware, status=status,
-                           queue_state=queue_state, group=group, changed=changed, fallback=fallback,
-                           sort=sort, dir=dir)
+                           queue_state=queue_state, group=group, changed=changed,
+                           fallback=fallback, search=q, sort=sort, dir=dir)
 
     # Spell the tag out in the file: a reader opening this in Excel should not have to know
     # what a 1 in a column called is_fallback means.
@@ -385,9 +386,9 @@ def devices_export(
                                    if row.get("update_firmware") not in (None, row.get("firmware"))
                                    else "FALLBACK — target is base")
 
-    slug = exports.describe({"m": model, "f": firmware, "s": status,
+    slug = exports.describe({"m": model, "f": "-".join(firmware or []), "s": status,
                              "q": queue_state, "g": group, "c": changed,
-                             "fb": fallback})
+                             "fb": fallback, "imei": q})
     stem = f"devices_{slug}" if slug else "devices"
 
     if format == "txt":
@@ -474,12 +475,13 @@ def devices(
     request: Request,
     snapshot: int | None = None,
     model: str | None = None,
-    firmware: str | None = None,
+    firmware: list[str] = Query(default=[]),
     status: str | None = None,
     queue_state: str | None = None,
     group: str | None = None,
     changed: str | None = None,
     fallback: str | None = None,
+    q: str = "",
     # Literals, not the constants below: default arguments are evaluated when the function is
     # defined, and those are declared further down the module.
     sort: str = "seen",
@@ -491,15 +493,19 @@ def devices(
     ctx = page_context(conn, request, snapshot)
     rows, total = _device_rows(
         conn, ctx["snapshot_id"], model=model, firmware=firmware, status=status,
-        queue_state=queue_state, group=group, changed=changed, fallback=fallback,
+        queue_state=queue_state, group=group, changed=changed, fallback=fallback, search=q,
         sort=sort, dir=dir, limit=page_size, offset=(page - 1) * page_size)
 
-    active_filters = {"model": model, "firmware": firmware, "status": status,
+    selected_firmware = [v for v in (firmware or []) if v]
+    active_filters = {"model": model, "firmware": selected_firmware, "status": status,
                       "queue_state": queue_state, "group": group, "changed": changed,
-                      "fallback": fallback}
-    query = "&".join(f"{k}={v}" for k, v in active_filters.items() if v)
+                      "fallback": fallback, "q": q}
+    # urlencode with doseq, because a multi-select repeats its key: firmware=a&firmware=b. Hand
+    # rolling that produced firmware=['a',%20'b'] and silently matched nothing.
+    pairs = [(k, v) for k, v in active_filters.items() if v]
     if ctx["snapshot_id"]:
-        query = f"snapshot={ctx['snapshot_id']}&{query}" if query else f"snapshot={ctx['snapshot_id']}"
+        pairs.insert(0, ("snapshot", ctx["snapshot_id"]))
+    query = urlencode(pairs, doseq=True)
 
     ctx.update(
         rows=rows, total=total, page=page, page_size=page_size,
@@ -558,14 +564,15 @@ CHANGE_WINDOWS = [
 
 
 def _device_rows(conn, snapshot_id, *, model=None, firmware=None, status=None,
-                 queue_state=None, group=None, changed=None, fallback=None,
+                 queue_state=None, group=None, changed=None, fallback=None, search="",
                  sort="seen", dir="desc", limit=None, offset=0):
     """The device list behind both the page and its export.
 
     Shared deliberately: an export that returned a different set from the table above it would
     send someone to act on the wrong devices.
     """
-    where, params = _device_filters(snapshot_id, model, firmware, status, queue_state, group)
+    where, params = _device_filters(snapshot_id, model, firmware, status, queue_state,
+                                    group, search)
     join = ("JOIN device_group g ON g.snapshot_id = d.snapshot_id AND g.imei = d.imei"
             if group else "")
     join += " LEFT JOIN device r ON r.imei = d.imei"
@@ -609,15 +616,35 @@ def _changed_clause(window: str) -> str:
     return (f"r.last_changed_at >= datetime('now', 'localtime', '-{hours} hours')")
 
 
-def _device_filters(snapshot_id, model, firmware, status, queue_state, group):
+def _device_filters(snapshot_id, model, firmware, status, queue_state, group, search=""):
+    """WHERE fragment and parameters for the device list.
+
+    `firmware` is a list: several versions are usually interesting together — the ones a rollout
+    is moving between — and picking them one at a time meant reloading the page per version.
+    """
     clauses = ["d.snapshot_id = ?"]
     params: list = [snapshot_id]
-    for column, value in (("d.device_model", model), ("d.firmware", firmware),
-                          ("d.status", status), ("d.queue_state", queue_state),
-                          ("g.group_name", group)):
+
+    for column, value in (("d.device_model", model), ("d.status", status),
+                          ("d.queue_state", queue_state), ("g.group_name", group)):
         if value:
             clauses.append(f"{column} = ?")
             params.append(value)
+
+    versions = [v for v in (firmware or []) if v]
+    if versions:
+        clauses.append(f"d.firmware IN ({','.join('?' * len(versions))})")
+        params.extend(versions)
+
+    # Digits only: an IMEI is a number, and the platform is pasted from lists that carry commas,
+    # quotes and stray spaces. Stripping them means a paste works without being tidied first.
+    digits = "".join(c for c in str(search or "") if c.isdigit())
+    if digits:
+        # Substring rather than prefix: the last few digits are what people read off a label,
+        # and LIKE cannot use the index either way on a middle match.
+        clauses.append("d.imei LIKE ?")
+        params.append(f"%{digits}%")
+
     return " AND ".join(clauses), params
 
 

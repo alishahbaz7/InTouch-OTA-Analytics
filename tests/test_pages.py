@@ -384,3 +384,86 @@ def test_each_group_in_the_model_table_reports_its_own_pending(client):
         # They may sum to less than the row's total pending — a device that has never pinged can
         # carry a task too — but never to more.
         assert row["pending_reachable"] + row["pending_offline"] <= row["pending"]
+
+
+# ─── the devices filter row ─────────────────────────────────────────────────
+
+def test_firmware_is_a_checkbox_list_of_versions_only(client):
+    """Several versions are usually interesting together — the ones a rollout moves between.
+
+    A single-choice select meant one page load per version. The device counts are gone from the
+    list because they were the widest thing in it and are already on the Firmware page.
+    """
+    flat = re.sub(r"\s+", " ", client.get("/devices").text)
+    assert 'id="firmware-picker"' in flat
+    assert 'id="firmware-all"' in flat            # a real toggle, not a reset link
+    assert 'type="checkbox" name="firmware"' in flat
+    assert '<select name="firmware"' not in flat
+
+    picker = flat[flat.index('id="firmware-picker"'):]
+    picker = picker[:picker.index("</details>")]
+    versions = re.findall(r'name="firmware" value="([^"]+)"', picker)
+    assert versions, "no versions offered"
+    # Only the All row carries a count; the versions themselves are bare.
+    listing = picker[picker.index('class="dropdown-list"'):]
+    assert "<em>" not in listing
+
+
+def test_several_firmware_versions_can_be_selected_at_once(client):
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    sid = metrics.latest_snapshot_id(conn)
+    versions = [r["firmware"] for r in metrics.firmware_mix(conn, sid) if r["firmware"]][:2]
+    assert len(versions) == 2, "fixture needs two firmware versions"
+
+    one = client.get(f"/devices?firmware={versions[0]}").text
+    both = client.get(f"/devices?firmware={versions[0]}&firmware={versions[1]}").text
+
+    def total(body):
+        return int(re.search(r'class="hint">([\d,]+) ', re.sub(r"\s+", " ", body))
+                   .group(1).replace(",", ""))
+
+    assert total(both) > total(one), "adding a version did not widen the selection"
+    # Both stay ticked, so the control shows what it is filtering by.
+    flat = re.sub(r"\s+", " ", both).replace('checked=""', "checked")
+    for version in versions:
+        assert f'value="{version}" checked' in flat
+
+
+def test_the_group_text_box_is_gone_but_the_link_still_works(client):
+    """It was an exact-match field nobody could type from memory. The Groups page links here
+    with ?group=…, so the capability stays even though the control does not."""
+    flat = re.sub(r"\s+", " ", client.get("/devices").text)
+    assert 'placeholder="exact name"' not in flat
+
+    from ota_analytics import db, metrics
+    conn = db.connect()
+    groups = metrics.groups(conn, metrics.latest_snapshot_id(conn))
+    if groups:
+        name = groups[0]["group_name"]
+        filtered = client.get(f"/devices?group={name}")
+        assert filtered.status_code == 200
+        # And the filter survives paging, so it is carried in a hidden field.
+        assert f'name="group" value="{name}"' in re.sub(r"\s+", " ", filtered.text)
+
+
+def test_an_imei_can_be_searched_by_any_part_of_it(client):
+    """The last few digits are what someone reads off a label, and a paste from the platform
+    arrives wrapped in quotes and commas."""
+    body = client.get("/devices").text
+    imeis = re.findall(r'class="mono">(\d+)<', body)
+    assert imeis, "fixture has no devices"
+    target = imeis[0]
+
+    def found(term):
+        import urllib.parse
+        page = client.get("/devices?q=" + urllib.parse.quote(term)).text
+        return re.findall(r'class="mono">(\d+)<', page)
+
+    assert found(target) == [target]
+    assert target in found(target[-2:])
+    # Non-digits are stripped rather than rejected, so a paste works as-is.
+    assert found(f'"{target}", ') == [target]
+    # And nothing matches an IMEI that is not there.
+    assert found("00000000000000") == []

@@ -235,6 +235,32 @@ Compare this with a colleague before comparing numbers.">
   });
 })();
 
+// A "select all" box inside a checkbox filter. It reflects the list as well as driving it:
+// all ticked, none ticked, or the indeterminate dash for a partial selection — otherwise it
+// looks unchecked while half the list is selected, and clicking it appears to do nothing.
+(function () {
+  document.querySelectorAll('.toggle-all input[type=checkbox]').forEach(function (master) {
+    var panel = master.closest('.dropdown-panel');
+    if (!panel) return;
+    var boxes = panel.querySelectorAll('.dropdown-list input[type=checkbox]');
+    if (!boxes.length) return;
+
+    function reflect() {
+      var on = 0;
+      boxes.forEach(function (box) { if (box.checked) on++; });
+      master.checked = on === boxes.length;
+      master.indeterminate = on > 0 && on < boxes.length;
+    }
+
+    master.addEventListener('change', function () {
+      boxes.forEach(function (box) { box.checked = master.checked; });
+      master.indeterminate = false;
+    });
+    boxes.forEach(function (box) { box.addEventListener('change', reflect); });
+    reflect();
+  });
+})();
+
 // Close any open dropdown when clicking elsewhere — <details> otherwise stays open until it
 // is clicked again, which reads as broken.
 document.addEventListener('click', function (event) {

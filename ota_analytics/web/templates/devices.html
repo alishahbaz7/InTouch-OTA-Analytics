@@ -13,15 +13,36 @@
       {% endfor %}
     </select>
   </label>
-  <label>Firmware
-    <select name="firmware">
-      <option value="">All ({{ firmwares | length }} versions)</option>
-      {% for f in firmwares %}
-      <option value="{{ f.label }}" {{ 'selected' if f.label == filters.firmware }}>
-        {{ f.label }} — {{ f.devices | comma }}
-      </option>
-      {% endfor %}
-    </select>
+  {# Several versions are usually interesting together — the ones a rollout is moving
+     between — so this is a checkbox list rather than a single choice. Version numbers only:
+     the device counts were the widest thing in the list and are already on the Firmware page.
+     "All" is a real toggle, not a reset: ticking it selects every version, clearing it
+     deselects every one. #}
+  <label class="filter-picker">Firmware
+    <details class="dropdown" id="firmware-picker">
+      <summary>
+        {%- if filters.firmware -%}
+          {{ filters.firmware[0] }}{% if filters.firmware | length > 1 %}
+            +{{ filters.firmware | length - 1 }}{% endif %}
+        {%- else -%}All {{ firmwares | length }} versions{%- endif -%}
+      </summary>
+      <div class="dropdown-panel">
+        <label class="dropdown-item toggle-all">
+          <input type="checkbox" id="firmware-all">
+          <span>All</span>
+          <em>{{ firmwares | length }}</em>
+        </label>
+        <div class="dropdown-list">
+          {% for f in firmwares %}
+          <label class="dropdown-item">
+            <input type="checkbox" name="firmware" value="{{ f.label }}"
+                   {{ 'checked' if f.label in filters.firmware }}>
+            <span>{{ f.label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    </details>
   </label>
   <label>Status
     <select name="status">
@@ -44,9 +65,6 @@
       {% endfor %}
     </select>
   </label>
-  <label>Group
-    <input type="text" name="group" value="{{ filters.group or '' }}" placeholder="exact name">
-  </label>
   <label>Last update
     <select name="changed">
       <option value="">Any time</option>
@@ -62,6 +80,17 @@
       <option value="missed" {{ 'selected' if filters.fallback == 'missed' }}>Fallback — missed target</option>
     </select>
   </label>
+  {# Digits only, and a substring match: the last few digits are what someone reads off a
+     label, and a paste from the platform arrives with commas and quotes around it. #}
+  <label>Find IMEI
+    <input type="search" name="q" value="{{ filters.q or '' }}" placeholder="any part of an IMEI"
+           inputmode="numeric" autocomplete="off">
+  </label>
+  {# The Groups page still links here with ?group=…, so the capability stays even though the
+     text box is gone — it was an exact-match field nobody could type from memory. #}
+  {% if filters.group %}
+  <input type="hidden" name="group" value="{{ filters.group }}">
+  {% endif %}
   <input type="hidden" name="sort" value="{{ sort }}">
   <input type="hidden" name="dir" value="{{ dir }}">
   <button type="submit">Apply</button>

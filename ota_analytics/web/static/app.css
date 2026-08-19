@@ -598,6 +598,12 @@ footer .digest strong { color: var(--text); font-weight: 600; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, .35); padding: 6px;
 }
+/* A filter that lives inside the .filters row rather than in a page toolbar. */
+.filter-picker { position: relative; }
+.filter-picker > .dropdown > summary { padding: 7px 10px; font-size: 13px; }
+/* Separated from the list it drives, so it does not read as one of the options. */
+.dropdown-item.toggle-all { border-bottom: 1px solid var(--line); font-weight: 600;
+                            color: var(--text); }
 .dropdown-list { max-height: 280px; overflow-y: auto; }
 .dropdown-item { display: flex; align-items: center; gap: 9px; padding: 6px 9px;
                  border-radius: 5px; font-size: 12.5px; cursor: pointer; }
