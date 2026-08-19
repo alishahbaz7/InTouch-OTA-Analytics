@@ -205,6 +205,29 @@ table.grouped tfoot td:nth-child(5), table.grouped tfoot td:nth-child(7) {
 table.grouped thead .sub-row th:nth-child(3),
 table.grouped thead .sub-row th:nth-child(5) { border-left: 1px solid var(--line); }
 
+/* Progress for a long job. Determinate on purpose: the width tracks work completed, never
+   elapsed time, so it can be trusted at the moment someone is deciding whether to kill it. */
+.job-panel { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+             border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
+.job-panel[hidden] { display: none; }
+.job-panel.is-done { border-left-color: var(--ok); }
+.job-panel.is-error { border-left-color: var(--bad); }
+.job-head { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; }
+.job-step { color: var(--dim); font-size: 12.5px; }
+.job-percent { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--dim);
+               font-size: 12.5px; }
+.job-track { height: 6px; border-radius: 3px; background: var(--panel-2); margin: 8px 0 6px;
+             overflow: hidden; }
+.job-fill { height: 100%; background: var(--accent); border-radius: 3px;
+            transition: width .4s ease; }
+.job-panel.is-done .job-fill { background: var(--ok); }
+.job-panel.is-error .job-fill { background: var(--bad); }
+.job-foot { display: flex; gap: 12px; font-size: 11.5px; color: var(--muted); }
+.job-foot span:last-child { margin-left: auto; }
+.job-result { margin-top: 10px; font-size: 12.5px; color: var(--dim); white-space: pre-line; }
+.job-panel.is-error .job-result { color: var(--bad); }
+#job-dismiss { margin-top: 10px; }
+
 /* First-run instructions: readable at a glance, not a wall of prose. */
 .getting-started { margin: 4px 0 16px; padding-left: 20px; color: var(--dim); font-size: 13px; }
 .getting-started li { margin-bottom: 8px; line-height: 1.55; }

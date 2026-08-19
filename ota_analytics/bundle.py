@@ -506,22 +506,30 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
         registry.rebuild(conn, on_step=replay)
         rollup.rollup_all(conn, on_step=metrics)
     else:
+        # Appending folds each snapshot in and rolls it up in one pass, so both phases finish
+        # together. The metrics step is walked to its end afterwards rather than left for
+        # finish() to fill in — otherwise the bar sits at 73% and then jumps, which reads as the
+        # last quarter having been skipped.
         job.begin("Replaying the change log", total=len(ids))
         for position, snapshot_id in enumerate(ids, start=1):
             registry.apply_snapshot(conn, snapshot_id)
             rollup.rollup_snapshot(conn, snapshot_id)
             job.advance(position, detail=f"snapshot {position:,} of {len(ids):,}")
+        job.begin("Rebuilding metrics", total=len(ids), detail=f"{len(ids):,} snapshots")
+        job.advance(len(ids))
     conn.commit()
     return {"renumbered": renumbered, "compacted": compacted}
 
 
 def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = False,
-                  dry_run: bool = False) -> ImportResult:
+                  dry_run: bool = False, job=None) -> ImportResult:
     """Merge another install's snapshots into this database.
 
     Idempotent for the same reason ingest is: a snapshot already held, matched by file_sha256,
     is skipped rather than duplicated. Importing the same bundle twice changes nothing.
     """
+    job = job or _Silent()
+    job.begin("Reading the bundle")
     data = describe(source)
     digest_before = identity.fleet_digest(conn)
     incoming = data.get("snapshots", [])
@@ -547,7 +555,7 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
         # this branch would otherwise report success over a half-merged database. Finishing the
         # job here makes an interrupted import self-healing on the next attempt.
         if not dry_run and not retention.is_chronological(conn):
-            repaired = _finish_merge(conn, None)
+            repaired = _finish_merge(conn, None, job=job)
             return ImportResult(
                 status="imported", manifest=data, snapshots_in_bundle=len(incoming),
                 renumbered=repaired["renumbered"], compacted=repaired["compacted"],
@@ -633,6 +641,7 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
             retention.densify(conn, snapshot_id)
 
         # 2. Stage the bundle and resolve it on its own terms.
+        job.begin("Loading snapshots", total=len(new), detail=f"{len(new):,} to merge")
         with _open(source) as archive:
             staged = _stage(conn, archive, columns, order)
         if bundle_densify:
@@ -650,7 +659,8 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
 
         id_by_seq: dict[int, int] = {}
         imported_shas: list[str] = []
-        for sha, seq in sorted(order.items(), key=lambda kv: kv[1]):
+        for position, (sha, seq) in enumerate(sorted(order.items(), key=lambda kv: kv[1]), 1):
+            job.advance(position, detail=f"snapshot {position:,} of {len(new):,}")
             meta = meta_by_sha.get(sha)
             if meta is None:
                 raise BundleError(f"The bundle lists snapshot {sha[:8]} but carries no "
@@ -677,7 +687,8 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
         raise
 
     # 5. Reorder, compact and rebuild. Resumable: see _finish_merge.
-    finished = _finish_merge(conn, bundle_start, imported_shas, full_rebuild=interleaved)
+    finished = _finish_merge(conn, bundle_start, imported_shas, full_rebuild=interleaved,
+                             job=job)
     renumbered, compacted = finished["renumbered"], finished["compacted"]
 
     now = datetime.now().isoformat(sep=" ", timespec="seconds")

@@ -10,6 +10,9 @@ RELEASED = "2026-08-19"
 CODENAME = "package"
 
 VERSION_HISTORY = [
+    ("1.5.0", "2026-08-19", "Determinate progress bars for import, merge and fetch: the POST "
+                            "returns at once and the page polls a server-side job, so the work "
+                            "is visible and survives the tab being closed"),
     ("1.4.0", "2026-08-19", "Devices-per-firmware table gains online, offline, inactive and "
                             "task-pending columns, under a grouped header that names each "
                             "percentage's denominator"),

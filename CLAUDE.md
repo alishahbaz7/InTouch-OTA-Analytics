@@ -338,6 +338,43 @@ checks that by loading identical rows through both and comparing every column.
   snapshot time is when the report was written. Prefer the platform's export or a bundle. This
   is recorded because none of it is visible from the numbers afterwards.
 
+## Progress for long jobs (`progress.py`)
+
+A merge takes minutes and a fetch takes tens of seconds. Both used to hold the POST open with
+nothing to show, so the only feedback was a page that never finished loading — which is how a
+working merge came to be reported as "no action, only loading".
+
+- **The POST starts a job and returns immediately.** `api.run_job` puts the work on a plain
+  thread; the page redirects and polls `/api/progress`. Holding the request open is what made
+  the work indistinguishable from a hang, and it also meant the answer could never arrive,
+  because it would have come back on the same response.
+- **The bar is determinate and derived from work done** — snapshots folded, devices read — never
+  from elapsed time. A bar that advances on a timer teaches people to ignore it exactly when it
+  matters. Every step declares its total before it starts.
+- **Steps are weighted by measurement, not evenly.** Replaying the change log is ~60% of a
+  merge; even weights would leave the bar apparently stalled through it. Weights live next to
+  the code that does the work: `bundle.MERGE_STEPS`, `ingest.INGEST_STEPS`,
+  `scheduler.FETCH_STEPS`.
+- **Progress lives on the server.** Closing the tab does not stop the job, and reopening
+  `/update` finds it mid-flight — the panel is rendered from `progress.snapshot()` on load as
+  well as polled. A spinner drawn in JavaScript cannot do that, and a two-minute merge invites
+  someone to close the tab.
+- **One job at a time.** They all write to the database, so two would queue on the write lock
+  anyway — but silently, with two bars both claiming to move. A second start raises
+  `progress.Busy`.
+- The bar may under-report and then complete in a jump: appending folds the registry and rolls
+  up metrics in one pass, so both phases finish together. Under-reporting then completing is the
+  safe direction; claiming progress that has not happened is not.
+
+## Never let a build touch data (`build.py`)
+
+`dist/` is deleted to start a build clean, and someone running the app from `dist/` has their
+real database in `dist/InTouchOTA-Analytics/data`. That cost 48 snapshots of live fleet history
+more than once. Printing a warning first was not enough — it scrolled past. `rescue_data()` now
+moves the folder out before the delete and `restore_data()` puts it back *after the zip is
+written*, so a handover file cannot carry someone's database either. An interrupted rescue
+refuses rather than overwriting the parked copy.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

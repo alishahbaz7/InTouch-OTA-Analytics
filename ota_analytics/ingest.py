@@ -36,6 +36,18 @@ EXPORT_SUFFIXES = (".xlsx", ".csv")
 
 from . import config, normalize, quality, registry
 
+# Phases of loading one export, and what each is worth on the progress bar. Measured on the real
+# 35,475-device export: reading and normalizing dominates, storing is one statement, and folding
+# the snapshot into the registry costs about as much again.
+INGEST_STEPS = [
+    ("Saving the file", 1.0),
+    ("Reading devices", 10.0),
+    ("Storing what changed", 3.0),
+    ("Checking data quality", 1.0),
+    ("Updating the device registry", 8.0),
+    ("Rebuilding metrics", 3.0),
+]
+
 # Source field -> our column name, keyed by a flattened form of the name (lowercase, letters and
 # digits only). One map serves both sources: the spreadsheet's "Device Name/VIN" and an API's
 # "deviceNameVin" both flatten to "devicenamevin", so neither breaks when the platform renames,
@@ -372,8 +384,14 @@ def _map_headers(header_row: tuple) -> tuple[dict[int, str], list[str]]:
     return mapping, unknown
 
 
-def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
-    """Ingest one export. Safe to call repeatedly with the same file."""
+def ingest_file(conn: sqlite3.Connection, path: Path, job=None) -> IngestResult:
+    """Ingest one export. Safe to call repeatedly with the same file.
+
+    `job` is an optional progress.Job. The row count is not known until the file has been read,
+    so "Reading devices" reports a running count against the total the filename claims — which
+    is what the platform puts there (Devices_35477_...) — and falls back to no total when the
+    name does not carry one.
+    """
     path = Path(path)
     if not path.exists():
         raise IngestError(f"file not found: {path}")
@@ -387,6 +405,10 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
 
     snapshot_at, ts_source = _resolve_snapshot_at(path)
     snapshot_iso = snapshot_at.isoformat(sep=" ", timespec="seconds")
+
+    expected = normalize.row_count_from_filename(path.name)
+    if job:
+        job.begin("Reading devices", total=expected, detail=path.name)
 
     with _table_rows(path) as rows:
         header = next(rows, None)
@@ -438,6 +460,8 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
                 cursor.executemany(INSERT_STAGE, device_batch)
                 result.rows += len(device_batch)
                 device_batch.clear()
+                if job:
+                    job.advance(result.rows, detail=f"{result.rows:,} devices read")
             if len(group_batch) >= config.BATCH_SIZE:
                 cursor.executemany(
                     "INSERT OR IGNORE INTO device_group (snapshot_id, imei, group_name) "
@@ -453,6 +477,8 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
                 "INSERT OR IGNORE INTO device_group (snapshot_id, imei, group_name) "
                 "VALUES (?,?,?)", group_batch)
             result.groups += len(group_batch)
+        if job:
+            job.begin("Storing what changed", detail=f"{result.rows:,} devices")
         result.changed_rows = _store_devices(conn, cursor, snapshot_id, provided_columns(mapping))
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
@@ -461,6 +487,8 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
         (result.rows, result.skipped_no_imei, result.duration_ms, snapshot_id),
     )
 
+    if job:
+        job.begin("Checking data quality")
     result.findings = quality.run_rules(
         conn, snapshot_id,
         skipped_no_imei=result.skipped_no_imei,
@@ -470,13 +498,15 @@ def ingest_file(conn: sqlite3.Connection, path: Path) -> IngestResult:
         from_report=from_report,
     )
     conn.commit()
+    if job:
+        job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
     return result
 
 
 def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
                    source_name: str, snapshot_at: datetime | None = None,
-                   fingerprint: str | None = None) -> IngestResult:
+                   fingerprint: str | None = None, job=None) -> IngestResult:
     """Ingest device records fetched from the platform API.
 
     Same normalization and the same idempotency rule as the spreadsheet path — the fingerprint
@@ -559,6 +589,8 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
             cursor.executemany(INSERT_STAGE, device_batch)
             result.rows += len(device_batch)
             device_batch.clear()
+            if job:
+                job.advance(result.rows, detail=f"{result.rows:,} devices read")
 
     if device_batch:
         cursor.executemany(INSERT_STAGE, device_batch)
@@ -568,6 +600,8 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
             "INSERT OR IGNORE INTO device_group (snapshot_id, imei, group_name) VALUES (?,?,?)",
             group_batch)
         result.groups += len(group_batch)
+    if job:
+        job.begin("Storing what changed", detail=f"{result.rows:,} devices")
     result.changed_rows = _store_devices(conn, cursor, snapshot_id, provided_columns(mapping))
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
@@ -575,12 +609,16 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
                  "WHERE id = ?",
                  (result.rows, result.skipped_no_imei, result.duration_ms, snapshot_id))
 
+    if job:
+        job.begin("Checking data quality")
     result.findings = quality.run_rules(
         conn, snapshot_id, skipped_no_imei=result.skipped_no_imei,
         duplicate_imei=result.duplicate_imei, unknown_columns=result.unknown_columns,
         ts_source="filename",   # an API timestamp is exact, so no "guessed time" warning
     )
     conn.commit()
+    if job:
+        job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
     return result
 

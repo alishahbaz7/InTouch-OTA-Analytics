@@ -236,6 +236,17 @@ def parse_queue(value: object) -> tuple[int | None, str]:
     return count, "pending"
 
 
+def row_count_from_filename(filename: str) -> int:
+    """The device count the platform puts in its export names: Devices_35477_15Aug26_1511.xlsx.
+
+    Used only to give a progress bar a denominator while the file is being read — the real count
+    is whatever the file turns out to hold. Returns 0 when the name does not carry one, which
+    leaves the bar counting up without a target rather than showing a wrong one.
+    """
+    match = re.search(r"_(\d{2,7})_\d{1,2}[A-Za-z]{3}\d{2}_", filename)
+    return int(match.group(1)) if match else 0
+
+
 def snapshot_at_from_filename(filename: str) -> datetime | None:
     """Recover the snapshot timestamp from names like Devices_35477_15Aug26_1511.xlsx.
 

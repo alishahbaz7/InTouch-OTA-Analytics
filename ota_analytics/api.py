@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -20,8 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics, registry,
-               rollup, scheduler, sources, startup)
+from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics, progress,
+               registry, rollup, scheduler, sources, startup)
 
 from . import __version__, build_info      # noqa: E402  (kept beside the app metadata)
 
@@ -640,19 +641,23 @@ def _update_context(request: Request, **extra) -> dict:
         is_local=_is_local(request),
         startup=startup.status(),
         startup_available=startup.AUTO_START_AVAILABLE,
+        # Rendered on load as well as polled, so a job already running when the page is opened
+        # is visible immediately rather than only after the first poll — and so it survives the
+        # tab being closed and reopened, which a two-minute merge invites.
+        job=progress.snapshot(),
         **extra,
     )
     return ctx
 
 
-def _ingest_path(path) -> dict:
+def _ingest_path(path, job=None) -> dict:
     """Ingest a newly-acquired file and rebuild everything that depends on it.
 
     A duplicate is discarded rather than kept: uploading the same export twice would otherwise
     leave a second 22 MB copy in the folder forever, and it carries no information.
     """
     conn = get_conn()
-    result = ingest.ingest_file(conn, path)
+    result = ingest.ingest_file(conn, path, job=job)
     if result.status == "already_ingested":
         try:
             path.unlink()
@@ -663,6 +668,8 @@ def _ingest_path(path) -> dict:
                            f"(snapshot {result.snapshot_id}). Nothing changed, and the "
                            f"duplicate copy was discarded."}
 
+    if job:
+        job.begin("Rebuilding metrics")
     rollup.rollup_snapshot(conn, result.snapshot_id)
     transitions = None
     detail = (f"{result.rows:,} devices loaded as snapshot {result.snapshot_id}, "
@@ -704,13 +711,36 @@ def update_page(request: Request):
     return templates.TemplateResponse(request, "update.html", _update_context(request))
 
 
-def _store_and_ingest(filename: str, content: bytes) -> dict:
+def run_job(job: progress.Job, work) -> None:
+    """Run `work(job)` on a background thread, so the POST can answer straight away.
+
+    Holding the request open for the length of the job is what made a working merge look like a
+    hang: the browser sat on a request that would not return for two minutes, and there was no
+    way to ask how it was going, because the answer would have arrived on the same response.
+
+    A plain thread rather than the threadpool, because nothing awaits this — the page polls
+    /api/progress instead, and the job outlives the request that started it.
+    """
+    def body() -> None:
+        try:
+            work(job)
+        except Exception as exc:                      # noqa: BLE001 — recorded, not swallowed
+            errors.record("web", exc, path=f"job:{job.kind}")
+            job.fail(exc)
+
+    threading.Thread(target=body, name=f"job-{job.kind}", daemon=True).start()
+
+
+def _store_and_ingest(filename: str, content: bytes, job=None) -> dict:
     """Save an upload and load it. Blocking, and deliberately off the event loop.
 
     Opens its own connection by way of `_ingest_path`: sqlite3 objects are bound to the thread
     that created them, so a connection made in the request handler cannot be used here.
     """
-    return _ingest_path(sources.store_upload(filename, content))
+    if job:
+        job.begin("Saving the file")
+    path = sources.store_upload(filename, content)
+    return _ingest_path(path, job=job)
 
 
 @app.post("/update/import", response_class=HTMLResponse)
@@ -724,13 +754,24 @@ async def update_import(request: Request, file: UploadFile = File(...)):
     fact the whole dashboard had. Every other route is a plain `def`, which Starlette already
     runs in a threadpool; these two upload routes were the only ones that could freeze it.
     """
+    content = await file.read()
+    name = file.filename or ""
     try:
-        content = await file.read()
-        result = await run_in_threadpool(_store_and_ingest, file.filename or "", content)
-    except (sources.SourceError, ingest.IngestError) as exc:
-        result = {"level": "error", "message": str(exc)}
-    return templates.TemplateResponse(request, "update.html",
-                                      _update_context(request, result=result, tab="import"))
+        job = progress.start("upload", f"Loading {name or 'export'}", ingest.INGEST_STEPS)
+    except progress.Busy as exc:
+        return templates.TemplateResponse(request, "update.html", _update_context(
+            request, tab="import", result={"level": "warn", "message": str(exc)}))
+
+    def work(job: progress.Job) -> None:
+        try:
+            outcome = _store_and_ingest(name, content, job=job)
+        except (sources.SourceError, ingest.IngestError) as exc:
+            job.fail(exc)
+            return
+        job.finish(outcome["message"])
+
+    run_job(job, work)
+    return RedirectResponse("/update?tab=import", status_code=303)
 
 
 @app.post("/update/online", response_class=HTMLResponse)
@@ -876,10 +917,18 @@ def update_startup_test(request: Request):
 
 @app.post("/update/run-now", response_class=HTMLResponse)
 def update_run_now(request: Request):
-    state = scheduler.get_scheduler().run_now()
-    level = {"ok": "ok", "unchanged": "warn", "error": "error"}.get(state.last_status, "warn")
-    return templates.TemplateResponse(request, "update.html", _update_context(
-        request, tab="agent", result={"level": level, "message": state.last_message}))
+    try:
+        job = progress.start("fetch", "Fetching from the platform", scheduler.FETCH_STEPS)
+    except progress.Busy as exc:
+        return templates.TemplateResponse(request, "update.html", _update_context(
+            request, tab="agent", result={"level": "warn", "message": str(exc)}))
+
+    def work(job: progress.Job) -> None:
+        state = scheduler.get_scheduler().run_now(job=job)
+        job.finish(state.last_message)
+
+    run_job(job, work)
+    return RedirectResponse("/update?tab=agent", status_code=303)
 
 
 @app.get("/api/agent")
@@ -910,31 +959,41 @@ def update_bundle_export(since: str | None = None):
                  f'attachment; filename="{bundle.suggested_filename(conn)}"'})
 
 
-def _merge_bundle(content: bytes, allow_interleave: bool) -> bundle.ImportResult:
+def _merge_bundle(content: bytes, allow_interleave: bool, job=None) -> bundle.ImportResult:
     """Merge a bundle. Blocking for minutes on a large history, so it runs off the event loop.
 
     The connection is opened here, in the worker thread that uses it: sqlite3 objects cannot be
     shared across threads.
     """
-    return bundle.import_bundle(db.connect(), content, allow_interleave=allow_interleave)
+    return bundle.import_bundle(db.connect(), content, allow_interleave=allow_interleave,
+                                job=job)
 
 
 @app.post("/update/bundle-import", response_class=HTMLResponse)
 async def update_bundle_import(request: Request, file: UploadFile = File(...),
                                allow_interleave: bool = Form(False)):
     """Merge an uploaded bundle. See `update_import` for why the work leaves the event loop."""
+    content = await file.read()
     try:
-        content = await file.read()
-        outcome = await run_in_threadpool(_merge_bundle, content, allow_interleave)
-        # "Already loaded" is a correct answer, not a problem: showing it as a warning made a
-        # successful no-op read as a failure.
-        level = {"imported": "ok", "already_present": "ok",
-                 "refused": "warn", "empty": "warn"}.get(outcome.status, "warn")
-        result = {"level": level, "message": outcome.message}
-    except bundle.BundleError as exc:
-        result = {"level": "error", "message": str(exc)}
-    return templates.TemplateResponse(request, "update.html",
-                                      _update_context(request, result=result, tab="share"))
+        job = progress.start("import", "Merging bundle", bundle.MERGE_STEPS)
+    except progress.Busy as exc:
+        return templates.TemplateResponse(request, "update.html", _update_context(
+            request, tab="share", result={"level": "warn", "message": str(exc)}))
+
+    def work(job: progress.Job) -> None:
+        try:
+            outcome = _merge_bundle(content, allow_interleave, job=job)
+        except bundle.BundleError as exc:
+            job.fail(exc)
+            return
+        job.finish(outcome.message)
+        # "Already loaded" and "refused" are answers, not failures — carried so the page can
+        # colour the result without re-deriving it.
+        job.kind = "import"
+        job.error = "" if outcome.status in ("imported", "already_present") else "advice"
+
+    run_job(job, work)
+    return RedirectResponse("/update?tab=share", status_code=303)
 
 
 @app.post("/update/label", response_class=HTMLResponse)
@@ -946,6 +1005,21 @@ def update_label(request: Request, label: str = Form("")):
         request, tab="share",
         result={"level": "ok", "message": f"This install is now called {name!r}. It appears on "
                                           f"every bundle and report it produces."}))
+
+
+@app.get("/api/progress")
+def api_progress():
+    """What the running job is doing. Always answers, so the poller needs no special cases."""
+    return JSONResponse(progress.snapshot())
+
+
+@app.post("/update/progress/dismiss", response_class=HTMLResponse)
+def update_progress_dismiss(request: Request):
+    """Acknowledge a finished job so the panel stops showing it."""
+    job = progress.current()
+    if job is not None and job.status != "running":
+        progress.clear()
+    return RedirectResponse("/update", status_code=303)
 
 
 @app.get("/api/identity")

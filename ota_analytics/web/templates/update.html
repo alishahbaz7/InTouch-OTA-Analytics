@@ -1,10 +1,98 @@
 {% extends "base.html" %}
 {% block title %}Update Data — OTA Analytics{% endblock %}
 
+{% block scripts %}
+<script>
+// Poll the job while one is running. The job lives on the server, so this only *reads* — closing
+// the tab does not stop the work, and reopening the page picks it up again mid-flight.
+(function () {
+  var panel = document.getElementById('job-panel');
+  if (!panel) return;
+
+  var fill = document.getElementById('job-fill');
+  var timer = null;
+
+  function set(id, text) {
+    var node = document.getElementById(id);
+    if (node) node.textContent = text;
+  }
+
+  function render(d) {
+    panel.hidden = false;
+    panel.className = 'job-panel is-' + d.status;
+    set('job-label', d.label);
+    set('job-step', d.step || '');
+    set('job-percent', d.percent + '%');
+    fill.style.width = d.percent + '%';
+    // The count is only shown when there is a real denominator behind it. A bar with an
+    // invented total is worse than one that simply counts up.
+    set('job-detail', d.detail || (d.total ? d.done.toLocaleString() + ' of ' +
+                                   d.total.toLocaleString() : ''));
+    set('job-stage', d.step_count ? 'step ' + d.step_index + ' of ' + d.step_count : '');
+
+    var result = document.getElementById('job-result');
+    var dismiss = document.getElementById('job-dismiss');
+    var finished = d.status !== 'running';
+    result.hidden = !finished;
+    dismiss.hidden = !finished;
+    if (finished) {
+      result.textContent = d.message || '';
+      set('job-step', d.status === 'error' ? 'failed' : 'finished');
+    }
+    return finished;
+  }
+
+  function poll() {
+    fetch('/api/progress', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.active) { panel.hidden = true; stop(); return; }
+        if (render(d) && timer) {
+          stop();
+          // A finished job usually changed the data, so bring the rest of the page up to date
+          // once — but only after the result has been on screen long enough to read.
+          if (d.status === 'done') setTimeout(function () { window.location.reload(); }, 4000);
+        }
+      })
+      .catch(function () { /* server busy or restarting; the next tick tries again */ });
+  }
+
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+  poll();
+  timer = setInterval(poll, 1000);
+})();
+</script>
+{% endblock %}
+
 {% block content %}
 {% if result %}
 <div class="notice notice-{{ result.level }}">{{ result.message }}</div>
 {% endif %}
+
+{# Progress for whatever long job is running. Rendered server-side as well as polled: the job
+   lives on the server, so closing this tab and reopening it finds the job still going — which
+   a spinner drawn in JavaScript could never do. Hidden when there is nothing to report. #}
+<section class="job-panel {{ 'is-' ~ job.status if job.active }}" id="job-panel"
+         {{ '' if job.active else 'hidden' }}>
+  <div class="job-head">
+    <strong id="job-label">{{ job.label if job.active }}</strong>
+    <span class="job-step" id="job-step">{{ job.step if job.active }}</span>
+    <span class="job-percent" id="job-percent">{{ job.percent if job.active }}%</span>
+  </div>
+  <div class="job-track"><div class="job-fill" id="job-fill"
+       style="width: {{ job.percent if job.active else 0 }}%"></div></div>
+  <div class="job-foot">
+    <span id="job-detail">{{ job.detail if job.active }}</span>
+    <span class="dim" id="job-stage">
+      {%- if job.active %}step {{ job.step_index }} of {{ job.step_count }}{% endif -%}
+    </span>
+  </div>
+  <div class="job-result" id="job-result" hidden></div>
+  <form method="post" action="/update/progress/dismiss" id="job-dismiss" hidden>
+    <button type="submit" class="ghost">Dismiss</button>
+  </form>
+</section>
 
 {# Hero: connection state, the timer, and the one action most visits are here for. #}
 <section class="hero status-{{ auth.level }}">

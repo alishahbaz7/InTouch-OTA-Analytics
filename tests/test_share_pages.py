@@ -131,12 +131,34 @@ def test_a_long_ingest_does_not_freeze_the_dashboard(client, monkeypatch):
     assert not ran_on_loop, "the ingest ran on the event loop and would freeze every page"
 
 
+def wait_for_job(client, timeout: float = 20.0) -> dict:
+    """Poll until the background job stops running. Returns its final state."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = client.get("/api/progress").json()
+        if not state.get("active") or state.get("status") != "running":
+            return state
+        time.sleep(0.05)
+    raise AssertionError("the job never finished")
+
+
 def test_uploading_something_that_is_not_a_bundle_is_reported_not_raised(client):
-    response = client.post("/update/bundle-import",
+    """The POST now returns straight away, so the failure arrives through the job, not the
+    response body — but it must still arrive, and still be readable."""
+    from ota_analytics import progress
+
+    progress.clear()
+    response = client.post("/update/bundle-import", follow_redirects=False,
                            files={"file": ("login.html", b"<html>Sign in</html>", "text/html")})
-    assert response.status_code == 200
-    assert "not a bundle" in response.text
-    assert "Something went wrong" not in response.text
+    assert response.status_code == 303          # answered immediately, not after the work
+
+    state = wait_for_job(client)
+    assert state["status"] == "error"
+    assert "not a bundle" in state["message"]
+    assert "Something went wrong" not in client.get("/update").text
+    progress.clear()
 
 
 def test_renaming_the_install_shows_up_in_the_footer(client):

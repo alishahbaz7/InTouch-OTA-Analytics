@@ -124,9 +124,9 @@ class Scheduler:
         self._stopping = True
         self._wake.set()
 
-    def run_now(self) -> SchedulerState:
+    def run_now(self, job=None) -> SchedulerState:
         """Trigger a fetch immediately, whether or not the timer is enabled."""
-        self._run_once()
+        self._run_once(job=job)
         return self.state
 
     # ─── the loop ───────────────────────────────────────────────────────────
@@ -149,10 +149,10 @@ class Scheduler:
                 return
             self._run_once()
 
-    def _run_once(self) -> None:
+    def _run_once(self, job=None) -> None:
         started = datetime.now()
         try:
-            message, status, snapshot_id = self._fetch_and_ingest()
+            message, status, snapshot_id = self._fetch_and_ingest(job=job)
         except Exception as exc:                     # never let the loop die
             status, message, snapshot_id = "error", f"{type(exc).__name__}: {exc}", None
             from . import errors
@@ -176,7 +176,9 @@ class Scheduler:
                 ).isoformat(sep=" ", timespec="seconds")
             self._save()
 
-    def _fetch_and_ingest(self) -> tuple[str, str, int | None]:
+    def _fetch_and_ingest(self, job=None) -> tuple[str, str, int | None]:
+        job = job or _SilentJob()
+        job.begin("Signing in")
         connection = sources.load_connection()
         if not connection.url:
             return "No platform URL configured — set one on the Update Data page.", "error", None
@@ -186,14 +188,17 @@ class Scheduler:
             return ("No saved credentials. Tick 'Remember me' on the Update Data page so the "
                     "agent can sign in on its own."), "error", None
 
+        job.begin("Downloading from the platform", detail=connection.url)
         fetched = sources.fetch_export(connection, secret or "")
         conn = db.connect()
 
         if fetched.records is not None:
+            job.begin("Reading devices", total=len(fetched.records),
+                      detail=f"{len(fetched.records):,} devices")
             result = ingest.ingest_records(conn, fetched.records,
-                                           source_name=f"API {connection.url}")
+                                           source_name=f"API {connection.url}", job=job)
         else:
-            result = ingest.ingest_file(conn, fetched.path)
+            result = ingest.ingest_file(conn, fetched.path, job=job)
             if result.status == "already_ingested" and fetched.path:
                 fetched.path.unlink(missing_ok=True)
 
@@ -201,9 +206,10 @@ class Scheduler:
             return ("Nothing has changed on the platform since the last pull.",
                     "unchanged", result.snapshot_id)
 
+        job.begin("Rebuilding metrics")
         rollup.rollup_snapshot(conn, result.snapshot_id)
 
-
+        job.begin("Thinning old snapshots")
         # Retention runs with every fetch: at a short interval the database would otherwise
         # grow by gigabytes a week, and nobody would notice until it hurt.
         from . import retention
@@ -212,6 +218,31 @@ class Scheduler:
 
         return (f"Loaded {result.rows:,} devices as snapshot {result.snapshot_id}.{note}",
                 "ok", result.snapshot_id)
+
+
+# Phases of a fetch, and what each is worth on the bar. Signing in and downloading
+# dominate the wall clock on a slow link; folding the snapshot into the registry
+# dominates on a fast one.
+FETCH_STEPS = [
+    ("Signing in", 1.0),
+    ("Downloading from the platform", 6.0),
+    ("Reading devices", 4.0),
+    ("Storing what changed", 2.0),
+    ("Checking data quality", 1.0),
+    ("Updating the device registry", 6.0),
+    ("Rebuilding metrics", 2.0),
+    ("Thinning old snapshots", 1.0),
+]
+
+
+class _SilentJob:
+    """Stands in for a job when a scheduled fetch runs with nobody watching."""
+
+    def begin(self, name, total=0, detail=""):
+        pass
+
+    def advance(self, done=None, detail=None):
+        pass
 
 
 _scheduler: Scheduler | None = None

@@ -152,5 +152,7 @@ document.addEventListener('click', function (event) {
   });
 });
 </script>
+{# Pages add their own scripts here — the progress poller on /update, for one. #}
+{% block scripts %}{% endblock %}
 </body>
 </html>
