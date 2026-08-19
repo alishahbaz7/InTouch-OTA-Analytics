@@ -5,7 +5,7 @@ ORM or DataFrame in between — and so they are trivial to test.
 
 The framing throughout follows how the platform is actually operated: tasks are assigned in
 bulk to devices that may be offline, so a pending task is *parked*, not failed. The job of
-these metrics is to separate parked-and-waiting from genuinely stuck.
+these metrics is to separate a task that is parked from one that cannot be delivered.
 """
 
 from __future__ import annotations
@@ -128,7 +128,8 @@ def pending_by_reason(conn: sqlite3.Connection, snapshot_id: int,
             "bucket": label,
             # Read as a sentence: the device is pending, and this is how long it has been
             # unreachable. "Online" is the odd one out — it is reachable and still not updated.
-            "label": "Pending — Online" if actionable else f"Pending — Offline since {label}",
+            "label": ("Task pending — Online" if actionable
+                      else f"Task pending — Offline · {label}"),
             "devices": row["n"],
             "tasks": row["tasks"],
             "actionable": actionable,
@@ -239,7 +240,8 @@ def fallback_breakdown(conn: sqlite3.Connection, snapshot_id: int,
     return [dict(r) for r in rows]
 
 
-def stuck_devices(conn: sqlite3.Connection, snapshot_id: int, limit: int = 200) -> list[dict]:
+def pending_online_devices(conn: sqlite3.Connection, snapshot_id: int,
+                           limit: int = 200) -> list[dict]:
     """Devices that are online but still carrying a pending task.
 
     Powered, connected, and not updating — the population the platform cannot currently show.
@@ -297,6 +299,13 @@ def firmware_mix(conn: sqlite3.Connection, snapshot_id: int,
                COUNT(*) AS devices,
                SUM(status = 'Online') AS online,
                SUM(status = 'Offline') AS offline,
+               -- Pending split the same way the fleet is, because the split is the whole
+               -- point: a task pending on a reachable device is the one worth chasing,
+               -- and a task pending on a dark one is simply parked. Reported per version
+               -- so a rollout that is stalling on one build stands out from one that is
+               -- merely waiting for vehicles to be switched on.
+               SUM(queue_state = 'pending' AND status = 'Online') AS pending_online,
+               SUM(queue_state = 'pending' AND status = 'Offline') AS pending_offline,
                -- Reported separately rather than left as the remainder: STATUS has three
                -- values, so online + offline does NOT reach the row total. Without this column
                -- the (unknown) firmware row reads 0% online and 4.3% offline and looks broken,
@@ -441,11 +450,14 @@ def task_breakdown(conn: sqlite3.Connection, snapshot_id: int,
     """, [snapshot_id, *params]).fetchone()[0]
     pending = counts.get("pending", 0)
     return [
-        {"label": "Updated", "value": counts.get("completed", 0), "tone": "seg-ok"},
-        {"label": "Pending — stuck while online", "value": reachable, "tone": "seg-bad"},
-        {"label": "Pending — waiting for power-on", "value": pending - reachable,
-         "tone": "seg-warn"},
-        {"label": "Never tasked", "value": counts.get("never_tasked", 0), "tone": "seg-dim"},
+        # The same four names and the same four colours the overview tiles use. A device
+        # carrying a pending task is parked, not broken, so neither pending state is
+        # coloured like a fault — the distinction that matters is whether it is reachable.
+        {"label": "Task completed", "value": counts.get("completed", 0), "tone": "seg-ok"},
+        {"label": "Task pending — Online", "value": reachable, "tone": "seg-yellow"},
+        {"label": "Task pending — Offline", "value": pending - reachable,
+         "tone": "seg-orange"},
+        {"label": "No pending task", "value": counts.get("never_tasked", 0), "tone": "seg-dim"},
     ]
 
 

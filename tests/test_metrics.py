@@ -37,9 +37,9 @@ def test_kpis_split_pending_by_reason(snapshot):
     assert k["pending_reachable"] + k["pending_waiting"] == k["devices_pending"]
 
 
-def test_stuck_devices_are_online_and_pending_only(snapshot):
+def test_pending_online_devices_are_online_and_pending_only(snapshot):
     conn, sid = snapshot
-    imeis = {d["imei"] for d in metrics.stuck_devices(conn, sid)}
+    imeis = {d["imei"] for d in metrics.pending_online_devices(conn, sid)}
     assert imeis == {"stuck1", "stuck2"}
 
 

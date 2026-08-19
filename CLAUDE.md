@@ -383,6 +383,31 @@ for the same reason `auth.py` denies by default. An interrupted rescue refuses r
 overwriting the parked copy, and on a name collision the rescued copy wins — a fresh build ships
 an empty `data` folder, and theirs is the only real one.
 
+## One vocabulary, one palette
+
+Every task state has exactly one name and exactly one colour, everywhere it appears — tile,
+donut, table header, download filename, CLI summary.
+
+| State | Colour | Meaning |
+|---|---|---|
+| `Task completed` | green `#35c48a` | tasked, nothing outstanding |
+| `Task pending — Online` | **yellow** `#e8c33c` | reachable and still not updated — the actionable one |
+| `Task pending — Offline` | orange `#e8893c` | parked until the device is switched on |
+| `No pending task` | grey `--muted` | never targeted, which for an EOL model is correct |
+
+- **Do not write "stuck", "stalled" or "failed" about a pending task.** The platform assigns
+  tasks in bulk to devices that are switched off, so a pending task is *parked*, and the word
+  carries a judgement the data does not support. The page previously said "Stuck while
+  reachable" and coloured it red like a fault; it is `Task pending — Online` in yellow. What
+  matters is reachability, not blame.
+- **Neither pending state is coloured like an error.** Red is for a genuine fault. Yellow says
+  "worth chasing", orange says "waiting by design".
+- `metrics.pending_online_devices` is the function behind the actionable list; downloads are
+  named `pending_online.*`. If a name needs changing, change all of them — a donut and a tile
+  showing the same number under different words is how people stop trusting both.
+- `seg-yellow` / `seg-orange` reuse the tile hex values exactly, so a chart and a tile for the
+  same state cannot drift apart.
+
 ## Hard rules
 
 - **Ingest is append-only and idempotent.** Re-ingesting the same file (matched by SHA-256)

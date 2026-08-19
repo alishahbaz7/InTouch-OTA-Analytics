@@ -70,17 +70,15 @@
       <tr class="group-row">
         <th rowspan="2">Model</th>
         <th rowspan="2">Firmware</th>
-        <th class="n" colspan="2">Devices</th>
-        <th class="n" colspan="2">Online</th>
-        <th class="n" colspan="2">Offline</th>
-        <th class="n" rowspan="2">Inactive</th>
-        <th class="n" rowspan="2">Task pending</th>
+        <th class="n" colspan="3">Devices</th>
+        <th class="n" colspan="3">Online</th>
+        <th class="n" colspan="3">Offline</th>
         <th rowspan="2">Distribution</th>
       </tr>
       <tr class="sub-row">
-        <th class="n">Count</th><th class="n">% of fleet</th>
-        <th class="n">Count</th><th class="n">% of version</th>
-        <th class="n">Count</th><th class="n">% of version</th>
+        <th class="n">Count</th><th class="n">% of fleet</th><th class="n">Task</th>
+        <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
+        <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
       </tr>
     </thead>
     <tbody>
@@ -88,14 +86,21 @@
       <tr>
         <td class="dim">{{ r.device_model }}</td>
         <td><strong>{{ r.firmware }}</strong></td>
-        <td class="n">{{ r.devices | comma }}</td>
+        {# Online and Offline do not always reach the row total: STATUS has a third value
+           for a device that has never pinged. It is 0 on 102 of 103 rows, so a column of
+           its own was noise — but the shortfall still has to be accountable, or that one
+           row silently loses 645 devices. It is named here instead. #}
+        <td class="n"{% if r.inactive %} title="{{ r.inactive | comma }} of these have never pinged, so they count as neither online nor offline"{% endif %}>{{ r.devices | comma }}{% if r.inactive %}<span class="footmark">*</span>{% endif %}</td>
         <td class="n dim">{{ '%.1f' % (r.devices / mix_total * 100 if mix_total else 0) }}%</td>
+        <td class="n dim">{{ r.pending | comma }}</td>
         <td class="n">{{ r.online | comma }}</td>
         <td class="n dim">{{ m.ratio(r.online, r.devices) }}</td>
+        {# The actionable figure on the page: powered, connected, task still not taken.
+           Yellow rather than red — the task is parked, not failed. #}
+        <td class="n {{ 'tone-yellow-text' if r.pending_online }}">{{ r.pending_online | comma }}</td>
         <td class="n">{{ r.offline | comma }}</td>
         <td class="n dim">{{ m.ratio(r.offline, r.devices) }}</td>
-        <td class="n {{ 'dim' if not r.inactive }}">{{ r.inactive | comma }}</td>
-        <td class="n {{ 'alert-text' if r.pending }}">{{ r.pending | comma }}</td>
+        <td class="n {{ 'tone-orange-text' if r.pending_offline }}">{{ r.pending_offline | comma }}</td>
         <td class="barcell">
           <div class="bar-track slim"><div class="bar-fill neutral"
                style="width: {{ '%.2f' % (r.devices / biggest * 100) }}%"></div></div>
@@ -108,12 +113,13 @@
         <td colspan="2">Total</td>
         <td class="n">{{ mix_total | comma }}</td>
         <td class="n dim">100%</td>
+        <td class="n dim">{{ mix | sum(attribute='pending') | comma }}</td>
         <td class="n">{{ mix | sum(attribute='online') | comma }}</td>
         <td class="n dim">{{ m.ratio(mix | sum(attribute='online'), mix_total) }}</td>
+        <td class="n">{{ mix | sum(attribute='pending_online') | comma }}</td>
         <td class="n">{{ mix | sum(attribute='offline') | comma }}</td>
         <td class="n dim">{{ m.ratio(mix | sum(attribute='offline'), mix_total) }}</td>
-        <td class="n">{{ mix | sum(attribute='inactive') | comma }}</td>
-        <td class="n">{{ mix | sum(attribute='pending') | comma }}</td>
+        <td class="n">{{ mix | sum(attribute='pending_offline') | comma }}</td>
         <td></td>
       </tr>
     </tfoot>

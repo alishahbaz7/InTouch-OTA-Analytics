@@ -8,6 +8,7 @@ with no rows made the overview blow up. Unit tests cannot catch either — only 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -115,11 +116,13 @@ def test_selecting_a_model_on_the_firmware_page_filters_it(client):
     assert "all {} models".format(len(models)) not in flat
 
 
-def test_the_firmware_table_names_each_denominator(client):
+def test_the_firmware_table_names_each_denominator_and_task_column(client):
     """Three percentage columns sit side by side and measure against different totals.
 
     One repeated "Share (%)" would put the same word on three different meanings in adjacent
-    columns. The group row carries the subject, the row under it carries the denominator.
+    columns. The group row carries the subject, the row under it carries the denominator — and
+    now a Task figure for each, so "how many of these are still waiting" is answerable per
+    group rather than only for the row as a whole.
     """
     import re
 
@@ -133,17 +136,23 @@ def test_the_firmware_table_names_each_denominator(client):
     # Read the group row itself rather than searching the whole page, so a heading appearing
     # somewhere else cannot make this pass.
     header = flat[flat.index('<tr class="group-row">'):flat.index("</thead>")]
-    for heading in ("Model", "Firmware", "Devices", "Online", "Offline", "Inactive",
-                    "Task pending", "Distribution"):
+    for heading in ("Model", "Firmware", "Devices", "Online", "Offline", "Distribution"):
         assert f">{heading}<" in header, f"{heading} is missing from the header"
-    assert header.count("Count") == 3               # one under each two-column group
+
+    # Three groups, each Count / % / Task.
+    assert header.count("Count") == 3
+    assert header.count(">Task<") == 3
+
+    # The column of zeros is gone: Inactive read 0 on 102 of 103 rows on the real fleet.
+    assert "Inactive" not in header
 
 
-def test_inactive_is_shown_rather_than_left_as_the_remainder(client):
+def test_devices_that_never_pinged_are_still_accounted_for(client):
     """Online + Offline does not reach the row total: STATUS has a third value.
 
-    On the real fleet 643 devices have never pinged, so a row showing only online and offline
-    percentages appears to lose 1.8% of the fleet with no explanation.
+    The Inactive column was dropped because it reads 0 on 102 of 103 rows on the real fleet —
+    but those 645 devices must not vanish silently, or one row loses most of itself with nothing
+    to explain it. The figure moved into a marker on that row instead of a column of zeros.
     """
     from ota_analytics import db, metrics
 
@@ -153,7 +162,27 @@ def test_inactive_is_shown_rather_than_left_as_the_remainder(client):
     for row in rows:
         assert row["online"] + row["offline"] + row["inactive"] == row["devices"], row
 
-    assert "Inactive" in client.get("/firmware").text
+    template = Path("ota_analytics/web/templates/firmware.html").read_text(encoding="utf-8")
+    assert "never pinged" in template
+    assert "footmark" in template
+
+
+def test_each_group_reports_its_own_pending_count(client):
+    """Task pending is split the same way the fleet is, because the split is the point.
+
+    A task pending on a reachable device is the one worth chasing; on a dark one it is parked.
+    Reported per version so a rollout stalling on one build stands out from one merely waiting
+    for vehicles to be switched on.
+    """
+    from ota_analytics import db, metrics
+
+    conn = db.connect()
+    for row in metrics.firmware_mix(conn, metrics.latest_snapshot_id(conn)):
+        assert row["pending_online"] <= row["online"]
+        assert row["pending_offline"] <= row["offline"]
+        # The two never exceed the row's total pending: an Inactive device can be pending too,
+        # so they may sum to less, but never to more.
+        assert row["pending_online"] + row["pending_offline"] <= row["pending"]
 
 
 @pytest.mark.parametrize("path", PAGES)

@@ -67,10 +67,10 @@ def test_task_breakdown_splits_pending_by_reachability(conn, make_export):
     result = ingest.ingest_file(conn, path)
     segments = {s["label"]: s["value"] for s in metrics.task_breakdown(conn, result.snapshot_id)}
 
-    assert segments["Updated"] == 1
-    assert segments["Pending — stuck while online"] == 1
-    assert segments["Pending — waiting for power-on"] == 1
-    assert segments["Never tasked"] == 1
+    assert segments["Task completed"] == 1
+    assert segments["Task pending — Online"] == 1
+    assert segments["Task pending — Offline"] == 1
+    assert segments["No pending task"] == 1
 
 
 def test_model_breakdown_folds_the_long_tail(conn, make_export):

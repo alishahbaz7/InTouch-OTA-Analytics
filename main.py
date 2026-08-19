@@ -224,7 +224,7 @@ def summarize() -> None:
     print(f"\n  Snapshot {snapshot_id} — {k['snapshot_at']}")
     print(f"    devices              {total:,}")
     print(f"    online now           {k['devices_online']:,} ({k['online_pct']:.1%})")
-    print(f"    stuck while online   {k['pending_reachable']:,}   <- reachable, task undelivered")
+    print(f"    pending - Online     {k['pending_reachable']:,}   <- reachable, task undelivered")
     print(f"    waiting for power-on {k['pending_waiting']:,}   (expected)")
     print(f"    never tasked         {k['devices_never_tasked']:,}")
 

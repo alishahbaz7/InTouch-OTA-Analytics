@@ -255,7 +255,7 @@ def pending(request: Request, snapshot: int | None = None):
     ctx.update(
         kpis=metrics.kpis(conn, ctx["snapshot_id"]),
         buckets=metrics.pending_by_reason(conn, ctx["snapshot_id"]),
-        stuck=metrics.stuck_devices(conn, ctx["snapshot_id"]),
+        pending_online=metrics.pending_online_devices(conn, ctx["snapshot_id"]),
         stalled=registry.stalled_devices(conn) if ctx["multi_snapshot"] else [],
     )
     return templates.TemplateResponse(request, "pending.html", ctx)
@@ -427,17 +427,18 @@ def changes_export(window: str = "today", format: str = "csv", only: str = "all"
 
 @app.get("/pending/export")
 def pending_export(snapshot: int | None = None, format: str = "csv"):
-    """The stuck-while-reachable list — the cohort most likely to need action today."""
+    """Devices with a task pending while online — the cohort most likely to need action
+    today, because they are reachable and still have not taken the update."""
     conn = get_conn()
     snapshot_id = snapshot or metrics.latest_snapshot_id(conn)
-    rows = metrics.stuck_devices(conn, snapshot_id, limit=100_000)
+    rows = metrics.pending_online_devices(conn, snapshot_id, limit=100_000)
 
     if format == "txt":
-        return _download(exports.to_imei_list(rows), "txt", "stuck_online_imei")
+        return _download(exports.to_imei_list(rows), "txt", "pending_online_imei")
     if format == "xlsx":
-        return _download(exports.to_xlsx(rows, exports.DEVICE_COLUMNS, "Stuck online",
-                                         identity.manifest(conn)), "xlsx", "stuck_online")
-    return _download(exports.to_csv(rows, exports.DEVICE_COLUMNS), "csv", "stuck_online")
+        return _download(exports.to_xlsx(rows, exports.DEVICE_COLUMNS, "Task pending - Online",
+                                         identity.manifest(conn)), "xlsx", "pending_online")
+    return _download(exports.to_csv(rows, exports.DEVICE_COLUMNS), "csv", "pending_online")
 
 
 @app.get("/errors", response_class=HTMLResponse)
@@ -1066,7 +1067,7 @@ def api_pending(snapshot: int | None = None):
     conn = get_conn()
     snapshot_id = snapshot or metrics.latest_snapshot_id(conn)
     return JSONResponse({"buckets": metrics.pending_by_reason(conn, snapshot_id),
-                         "stuck": metrics.stuck_devices(conn, snapshot_id)})
+                         "pending_online": metrics.pending_online_devices(conn, snapshot_id)})
 
 
 @app.get("/api/firmware-mix")

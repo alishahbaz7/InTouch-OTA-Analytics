@@ -4,9 +4,14 @@
 
 {% block content %}
 <div class="tiles">
-  {{ m.tile('Pending devices', kpis.devices_pending | comma, 'all reasons') }}
-  {{ m.tile('Stuck while reachable', kpis.pending_reachable | comma, 'investigate', 'alert') }}
-  {{ m.tile('Waiting for power-on', kpis.pending_waiting | comma, 'expected', 'muted-tile') }}
+  {# Same names and same colours as the overview tiles. A pending task is parked, not
+     failed, so neither pending state is coloured like a fault — yellow for the one that
+     is reachable and worth chasing, orange for the one that is simply switched off. #}
+  {{ m.tile('Task pending — total', kpis.devices_pending | comma, 'all reasons') }}
+  {{ m.tile('Task pending — Online', kpis.pending_reachable | comma,
+            'reachable, not updated', 'tone-yellow') }}
+  {{ m.tile('Task pending — Offline', kpis.pending_waiting | comma,
+            'waiting for power-on', 'tone-orange') }}
   {{ m.tile('Outstanding tasks', kpis.pending_tasks_total | comma, 'queue depth') }}
 </div>
 
@@ -22,9 +27,9 @@
 </section>
 
 <section class="card highlight">
-  <h2>Stuck while reachable <span class="hint">{{ stuck | length }} devices · online within 24h
+  <h2>Task pending — Online <span class="hint">{{ pending_online | length }} devices · online within 24h
     with a task outstanding</span>
-    {% if stuck %}
+    {% if pending_online %}
     <details class="dropdown export">
       <summary><span class="dl-icon">⤓</span> Download</summary>
       <div class="dropdown-panel">
@@ -38,14 +43,14 @@
     </details>
     {% endif %}
   </h2>
-  {% if stuck %}
+  {% if pending_online %}
   <table>
     <thead>
       <tr><th>IMEI</th><th>Model</th><th>Firmware</th><th>HW</th>
           <th class="n">Tasks</th><th>Last seen</th><th>Groups</th></tr>
     </thead>
     <tbody>
-      {% for d in stuck %}
+      {% for d in pending_online %}
       <tr>
         <td class="mono">{{ d.imei }}</td>
         <td>{{ d.device_model or '—' }}</td>
@@ -65,7 +70,7 @@
 
 {% if multi_snapshot %}
 <section class="card">
-  <h2>Stalled across snapshots
+  <h2>Task pending across several fetches
     <span class="hint">{{ stalled | length }} · pending in consecutive snapshots, firmware unchanged</span>
   </h2>
   {% if stalled %}
@@ -83,7 +88,7 @@
     </tbody>
   </table>
   {% else %}
-  <p class="empty">Nothing stalled yet.</p>
+  <p class="empty">No device has carried the same pending task across several fetches yet.</p>
   {% endif %}
 </section>
 {% endif %}
