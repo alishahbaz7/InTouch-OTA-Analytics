@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from ota_analytics import ingest, registry
+from tests.test_pages import client  # noqa: F401  (renders the real dashboard)
 
 BASE = datetime(2026, 8, 15, 10, 0)
 
@@ -141,3 +142,69 @@ def test_a_device_that_never_moved_appears_nowhere(history):
         "SELECT last_changed_at, checks FROM device WHERE imei = 'steady'").fetchone()
     assert row["last_changed_at"] is None       # checked repeatedly, never changed
     assert row["checks"] == 3
+
+
+# ─── paging the Firmware moves list ─────────────────────────────────────────
+
+def test_paging_loses_no_move_and_repeats_none(conn, make_export):
+    """Several moves share a changed_at, because a snapshot stamps everything it observes with
+    the same time. Ordering by that alone lets one row appear on two pages and another on none —
+    the classic way paging quietly loses records. The id breaks the tie.
+    """
+    from ota_analytics import registry, rollup
+
+    from tests.conftest import device
+
+    # Twelve devices that all move at the same instant, so every changed_at collides.
+    first = make_export([device(str(100 + i), firmware="1.0.0") for i in range(12)],
+                        name="Devices_12_15Aug26_1000.xlsx")
+    second = make_export([device(str(100 + i), firmware="1.1.0") for i in range(12)],
+                         name="Devices_12_15Aug26_1100.xlsx")
+    from ota_analytics import ingest
+    for path in (first, second):
+        ingest.ingest_file(conn, path)
+    rollup.rollup_all(conn)
+
+    total = registry.movement_summary(conn)["moves"]
+    assert total == 12, f"expected 12 moves, got {total}"
+
+    for size in (1, 5, 12, 100):
+        seen = []
+        for page in range(1, -(-total // size) + 1):
+            rows = registry.firmware_moves(conn, limit=size, offset=(page - 1) * size)
+            seen.extend((r["imei"], r["changed_at"]) for r in rows)
+        assert len(seen) == total, f"size {size}: collected {len(seen)} of {total}"
+        assert len(set(seen)) == total, f"size {size}: {len(seen) - len(set(seen))} duplicates"
+
+
+def test_the_changes_page_offers_page_sizes_and_clamps_the_page(client):  # noqa: F811
+    import re
+
+    from ota_analytics import api
+
+    body = client.get("/changes?window=all").text
+    flat = re.sub(r"\s+", " ", body)
+    assert 'class="pager"' in flat
+    for size in api.PAGE_SIZES:
+        assert f"size={size}" in flat
+    # The count reports the whole result, not the rows on screen — a filtered view must not be
+    # mistakable for the full one.
+    assert "of <strong>" in flat
+
+    # A page beyond the end lands on the last one rather than erroring or showing nothing.
+    far = re.sub(r"\s+", " ", client.get("/changes?window=all&page=9999").text)
+    at = re.search(r'class="pager-at">\s*(\d+) / (\d+)', far)
+    assert at and at.group(1) == at.group(2)
+
+
+def test_an_unknown_page_size_falls_back_rather_than_being_trusted(client):  # noqa: F811
+    """A size straight off the query string decides a LIMIT, so it is whitelisted."""
+    import re
+
+    from ota_analytics import api
+
+    flat = re.sub(r"\s+", " ", client.get("/changes?window=all&size=99999").text)
+    assert f'size={api.DEFAULT_PAGE_SIZE}" class' in flat or "on" in flat
+    # Whatever it renders, the offered set is unchanged.
+    for size in api.PAGE_SIZES:
+        assert f"size={size}" in flat

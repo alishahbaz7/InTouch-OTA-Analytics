@@ -290,6 +290,20 @@ table.grouped thead .group-row th[colspan] + th[colspan] {
 .footmark { color: var(--muted); font-size: 10px; vertical-align: super; cursor: help;
             margin-left: 1px; }
 
+/* Pager. The count is the important half: it reports the whole result, so a filtered view
+   cannot be mistaken for the full one. */
+.pager { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 4px 0 12px;
+         font-size: 12px; color: var(--muted); }
+.pager-count strong { color: var(--text); }
+.pager-sizes, .pager-nav { display: flex; align-items: center; gap: 6px; }
+.pager-sizes { margin-left: auto; }
+.pager a { color: var(--dim); text-decoration: none; padding: 3px 8px; border-radius: 5px;
+           border: 1px solid transparent; }
+.pager a:hover { color: var(--text); background: var(--panel-2); }
+.pager-sizes a.on { color: #fff; background: var(--accent); }
+.pager .off { padding: 3px 8px; color: var(--line); }
+.pager-at { font-variant-numeric: tabular-nums; padding: 0 4px; }
+
 /* First-run instructions: readable at a glance, not a wall of prose. */
 .getting-started { margin: 4px 0 16px; padding-left: 20px; color: var(--dim); font-size: 13px; }
 .getting-started li { margin-bottom: 8px; line-height: 1.55; }

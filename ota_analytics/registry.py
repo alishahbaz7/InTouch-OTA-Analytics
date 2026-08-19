@@ -416,7 +416,7 @@ def _window_clause(since: str | None, until: str | None, column: str = "c.change
 
 
 def firmware_moves(conn: sqlite3.Connection, since: str | None = None,
-                   until: str | None = None, limit: int = 500) -> list[dict]:
+                   until: str | None = None, limit: int = 500, offset: int = 0) -> list[dict]:
     """Every firmware move in a period, classified — no snapshot pair to choose.
 
     Direction uses the same padded version key the rest of the system does, so 7.5.0.9 →
@@ -437,9 +437,12 @@ def firmware_moves(conn: sqlite3.Connection, since: str | None = None,
         FROM device_change c
         JOIN device d ON d.imei = c.imei
         WHERE c.field = 'firmware' AND {window}
-        ORDER BY c.changed_at DESC
-        LIMIT ?
-    """, [*params, limit]).fetchall()
+        -- id breaks the tie: several moves share a changed_at, since a snapshot stamps every
+        -- change it observes with the same time. Without it the same row can appear on two
+        -- pages and another on none, which is the classic way paging loses records.
+        ORDER BY c.changed_at DESC, c.id DESC
+        LIMIT ? OFFSET ?
+    """, [*params, limit, offset]).fetchall()
     return [dict(r) for r in rows]
 
 

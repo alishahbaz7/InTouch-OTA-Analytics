@@ -21,6 +21,45 @@
 {% endmacro %}
 
 {# Proportional stacked bar: segments is a list of (label, value, css-class). #}
+{# A pager for any long list. `base` is the query string that carries the view's own state
+   (window, filters, sort) without page or size, so changing either keeps everything else.
+   Written once here rather than per page: four copies would drift, and the count line is the
+   part that has to stay honest — it reports the whole result, not the rows on screen. #}
+{% macro pager(page, pages, total, size, sizes, base) %}
+{% set prefix = base ~ '&' if base else '' %}
+<div class="pager">
+  <span class="pager-count">
+    {%- if total -%}
+      {{ '{:,}'.format((page - 1) * size + 1) }}–{{ '{:,}'.format([page * size, total] | min) }}
+      of <strong>{{ '{:,}'.format(total) }}</strong>
+    {%- else -%}nothing to show{%- endif -%}
+  </span>
+
+  <span class="pager-sizes">
+    {% for option in sizes %}
+    <a class="{{ 'on' if option == size }}" href="?{{ prefix }}size={{ option }}">{{ option }}</a>
+    {% endfor %}
+    <span class="dim">per page</span>
+  </span>
+
+  <span class="pager-nav">
+    {% if page > 1 %}
+    <a href="?{{ prefix }}size={{ size }}&page=1" title="First">&laquo;</a>
+    <a href="?{{ prefix }}size={{ size }}&page={{ page - 1 }}">Previous</a>
+    {% else %}
+    <span class="off">&laquo;</span><span class="off">Previous</span>
+    {% endif %}
+    <span class="pager-at">{{ page }} / {{ pages }}</span>
+    {% if page < pages %}
+    <a href="?{{ prefix }}size={{ size }}&page={{ page + 1 }}">Next</a>
+    <a href="?{{ prefix }}size={{ size }}&page={{ pages }}" title="Last">&raquo;</a>
+    {% else %}
+    <span class="off">Next</span><span class="off">&raquo;</span>
+    {% endif %}
+  </span>
+</div>
+{% endmacro %}
+
 {% macro stack(segments, total) %}
 <div class="stack">
   {% for label, value, tone in segments %}

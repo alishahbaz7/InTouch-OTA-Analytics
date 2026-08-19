@@ -283,7 +283,7 @@ def firmware(request: Request, snapshot: int | None = None,
 
 
 @app.get("/changes", response_class=HTMLResponse)
-def changes(request: Request, window: str = "today"):
+def changes(request: Request, window: str = "today", page: int = 1, size: int = 50):
     """Changes over a time window, read from the per-device change log.
 
     No snapshot pair to choose: the log records every move individually, so a device that
@@ -294,12 +294,23 @@ def changes(request: Request, window: str = "today"):
     ctx = page_context(conn, request, None)
     since = registry.window_since(window)
 
+    # The total comes free: movement_summary already counts the moves in this window with the
+    # same filter the list uses, so paging needs no second COUNT.
+    summary = registry.movement_summary(conn, since)
+    size = size if size in PAGE_SIZES else DEFAULT_PAGE_SIZE
+    pages = max(1, -(-(summary["moves"] or 0) // size))
+    page = min(max(1, page), pages)
+
     ctx.update(
         window=window,
         windows=registry.WINDOWS,
         since=since,
-        summary=registry.movement_summary(conn, since),
-        moves=registry.firmware_moves(conn, since),
+        summary=summary,
+        page=page,
+        pages=pages,
+        size=size,
+        page_sizes=PAGE_SIZES,
+        moves=registry.firmware_moves(conn, since, limit=size, offset=(page - 1) * size),
         fallbacks=registry.fallbacks(conn),
         at_base=registry.at_base_firmware(conn),
         segments=registry.fallback_segments(conn),
@@ -551,6 +562,12 @@ def _order_by(sort: str, direction: str) -> str:
     # Missing values sort last either way — a device that has never reported should not head
     # the list just because its timestamp is NULL.
     return f"{column} IS NULL, {column} {'DESC' if descending else 'ASC'}, d.imei"
+
+
+# Rows per page. Offered rather than fixed because the useful number depends on the job:
+# 25 to read carefully, 100 to scan for a pattern.
+PAGE_SIZES = (25, 50, 100)
+DEFAULT_PAGE_SIZE = 50
 
 
 # Filter presets for "last update". Values are SQL fragments over the registry row.

@@ -110,8 +110,9 @@
 
 <section class="card">
   <h2>Firmware moves
-    <span class="hint">{{ moves | length }} shown · newest first</span>
+    <span class="hint">newest first</span>
   </h2>
+  {{ m.pager(page, pages, summary.moves, size, page_sizes, 'window=' ~ window) }}
   {% if moves %}
   <table>
     <thead>
