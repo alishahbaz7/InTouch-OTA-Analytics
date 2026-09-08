@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -161,6 +161,18 @@ def migrate(conn: sqlite3.Connection) -> None:
               AND (config_kind IS NULL OR config_kind = 'unchanged')
               AND queue_state_from IS queue_state_to
         """)
+    if current < 8:
+        # v8 adds device_current: the newest snapshot, kept resolved. Building it costs seconds
+        # once, here, instead of on every page load — which is what it had become, because each
+        # request opens its own connection and the temp table it used could not outlive one.
+        # On the 245-snapshot database that was 10.9s per page.
+        from . import current as _current
+
+        newest = conn.execute("SELECT id FROM snapshot WHERE row_count > 0 "
+                              "ORDER BY snapshot_at DESC, id DESC LIMIT 1").fetchone()
+        if newest is not None:
+            _current.rebuild(conn, newest[0])
+
     if current < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import config
+from . import config, current
 
 # Wait-time buckets for pending devices, in hours. Chosen around the operating reality: a device
 # dark for a day is routine, one dark for three months is effectively retired.
@@ -61,6 +61,13 @@ def snapshot_source(conn: sqlite3.Connection, snapshot_id: int | None) -> str:
     """
     if snapshot_id is None:
         return VIEW
+
+    # The newest snapshot is already resolved and kept in the database, and that is what almost
+    # every page asks for. Using it costs nothing at all — no build, no per-request work — where
+    # the temp table below costs seconds on every single request. It is used only when it holds
+    # exactly the snapshot being asked for, so a stale one is slow rather than wrong.
+    if current.held(conn) == snapshot_id:
+        return current.VIEW
 
     # Which snapshot is already held is read back out of the table rather than tracked beside it:
     # sqlite3.Connection does not accept attributes, and a dict keyed on the connection would

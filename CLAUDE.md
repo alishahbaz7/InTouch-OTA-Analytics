@@ -436,6 +436,36 @@ metrics. The overview took 12.7s and switching pages felt broken.
 and every per-snapshot metric reads that instead. Result: overview 12.7s → **1.05s**, pending
 9.3s → 2.5s, firmware 5.2s → 0.9s, devices 4.3s → 1.5s.
 
+**That was not enough on its own, because the cost grows with snapshot count and `_snap` does
+not outlive a request.** By 245 snapshots a single reference was 4.5s and building `_snap` was
+10.9s — and `get_conn()` opens a new connection per request, so a temp table is rebuilt on every
+page load. The overview was back to 18s, devices 42s, pending 77s.
+
+So the newest snapshot — which is what almost every read asks for, and which only changes when a
+fetch lands — is resolved once *when that happens* and kept in `device_current` (`current.py`).
+`snapshot_source()` returns it whenever `device_current_meta` holds exactly the snapshot asked
+for. Advancing it is incremental: a fetch of a fixed fleet changes ~150 devices, so it costs
+~150 upserts rather than re-resolving 35,848.
+
+- **Anything that writes `device_snapshot` directly must refresh the materialization**
+  (`current.refresh_latest`, or `invalidate` to fall back to the view). Ingest, `retention.prune`
+  and `bundle.import_bundle` all do. The guard is snapshot *identity*, not content: a copy that
+  holds snapshot N is trusted for snapshot N, so mutating N's rows underneath it is the one way
+  to get a stale answer — and the append-only rule is what normally makes that impossible.
+  A fixture doing surgery on stored rows is the realistic case, and `test_fallback_tag` shows it.
+- **Empty is safe.** With nothing materialized, readers fall back to the view: slower, never
+  wrong. That is what makes it correct to invalidate whenever anything is uncertain.
+- **A per-snapshot read that does not go through `metrics.at()` is a bug that only shows up as
+  slowness.** It returns the right answer, so nothing fails; it just costs a full fleet
+  resolution. Three were found this way, all outside metrics.py and all on the request path:
+  `rollup.fragmentation` (called by `kpis`, so every page with headline numbers), and the count
+  and the select inside `api._device_rows` — two resolutions per load, which is why `/devices`
+  took 41s. Grep for `device_state` outside metrics.py before assuming a page is slow for an
+  interesting reason.
+
+Measured on the 245-snapshot database, before → after: `/` 18.36s → **0.84s**, `/devices`
+41.54s → **0.25s**, `/pending` 76.79s → **0.45s**, `/firmware` 6.95s → **0.28s**.
+
 - **Every metric keeps its own `WHERE snapshot_id = ?`.** A caller asking for a different
   snapshot than the one held gets *nothing* rather than the wrong rows, and a metric that still
   reads the view is merely slow. Both failure modes are safe; neither is silent wrongness.
@@ -449,8 +479,15 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
   runs. Editing inside the literals corrupted them twice while this was being written — once
   turning SQL's `'Online'` into `'Onlinef'`, once rewriting the helper's own query into a
   reference to itself.
-- Anything that spans **all** snapshots — `registry.stalled_devices` — must keep using the view,
-  and is what the pending page still spends its time on.
+- **Anything that spans *all* snapshots is the thing to be suspicious of.** It grows by another
+  fetch every 15 minutes. `registry.stalled_devices` grouped `device_state` across every
+  snapshot — 245 × 35,848 resolved rows to answer a question about the present — and took 118s.
+  It now reads the registry and the change log instead, which already record when each device
+  became pending and when its firmware last moved.
+- **A threshold counted in snapshots is a threshold in disguise.** That same function called a
+  device stalled after 3 consecutive pending snapshots. At the original daily export that meant
+  three days; at the 15-minute cadence it means 45 minutes, so 26,481 devices qualified and the
+  list stopped meaning anything. `config.STALL_HOURS` is in hours for that reason.
 - If you touch metrics.py: Python 3.12 tokenizes f-strings as `FSTRING_START/MIDDLE/END`, not
   `STRING` (PEP 701), and adjacent literals are one implicit concatenation. Any script that
   rewrites SQL here has to handle both.

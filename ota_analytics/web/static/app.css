@@ -675,3 +675,4 @@ h2 .dropdown.export > summary { padding: 3px 10px; font-size: 11.5px; }
 .switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch input:checked ~ .switch-label { color: var(--text); }
 .startup-toggle input[type=number] { width: 56px; }
+

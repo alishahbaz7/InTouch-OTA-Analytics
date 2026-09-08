@@ -3,14 +3,18 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-08-19"
-CODENAME = "package"
+RELEASED = "2026-09-08"
+CODENAME = "pace"
 
 VERSION_HISTORY = [
-    ("1.7.0", "2026-08-19", "In progress: version stamped into the executables so Windows can "
+    ("1.8.0", "2026-09-08", "Every page under a second on 245 snapshots — the newest snapshot is "
+                            "kept resolved instead of rebuilt on each request, and three reads "
+                            "that bypassed it were fixed; fallbacks count how many times each "
+                            "device has done it, with filter, sort and paging"),
+    ("1.7.0", "2026-08-19", "Version stamped into the executables so Windows can "
                             "report it; per-column filter and sort on the remaining tables"),
     ("1.6.0", "2026-08-19", "In progress: consistent table behaviour — page size, pinned "
                             "headers, per-column filter and sort, and search"),

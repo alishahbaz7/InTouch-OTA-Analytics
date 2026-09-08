@@ -25,7 +25,9 @@
    (window, filters, sort) without page or size, so changing either keeps everything else.
    Written once here rather than per page: four copies would drift, and the count line is the
    part that has to stay honest — it reports the whole result, not the rows on screen. #}
-{% macro pager(page, pages, total, size, sizes, base) %}
+{# `pkey`/`skey` name the query parameters, so two independent pagers can sit on one
+   page without moving each other. Defaulted, so existing callers are unchanged. #}
+{% macro pager(page, pages, total, size, sizes, base, pkey='page', skey='size') %}
 {% set prefix = base ~ '&' if base else '' %}
 <div class="pager">
   <span class="pager-count">
@@ -37,22 +39,22 @@
 
   <span class="pager-sizes">
     {% for option in sizes %}
-    <a class="{{ 'on' if option == size }}" href="?{{ prefix }}size={{ option }}">{{ option }}</a>
+    <a class="{{ 'on' if option == size }}" href="?{{ prefix }}{{ skey }}={{ option }}">{{ option }}</a>
     {% endfor %}
     <span class="dim">per page</span>
   </span>
 
   <span class="pager-nav">
     {% if page > 1 %}
-    <a href="?{{ prefix }}size={{ size }}&page=1" title="First">&laquo;</a>
-    <a href="?{{ prefix }}size={{ size }}&page={{ page - 1 }}">Previous</a>
+    <a href="?{{ prefix }}{{ skey }}={{ size }}&{{ pkey }}=1" title="First">&laquo;</a>
+    <a href="?{{ prefix }}{{ skey }}={{ size }}&{{ pkey }}={{ page - 1 }}">Previous</a>
     {% else %}
     <span class="off">&laquo;</span><span class="off">Previous</span>
     {% endif %}
     <span class="pager-at">{{ page }} / {{ pages }}</span>
     {% if page < pages %}
-    <a href="?{{ prefix }}size={{ size }}&page={{ page + 1 }}">Next</a>
-    <a href="?{{ prefix }}size={{ size }}&page={{ pages }}" title="Last">&raquo;</a>
+    <a href="?{{ prefix }}{{ skey }}={{ size }}&{{ pkey }}={{ page + 1 }}">Next</a>
+    <a href="?{{ prefix }}{{ skey }}={{ size }}&{{ pkey }}={{ pages }}" title="Last">&raquo;</a>
     {% else %}
     <span class="off">Next</span><span class="off">&raquo;</span>
     {% endif %}
@@ -190,4 +192,16 @@
       {{ '{:,.0f}'.format(h / 24) }}d
     {%- endif -%}
   {%- endif -%}
+{% endmacro %}
+
+{# A sortable column header. Lifted out of devices.html so every table sorts the same way and
+   looks the same doing it — `th.sortable` / `.sorted` / `.sort-arrow` are already styled, and a
+   second table inventing its own markup is how two conventions end up on one screen.
+
+   `base` is the query string to preserve (without the sort key itself). #}
+{% macro sortable(base, key, label, current, numeric=false, param='sort') %}
+  <th class="sortable {{ 'n' if numeric }} {{ 'sorted' if current == key }}">
+    <a href="?{{ base }}{{ '&' if base }}{{ param }}={{ key }}">
+      {{- label }}<span class="sort-arrow">{{ '▼' if current == key else '' }}</span></a>
+  </th>
 {% endmacro %}

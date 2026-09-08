@@ -181,7 +181,7 @@ def prune(conn: sqlite3.Connection, *, dry_run: bool = False, now: datetime | No
     """Apply the retention policy. Child rows go with the snapshot via ON DELETE CASCADE."""
     from pathlib import Path
 
-    from . import config
+    from . import config, current
 
     keep, remove = plan(conn, now=now, tiers=tiers)
     protected = snapshots_with_changes(conn)
@@ -212,6 +212,11 @@ def prune(conn: sqlite3.Connection, *, dry_run: bool = False, now: datetime | No
     for batch_start in range(0, len(remove), 400):
         batch = remove[batch_start:batch_start + 400]
         conn.execute(f"DELETE FROM snapshot WHERE id IN ({','.join('?' * len(batch))})", batch)
+
+    # Rows have just moved between snapshots, so the resolved copy of the newest one can no
+    # longer be advanced from what it holds — the rows that would be applied are not the ones
+    # that follow it any more. Re-resolving is seconds, and this is already a batch operation.
+    current.refresh_latest(conn)
     conn.commit()
 
     if vacuum:

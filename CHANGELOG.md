@@ -5,6 +5,84 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 1.8.0 — 2026-09-08
+
+### Switching pages no longer takes half a minute
+
+Reported from the live fleet at 245 snapshots: moving between Dashboard, Changes and Devices
+"creates huge delay in loading the data, which is not acceptable". Measured before the fix, and
+it was not one problem but four.
+
+| Page | Before | After |
+|---|---|---|
+| Overview | 18.4s | **0.84s** |
+| Devices | 41.5s | **0.25s** |
+| Pending | 76.8s | **0.45s** |
+| Firmware | 7.0s | **0.28s** |
+| Changes | 1.4s | **0.64s** |
+
+**The newest snapshot is now kept resolved.** `device_state` is a view, and every reference
+re-resolves each device's most recent row across the whole fleet — 4.5s at 245 snapshots, and
+growing by another fetch every 15 minutes. It was already materialized once per request into a
+temp table, but a request opens its own connection, so that 10.9s rebuild was paid on *every
+page load*. It now lives in `device_current`, advanced when a fetch lands: ~150 upserts rather
+than re-resolving 35,848 devices. `device_current_meta` records which snapshot the rows resolve,
+and readers use them only when that matches what they asked for — anything else falls back to
+the view, which is slower and always right.
+
+**Three reads bypassed all of that.** They returned correct answers, so nothing failed; they
+just each cost a full fleet resolution. `rollup.fragmentation` is called by `kpis()`, so every
+page carrying the headline numbers paid it, and *both* queries behind the devices table paid it
+again — which is where 41 seconds came from.
+
+**"Pending across several fetches" was counting snapshots.** Three consecutive pending snapshots
+meant three days at the original daily export; at the 15-minute cadence it means 45 minutes, so
+26,481 devices — three quarters of the fleet — qualified, and the query grouped `device_state`
+across all 245 snapshots to work it out (118s). It now reads the change log, which already
+records when each device became pending: **0.043s**, and the threshold is `STALL_HOURS = 24`,
+because an hour is an hour whatever the cadence.
+
+Two attempts were measured and thrown away: a `valid_to` temporal column made the isolated query
+15x faster and the pages no better, and a first rewrite of the stalled query came out *slower*
+than what it replaced (SQLite preferred an index that made every pending device scan all 51,178
+queue-state rows).
+
+### Fallbacks: how many times, not just when
+
+A chronological list hides the devices that do this repeatedly — on the live fleet, 186
+fallbacks across 148 devices, but **23 of them had done it more than once** and one had done it
+six times, none of which is visible reading events in date order.
+
+- A **Times** column on every occurrence, and a **Falling back repeatedly** table, worst first.
+- The list **pages at 25/50/100** — it previously rendered a hard-sliced 100 rows with no control
+  and no indication there was more.
+- **Filter** by repeats-only or by model, and **sort** by IMEI, times, model or date. Every view
+  is a plain link, so a filtered list is a URL that can be handed to a colleague.
+- The download carries **Fallbacks (times)** too — a fallback read away from the dashboard gives
+  no hint that it is the device's sixth.
+
+One definition of "fallback" backs the list, the counts, the totals and the file, so they cannot
+drift apart.
+
+### A field the source never sent is no longer treated as empty
+
+The platform API carries no group information at all. Treating that absence as NULL wiped the
+groups of 29,384 devices on the first API fetch and every one after it — and group is one of the
+few dimensions available for explaining why a set of devices reverted. It also made every device
+look changed at the moment the source switched, writing 35,475 rows to record nothing.
+
+### Fixes
+
+- The stylesheet is versioned (`app.css?v=…`). Without it the browser caches the file under a URL
+  that never changes, so a restyled page keeps rendering with the old rules — which is
+  indistinguishable from the new CSS being broken, and is exactly how a set of filter controls
+  shipped looking like raw browser links.
+- A test now parses every template and fails if a class has no rule in the stylesheet. It would
+  have caught that, and the `.num` that should have been `.n`.
+- The sortable-column header is a shared macro, so tables cannot each invent their own.
+
+---
+
 ## 1.6.0 — 2026-08-19
 
 ### Devices page filters

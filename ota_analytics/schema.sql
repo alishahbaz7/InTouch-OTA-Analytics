@@ -300,3 +300,68 @@ CREATE TABLE IF NOT EXISTS report_job (
   output_path  TEXT,
   error        TEXT
 );
+
+-- ─── the newest snapshot, kept resolved ─────────────────────────────────────
+-- device_state is a view: every reference re-resolves each device's most recent row at or
+-- before the snapshot, across the whole fleet. On the 245-snapshot database that is 4.5s a
+-- reference, and materializing it per request cost 10.9s — paid on every page load, which is
+-- what made switching pages feel broken.
+--
+-- Almost every read wants the newest snapshot, and it changes only when a fetch lands. So it is
+-- resolved once, when that happens, and kept here. Maintenance is incremental: a fetch of a
+-- fixed fleet changes ~150 devices, so advancing costs ~150 upserts rather than 35,848.
+--
+-- Not a cache that can quietly disagree with its source: device_current_meta records which
+-- snapshot these rows resolve, and readers use it only when that matches what they asked for.
+-- Anything else falls back to the view, which is slower and always right.
+CREATE TABLE IF NOT EXISTS device_current (
+  imei             TEXT PRIMARY KEY,
+  status           TEXT,
+  queue            INTEGER,
+  queue_state      TEXT,
+  device_name      TEXT,
+  created_by       TEXT,
+  device_model_raw TEXT,
+  device_model     TEXT,
+  firmware_raw     TEXT,
+  firmware         TEXT,
+  fw_family        TEXT,
+  fw_sortkey       TEXT,
+  configuration    TEXT,
+  config_sortkey   TEXT,
+  update_firmware  TEXT,
+  base_firmware    TEXT,
+  target_config    TEXT,
+  base_config      TEXT,
+  seen_at          TEXT,
+  iccid            TEXT,
+  hw_ver           TEXT,
+  vin              TEXT,
+  vin_raw          TEXT,
+  groups_raw       TEXT,
+  first_ping       TEXT
+) WITHOUT ROWID;
+-- The columns the dashboard groups and filters by, mirroring the indexes _snap used to build.
+CREATE INDEX IF NOT EXISTS ix_cur_model_fw ON device_current(device_model, firmware);
+CREATE INDEX IF NOT EXISTS ix_cur_status   ON device_current(status, queue_state);
+
+CREATE TABLE IF NOT EXISTS device_current_meta (
+  only_row    INTEGER PRIMARY KEY CHECK (only_row = 1),
+  snapshot_id INTEGER NOT NULL
+);
+
+-- Shaped exactly like device_state, so a query reads the same either way: it carries its own
+-- snapshot_id, and seen_age_hours stays derived rather than stored (storing anything measured
+-- against the snapshot time is what defeats delta storage — see the hard rules).
+DROP VIEW IF EXISTS device_now;
+CREATE VIEW device_now AS
+SELECT m.snapshot_id,
+       c.imei, c.status, c.queue, c.queue_state, c.device_name, c.created_by,
+       c.device_model_raw, c.device_model, c.firmware_raw, c.firmware, c.fw_family, c.fw_sortkey,
+       c.configuration, c.config_sortkey, c.update_firmware, c.base_firmware, c.target_config,
+       c.base_config, c.seen_at, c.iccid, c.hw_ver, c.vin, c.vin_raw, c.groups_raw, c.first_ping,
+       CASE WHEN c.seen_at IS NULL THEN NULL
+            ELSE (julianday(s.snapshot_at) - julianday(c.seen_at)) * 24.0 END AS seen_age_hours
+FROM device_current c
+JOIN device_current_meta m ON m.only_row = 1
+JOIN snapshot s ON s.id = m.snapshot_id;

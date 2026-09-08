@@ -259,6 +259,7 @@ def pending(request: Request, snapshot: int | None = None):
         buckets=metrics.pending_by_reason(conn, ctx["snapshot_id"]),
         pending_online=metrics.pending_online_devices(conn, ctx["snapshot_id"]),
         stalled=registry.stalled_devices(conn) if ctx["multi_snapshot"] else [],
+        stall_hours=config.STALL_HOURS,
     )
     return templates.TemplateResponse(request, "pending.html", ctx)
 
@@ -283,7 +284,9 @@ def firmware(request: Request, snapshot: int | None = None,
 
 
 @app.get("/changes", response_class=HTMLResponse)
-def changes(request: Request, window: str = "today", page: int = 1, size: int = 50):
+def changes(request: Request, window: str = "today", page: int = 1, size: int = 50,
+            fb_page: int = 1, fb_size: int = 25, fb_sort: str = "when",
+            fb_min: int = 1, fb_model: str | None = None):
     """Changes over a time window, read from the per-device change log.
 
     No snapshot pair to choose: the log records every move individually, so a device that
@@ -311,10 +314,42 @@ def changes(request: Request, window: str = "today", page: int = 1, size: int = 
         size=size,
         page_sizes=PAGE_SIZES,
         moves=registry.firmware_moves(conn, since, limit=size, offset=(page - 1) * size),
-        fallbacks=registry.fallbacks(conn),
         at_base=registry.at_base_firmware(conn),
         segments=registry.fallback_segments(conn),
         registry_summary=registry.summary(conn),
+    )
+
+    # Fallbacks page independently of the moves list above. They are different questions asked
+    # on the same screen — "what moved in this window" and "what has ever gone backwards" — and
+    # sharing one page number would move both at once.
+    fb_totals = registry.fallback_totals(conn)
+    fb_size = fb_size if fb_size in PAGE_SIZES else 25
+    fb_sort = fb_sort if fb_sort in registry.FALLBACK_SORTS else registry.DEFAULT_FALLBACK_SORT
+    fb_min = 2 if fb_min and int(fb_min) > 1 else 1
+
+    # The filtered total, so the pager counts what is actually on screen rather than everything.
+    fb_shown = registry.fallback_count(conn, min_times=fb_min, model=fb_model)
+    fb_pages = max(1, -(-fb_shown // fb_size))
+    fb_page = min(max(1, fb_page), fb_pages)
+    ctx.update(
+        fb_totals=fb_totals,
+        fb_shown=fb_shown,
+        fb_page=fb_page,
+        fb_pages=fb_pages,
+        fb_size=fb_size,
+        fb_sort=fb_sort,
+        fb_min=fb_min,
+        fb_model=fb_model,
+        fb_models=registry.fallback_models(conn),
+        fb_query="window=" + window + (f"&fb_sort={fb_sort}" if fb_sort != "when" else "")
+                 + (f"&fb_min={fb_min}" if fb_min > 1 else "")
+                 + (f"&fb_model={quote(fb_model)}" if fb_model else ""),
+        fallbacks=registry.fallbacks(conn, limit=fb_size, offset=(fb_page - 1) * fb_size,
+                                     sort=fb_sort, min_times=fb_min, model=fb_model),
+        # The counter: devices that have done this more than once, worst first. A chronological
+        # list cannot show this — a device reverting every few days is scattered down the page
+        # as unrelated rows.
+        fb_repeats=registry.fallback_repeats(conn, limit=25),
     )
     return templates.TemplateResponse(request, "changes.html", ctx)
 
@@ -529,11 +564,11 @@ def devices(
         models=metrics.task_state_by(conn, ctx["snapshot_id"], "model"),
         # Firmware values present in this snapshot, so the filter is a pick-list rather than
         # something to type exactly right.
-        firmwares=[dict(r) for r in conn.execute("""
+        firmwares=[dict(r) for r in conn.execute(metrics.at(conn, ctx["snapshot_id"], """
             SELECT firmware AS label, COUNT(*) AS devices FROM device_state
             WHERE snapshot_id = ? AND firmware IS NOT NULL
             GROUP BY firmware ORDER BY devices DESC
-        """, (ctx["snapshot_id"],))],
+        """), (ctx["snapshot_id"],))],
     )
     return templates.TemplateResponse(request, "devices.html", ctx)
 
@@ -605,10 +640,15 @@ def _device_rows(conn, snapshot_id, *, model=None, firmware=None, status=None,
     elif fallback == "missed":
         where += f" AND ({rule}) AND {metrics.missed_target_rule('d')}"
 
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM device_state d {join} WHERE {where}", params).fetchone()[0]
+    # Both statements go through metrics.at, like every other per-snapshot read. Left pointing
+    # at the view they cost a full fleet resolution each, and this function runs two of them per
+    # page load — which is why /devices took 41s on the 245-snapshot database while pages that
+    # used the resolved copy took under a second.
+    total = conn.execute(metrics.at(
+        conn, snapshot_id,
+        f"SELECT COUNT(*) FROM device_state d {join} WHERE {where}"), params).fetchone()[0]
 
-    sql = f"""
+    sql = metrics.at(conn, snapshot_id, f"""
         SELECT d.imei, d.device_model, d.firmware, d.hw_ver, d.status, d.queue_state, d.queue,
                d.seen_at, d.seen_age_hours, d.configuration, d.groups_raw, d.vin, d.iccid,
                d.update_firmware, d.base_firmware,
@@ -617,7 +657,7 @@ def _device_rows(conn, snapshot_id, *, model=None, firmware=None, status=None,
                r.changes AS change_count
         FROM device_state d {join} WHERE {where}
         ORDER BY {_order_by(sort, dir)}
-    """
+    """)
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params = [*params, limit, offset]

@@ -92,12 +92,18 @@ def fragmentation(conn: sqlite3.Connection, snapshot_id: int,
         clause = f" AND device_model IN ({','.join('?' * len(models))})"
         params = list(models)
 
-    rows = conn.execute(f"""
+    # Routed through metrics.at like every other per-snapshot read. This one is on the request
+    # path — kpis() calls it, so every page carrying the headline numbers pays for it — and
+    # reading device_state directly cost a full fleet resolution each time: 4.5s on the
+    # 245-snapshot database, which was most of the ten seconds kpis() took.
+    from . import metrics        # imported here to keep the module import graph acyclic
+
+    rows = conn.execute(metrics.at(conn, snapshot_id, f"""
         SELECT device_model, firmware, COUNT(*) c
         FROM device_state
         WHERE snapshot_id = ? AND device_model IS NOT NULL AND firmware IS NOT NULL{clause}
         GROUP BY device_model, firmware
-    """, (snapshot_id, *params)).fetchall()
+    """), (snapshot_id, *params)).fetchall()
 
     by_model: dict[str, list[int]] = {}
     for row in rows:

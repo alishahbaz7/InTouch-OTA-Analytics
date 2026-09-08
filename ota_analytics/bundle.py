@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import identity, normalize, registry, retention, rollup
+from . import current, identity, normalize, registry, retention, rollup
 
 SUFFIX = ".otabundle"
 
@@ -481,6 +481,11 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
                                 (bundle_start,)).fetchone()["id"]
     job.begin("Removing duplicate rows")
     compacted = retention.compact(conn, first_id)
+
+    # Snapshots have been renumbered and rows moved between them, and the newest snapshot may
+    # now be one that arrived in the bundle. Nothing about the resolved copy can be trusted
+    # across that, so it is rebuilt rather than advanced.
+    current.refresh_latest(conn)
     conn.commit()
 
     ids: list[int] = []

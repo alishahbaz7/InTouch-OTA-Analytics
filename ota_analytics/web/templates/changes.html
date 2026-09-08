@@ -52,14 +52,49 @@
       <span class="hint">device returned to its <strong>base firmware</strong> — the build it
         shipped with</span>
     </h2>
+    {# The same pill-tab control the window selector at the top of this page uses. Every view is
+       a plain link, so a filtered list is a URL that can be pasted to a colleague. #}
+    {% set fb_keep = 'window=' ~ window ~ '&fb_size=' ~ fb_size %}
+    {% set fb_model_q = '&fb_model=' ~ (fb_model | urlencode) if fb_model else '' %}
+    {% set fb_min_q = '&fb_min=2' if fb_min > 1 else '' %}
+    <div class="window-tabs">
+      <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}{{ fb_model_q }}"
+         class="{{ 'on' if fb_min == 1 }}">All</a>
+      <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}&fb_min=2{{ fb_model_q }}"
+         class="{{ 'on' if fb_min > 1 }}"
+         title="Only devices that have returned to base more than once">Repeats only</a>
+      {% if fb_models | length > 1 %}
+        <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}{{ fb_min_q }}"
+           class="{{ 'on' if not fb_model }}">Any model</a>
+        {% for fm in fb_models %}
+        <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}{{ fb_min_q }}&fb_model={{ fm.label | urlencode }}"
+           class="{{ 'on' if fb_model == fm.label }}"
+           title="{{ fm.events }} fallbacks">{{ fm.label }}</a>
+        {% endfor %}
+      {% endif %}
+      <span class="hint">{{ fb_shown | comma }} shown</span>
+    </div>
+
     {% if fallbacks %}
+    {% set fb_base = fb_keep ~ fb_min_q ~ fb_model_q %}
     <table>
-      <thead><tr><th>IMEI</th><th>Model</th><th>Move</th><th>Base</th>
-                 <th>When</th><th>Status</th></tr></thead>
+      <thead><tr>
+        {{ m.sortable(fb_base, 'imei', 'IMEI', fb_sort, param='fb_sort') }}
+        {{ m.sortable(fb_base, 'times', 'Times', fb_sort, numeric=true, param='fb_sort') }}
+        {{ m.sortable(fb_base, 'model', 'Model', fb_sort, param='fb_sort') }}
+        <th>Move</th><th>Base</th>
+        {{ m.sortable(fb_base, 'when', 'When', fb_sort, param='fb_sort') }}
+        <th>Status</th>
+      </tr></thead>
       <tbody>
-        {% for f in fallbacks[:100] %}
+        {% for f in fallbacks %}
         <tr class="row-alert">
           <td class="mono">{{ f.imei }}</td>
+          {# Carried on every row, not just in the repeat list: while reading an occurrence, the
+             thing you need to know is whether this device does it constantly. #}
+          <td class="n">
+            {% if f.times > 1 %}<b class="alert-text">{{ f.times }}×</b>{% else %}1{% endif %}
+          </td>
           <td>{{ f.device_model or '—' }}</td>
           <td class="change">
             <span class="v-from">{{ f.from_firmware }}</span>
@@ -68,13 +103,54 @@
           </td>
           <td class="dim">{{ f.base_firmware }}</td>
           <td class="dim">{{ f.changed_at[5:16] }}</td>
-          <td><span class="pill pill-{{ (f.status or 'unknown') | lower }}">{{ f.status or '—' }}</span></td>
+          <td><span class="pill pill-{{ (f.status or 'unknown') | lower }}">{{ f.status | status }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    {{ m.pager(fb_page, fb_pages, fb_shown, fb_size, page_sizes, fb_query, 'fb_page', 'fb_size') }}
     {% else %}
-    <p class="empty">No device has returned to its base firmware in the recorded history.</p>
+    <p class="empty">
+      {% if fb_min > 1 or fb_model %}No fallback matches that filter.
+      {% else %}No device has returned to its base firmware in the recorded history.{% endif %}
+    </p>
+    {% endif %}
+  </section>
+
+  <section class="card {{ 'highlight' if fb_repeats }}">
+    <h2>Falling back repeatedly
+      <span class="hint">devices that have returned to base <strong>more than once</strong> —
+        a one-off can be explained away, a pattern cannot</span>
+    </h2>
+    {% if fb_repeats %}
+    <p class="dim">
+      {{ fb_totals.repeat_devices | comma }} of {{ fb_totals.devices | comma }} devices that have
+      ever fallen back have done it more than once, across
+      {{ fb_totals.events | comma }} occurrences.
+    </p>
+    <table>
+      <thead><tr><th>IMEI</th><th class="n">Times</th><th>Model</th><th>Now on</th>
+                 <th>Base</th><th>First</th><th>Last</th></tr></thead>
+      <tbody>
+        {% for r in fb_repeats %}
+        <tr class="row-alert">
+          <td class="mono">{{ r.imei }}</td>
+          <td class="n"><b class="alert-text">{{ r.times }}×</b></td>
+          <td>{{ r.device_model or '—' }}</td>
+          <td class="mono">{{ r.current_firmware or '—' }}</td>
+          <td class="dim">{{ r.base_firmware }}</td>
+          <td class="dim">{{ r.first_fallback[5:16] }}</td>
+          <td class="dim">{{ r.last_fallback[5:16] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if fb_totals.repeat_devices > fb_repeats | length %}
+    <p class="dim">Showing the worst {{ fb_repeats | length }} of
+      {{ fb_totals.repeat_devices | comma }}.</p>
+    {% endif %}
+    {% else %}
+    <p class="empty">No device has fallen back more than once.</p>
     {% endif %}
   </section>
 

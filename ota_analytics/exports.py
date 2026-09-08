@@ -61,6 +61,9 @@ CHANGE_COLUMNS = [
     ("to_firmware", "To"),
     ("direction", "Direction"),
     ("verdict", "Verdict"),
+    # Beside the verdict, because "fallback to base" reads very differently when it is the
+    # device's sixth time than its first, and the file is often read away from the dashboard.
+    ("fallback_times", "Fallbacks (times)"),
     ("update_firmware", "Target"),
     ("base_firmware", "Base"),
     ("hw_ver", "Hardware"),

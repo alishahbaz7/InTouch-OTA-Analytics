@@ -34,7 +34,7 @@ from openpyxl import load_workbook
 # Formats ingest can read. Order matters only for reporting.
 EXPORT_SUFFIXES = (".xlsx", ".csv")
 
-from . import config, normalize, quality, registry
+from . import config, current, normalize, quality, registry
 
 # Phases of loading one export, and what each is worth on the progress bar. Measured on the real
 # 35,475-device export: reading and normalizing dominates, storing is one statement, and folding
@@ -501,6 +501,12 @@ def ingest_file(conn: sqlite3.Connection, path: Path, job=None) -> IngestResult:
     if job:
         job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
+    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
+    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
+    # that itself would do it again on the next request, because each one opens its own
+    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
+    current.advance(conn, snapshot_id)
+    conn.commit()
     return result
 
 
@@ -620,6 +626,12 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
     if job:
         job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
+    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
+    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
+    # that itself would do it again on the next request, because each one opens its own
+    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
+    current.advance(conn, snapshot_id)
+    conn.commit()
     return result
 
 
