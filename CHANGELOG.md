@@ -5,6 +5,37 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 1.9.1 — 2026-10-05
+
+### One release, named for its version
+
+The release is now `InTouchOTA-Analytics-v1.9.1.zip`, and it unpacks to a folder called
+`InTouchOTA-Analytics-v1.9.1`. Previously the zip was `InTouchOTA-Analytics-v1.9.0-win64.zip`
+and unpacked to an unversioned folder, so two releases side by side were indistinguishable once
+unpacked. This is the naming for every release from here on, in this project and the user's
+others — the shared `ship` skill now says so.
+
+Because each release unpacks to its own folder, upgrading by unzipping now means moving the old
+`data` folder across before the first start — otherwise the new copy opens on an empty database.
+`READ ME FIRST.txt` says so, since it is the only instruction a recipient of the zip gets. The
+working folder in `dist\` is deliberately left unversioned: this install runs from there and keeps
+its database inside it, and a folder renamed every release would leave the history behind.
+
+The executable itself keeps its unversioned name, so shortcuts and pinned icons survive upgrades.
+
+### The silent executable is gone
+
+`InTouchOTA-Analytics-silent.exe` existed for one reason: auto-start ran it after a reboot so no
+console window was left on the desktop. Auto-start was withdrawn in an earlier release, so nothing
+launched it any more — and anyone who did run it by hand saw nothing at all, which reads as a
+program that failed to start. The release now carries one executable.
+
+`startup.launch_command()` still prefers a windowless build when one is present, so bringing
+auto-start back means adding it to the spec again and nothing else. A silent exe left in `dist\`
+by an older build is cleared as build output rather than "rescued" as the user's file.
+
+---
+
 ## 1.9.0 — 2026-10-05
 
 Built on 15 September and released three weeks later, during which the install kept running

@@ -2,9 +2,16 @@
 
     .\\.venv\\Scripts\\python.exe build.py
 
-Produces `dist\\InTouchOTA-Analytics\\` and zips it for handing over. The zip is what a
-colleague receives: they unpack it anywhere, run the .exe, and the database is created in a
-`data` folder beside it — so the whole install is one folder that can be copied or backed up.
+Produces `dist\\InTouchOTA-Analytics\\` and zips it as `InTouchOTA-Analytics-v<version>.zip`,
+which unpacks to a folder of the same name. The zip is what a colleague receives: they unpack it
+anywhere, run the .exe, and the database is created in a `data` folder beside it — so the whole
+install is one folder that can be copied or backed up.
+
+A release is named `InTouchOTA-Analytics-v1.9.1` — the version and nothing else, no platform
+suffix — and carries one executable. That naming is the user's rule for every release, in this
+project and their others; see the `ship` skill. The working folder in `dist\\` stays unversioned
+on purpose: an install run from there keeps its database inside it, and a folder renamed at
+every release would leave the history behind in the old one.
 
 Deliberately not a one-file build. One-file unpacks itself to a temp directory on every launch,
 which costs several seconds each time, and a single large unsigned executable is what antivirus
@@ -31,14 +38,22 @@ def version() -> str:
     return __version__
 
 
+def release_name() -> str:
+    """What a release is called — the zip, and the folder it unpacks to: `InTouchOTA-Analytics-v1.9.1`.
+
+    One function, so the zip and the folder inside it cannot disagree about the version.
+    """
+    return f"{NAME}-v{version()}"
+
+
 # Windows reads the version out of a resource compiled into the .exe, not out of its name.
 # Generated here from __version__ rather than kept as a file of its own, so the number on the
 # file cannot drift from the number in the code — a version that lags is worse than none, because
 # a bug report then points at the wrong build.
 #
-# The filenames stay unversioned on purpose. startup.launch_command() finds the windowless build
-# by exact name, and a name carrying the version would break that lookup at every release unless
-# it were derived; the zip already carries the version for handover.
+# The executable's own name stays unversioned on purpose: the release folder and the zip carry
+# the version, and an .exe renamed at every release would break shortcuts and pinned taskbar
+# icons at every upgrade.
 VERSION_RESOURCE = """VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=({parts}),
@@ -69,14 +84,13 @@ VERSION_RESOURCE = """VSVersionInfo(
 
 
 def write_version_resources() -> dict[str, Path]:
-    """One resource per executable, so the two are told apart in Explorer and Task Manager."""
+    """The executable's version resource, which Explorer and Task Manager report."""
     number = version()
     parts = ", ".join((number.split(".") + ["0", "0", "0", "0"])[:4])
 
     written = {}
     for internal, description in (
         (NAME, "InTouch OTA Analytics - dashboard and CLI"),
-        (f"{NAME}-silent", "InTouch OTA Analytics - no console window"),
     ):
         path = ROOT / f"version_{internal}.txt"
         path.write_text(VERSION_RESOURCE.format(
@@ -132,6 +146,10 @@ PRESERVE = ROOT / ".build-preserved-data"
 # bundles and reports sitting beside it did not. With the rule inverted, a kind of file nobody
 # thought about is preserved by omission instead of destroyed by it — the same reason auth.py
 # denies by default.
+#
+# `-silent.exe` stays listed although it is no longer built (dropped in 1.9.1): a dist\ folder
+# left by an older build still has one, and unlisted it would be "rescued" as the user's file
+# and put back beside every new build for ever.
 BUILD_OUTPUTS = {"_internal", f"{NAME}.exe", f"{NAME}-silent.exe", "READ ME FIRST.txt"}
 
 
@@ -227,8 +245,7 @@ def build() -> None:
         raise SystemExit(result.returncode)
 
     console = DIST / f"{NAME}.exe"
-    silent = DIST / f"{NAME}-silent.exe"
-    for required in (console, silent):
+    for required in (console,):
         if not required.exists():
             print(f"Build finished but {required.name} is missing.", file=sys.stderr)
             restore_data(parked)
@@ -254,16 +271,17 @@ def build() -> None:
         f"  {NAME}.exe db-import share.otabundle          merge theirs into yours\n"
         f"  {NAME}.exe passwd --role admin     set a dashboard password\n"
         f"  {NAME}.exe --help                  everything else\n\n"
-        f"{NAME}-silent.exe is the same program with no console window. Running it\n"
-        "shows nothing at all, which looks like it failed — use the one above instead.\n"
-        "It writes to data\\app.log.\n",
+        "UPGRADING FROM AN EARLIER VERSION\n"
+        "Each release unpacks to its own folder, named for the version. Close the old\n"
+        "copy, then move its 'data' folder into this one before the first start — that\n"
+        "folder is your whole history. The database is upgraded on first start.\n",
         encoding="utf-8")
 
-    archive = ROOT / "dist" / f"{NAME}-v{version()}-win64.zip"
+    archive = ROOT / "dist" / f"{release_name()}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
         for path in sorted(DIST.rglob("*")):
             if path.is_file():
-                bundle.write(path, Path(NAME) / path.relative_to(DIST))
+                bundle.write(path, Path(release_name()) / path.relative_to(DIST))
 
     for path in resources.values():
         path.unlink(missing_ok=True)      # generated per build; nothing kept in the tree
@@ -274,7 +292,8 @@ def build() -> None:
     size = sum(f.stat().st_size for f in DIST.rglob("*") if f.is_file())
     print(f"\n  folder  {DIST}  ({size / 1024 / 1024:.0f} MB)")
     print(f"  zip     {archive}  ({archive.stat().st_size / 1024 / 1024:.0f} MB)")
-    print("\nHand over the zip. It unpacks to one folder that holds the program and its data.")
+    print(f"\nHand over the zip. It unpacks to {release_name()}\\ — one folder that holds the "
+          "program and its data.")
 
 
 if __name__ == "__main__":

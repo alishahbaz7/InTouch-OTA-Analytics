@@ -41,8 +41,13 @@ ENTRY_NAME = "InTouch OTA Analytics.vbs"
 DEFAULT_DELAY_MINUTES = 30
 MIN_DELAY, MAX_DELAY = 0, 240
 
-# The windowless twin of the packaged executable, the same way pythonw.exe is python.exe's.
-# Auto-start uses it so a reboot does not leave a console window sitting on the desktop.
+# The windowless twin of the packaged executable, the same way pythonw.exe is python.exe's, so a
+# reboot would not leave a console window sitting on the desktop.
+#
+# No longer built since 1.9.1: its only user was auto-start, which is withdrawn, and run by hand
+# it showed nothing at all, which reads as a program that failed to start. `launch_command()`
+# still prefers it when present and falls back to the console executable when it is not — so
+# bringing auto-start back means adding the windowless EXE to the spec again, nothing here.
 SILENT_EXE = "InTouchOTA-Analytics-silent.exe"
 
 

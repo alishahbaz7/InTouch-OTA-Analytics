@@ -3,13 +3,15 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-10-05"
 CODENAME = "keel"
 
 VERSION_HISTORY = [
+    ("1.9.1", "2026-10-05", "The release is named InTouchOTA-Analytics-v<version>, zip and folder "
+                            "alike, and carries one executable — the windowless copy is gone"),
     ("1.9.0", "2026-10-05", "A fetch takes seconds instead of minutes: query statistics, a "
                             "snapshot resolver that stops scanning the whole change table, and "
                             "one fetch at a time so a manual pull cannot collide with the "

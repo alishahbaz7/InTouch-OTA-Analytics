@@ -145,7 +145,7 @@ def test_the_version_resource_matches_the_code():
 
     written = build_module.write_version_resources()
     try:
-        assert set(written) == {"InTouchOTA-Analytics", "InTouchOTA-Analytics-silent"}
+        assert set(written) == {"InTouchOTA-Analytics"}, "one executable since 1.9.1"
         parts = ", ".join((__version__.split(".") + ["0", "0", "0", "0"])[:4])
 
         for internal, path in written.items():
@@ -160,9 +160,7 @@ def test_the_version_resource_matches_the_code():
             assert body.isascii(), f"{path.name} carries non-ASCII"
 
         console = written["InTouchOTA-Analytics"].read_text(encoding="utf-8")
-        silent = written["InTouchOTA-Analytics-silent"].read_text(encoding="utf-8")
         assert "dashboard and CLI" in console
-        assert "no console window" in silent
     finally:
         for path in written.values():
             path.unlink(missing_ok=True)
@@ -184,17 +182,68 @@ def test_the_resource_is_a_valid_version_structure():
             path.unlink(missing_ok=True)
 
 
-def test_the_executable_names_stay_unversioned():
-    """startup.launch_command() finds the windowless build by exact name.
+def test_the_executable_name_stays_unversioned():
+    """The release folder and the zip carry the version; the .exe does not.
 
-    A filename carrying the version would break that lookup at every release unless it were
-    derived, and the zip already carries the version for handover.
+    An executable renamed at every release breaks shortcuts and pinned taskbar icons at every
+    upgrade, for no information the folder name does not already give.
     """
-    from ota_analytics import startup
-
-    assert startup.SILENT_EXE == "InTouchOTA-Analytics-silent.exe"
-    assert "1." not in startup.SILENT_EXE
     spec = Path(__file__).resolve().parent.parent / "InTouchOTA-Analytics.spec"
     body = spec.read_text(encoding="utf-8")
     assert "name=NAME," in body                       # not name=f"{NAME}-v{version}"
-    assert 'name=f"{NAME}-silent"' in body
+
+
+# ─── what a release is called, and what is in it ────────────────────────────
+#
+# The user's rule, for this project and every other: a release is `<Name>-v<version>` — the zip
+# and the folder it unpacks to — with no platform suffix, and it carries only what people run.
+
+def test_a_release_is_named_for_its_version_and_nothing_else():
+    from ota_analytics import __version__
+
+    assert build_module.release_name() == f"InTouchOTA-Analytics-v{__version__}"
+    assert "win64" not in build_module.release_name()
+
+
+def test_the_zip_and_the_folder_inside_it_share_the_release_name():
+    """One function names both, so they cannot disagree about the version."""
+    source = Path(build_module.__file__).read_text(encoding="utf-8")
+    assert 'f"{release_name()}.zip"' in source
+    assert "Path(release_name()) / path.relative_to(DIST)" in source
+    assert "-win64" not in source
+
+
+def test_the_release_carries_one_executable():
+    """The windowless twin existed only for auto-start, which is withdrawn. Run by hand it showed
+    nothing at all, which reads as a program that failed to start."""
+    spec = Path(__file__).resolve().parent.parent / "InTouchOTA-Analytics.spec"
+    body = spec.read_text(encoding="utf-8")
+    assert body.count("EXE(") == 1, "the spec builds more than one executable"
+    assert 'name=f"{NAME}-silent"' not in body
+
+
+def test_a_silent_exe_left_by_an_older_build_is_not_rescued_as_the_users(fake_dist, tmp_path):
+    """dist\\ from before 1.9.1 still has one. Treated as the user's file it would be moved
+    aside and put back beside every new build for ever."""
+    theirs = {p.name for p in build_module.user_files()}
+    assert "InTouchOTA-Analytics-silent.exe" not in theirs
+
+
+def test_the_readme_tells_an_upgrader_to_bring_their_data():
+    """Each release unpacks to a folder named for its version, so an upgrade starts from an
+    empty database unless the old `data` folder is moved across. The README is the only
+    instruction a recipient of the zip gets."""
+    source = Path(build_module.__file__).read_text(encoding="utf-8")
+    assert "UPGRADING FROM AN EARLIER VERSION" in source
+    assert "move its 'data' folder" in source
+
+
+def test_a_release_zip_from_either_naming_is_treated_as_build_output(tmp_path, monkeypatch):
+    """Old `-win64` zips and new ones are both the build's, so neither is rescued and put back."""
+    app = tmp_path / "dist" / "InTouchOTA-Analytics"
+    app.mkdir(parents=True)
+    (tmp_path / "dist" / "InTouchOTA-Analytics-v1.9.0-win64.zip").write_bytes(b"PK")
+    (tmp_path / "dist" / "InTouchOTA-Analytics-v1.9.1.zip").write_bytes(b"PK")
+    monkeypatch.setattr(build_module, "ROOT", tmp_path)
+    monkeypatch.setattr(build_module, "DIST", app)
+    assert build_module.user_files() == []

@@ -273,15 +273,24 @@ here exists because a frozen build breaks assumptions that are invisible from so
   is exactly why the difference is easy to miss. Deriving `data/` from `__file__` put the
   database inside PyInstaller's extraction folder — **every launch would have started from an
   empty database.** `schema.sql` and `web/` go through `resource()`; nothing else may.
-- **Two executables, mirroring `python.exe` / `pythonw.exe`.** `InTouchOTA-Analytics.exe` has a
-  console for interactive use and the CLI; `InTouchOTA-Analytics-silent.exe` has none and is
-  what auto-start runs. A single console build leaves a terminal window open after every
-  reboot; a single windowed build swallows every message, including the refusal to serve the
-  fleet unprotected.
+- **A release is `InTouchOTA-Analytics-v<version>` — the zip and the folder it unpacks to — and
+  nothing else.** No platform suffix. That is the user's rule for every release, here and in
+  their other projects (it is in the shared `ship` skill). `build.release_name()` is the one
+  place it is spelled. The `.exe` keeps its unversioned name so shortcuts survive upgrades, and
+  the working folder in `dist\` stays unversioned because this install keeps its database in
+  it. A versioned release folder means an upgrade by unzipping starts empty unless the old
+  `data` folder is moved across — `READ ME FIRST.txt` says so.
+- **One executable, with a console.** There used to be a windowless twin,
+  `InTouchOTA-Analytics-silent.exe`, for auto-start to run after a reboot. Auto-start is
+  withdrawn, so nothing launched it, and run by hand it showed nothing at all — which reads as a
+  program that failed to start. Dropped in 1.9.1. `startup.launch_command()` still prefers a
+  windowless build if one is present, so reviving auto-start means adding it back to the spec.
+  `-silent.exe` stays in `build.BUILD_OUTPUTS` so one left by an older build is cleared, not
+  rescued as the user's file.
 - **A windowless build has no usable stdout, and uvicorn will not start without one.** It
   installs a logging handler on `sys.stdout`, so the silent exe exited a few seconds after
   launch, every reboot, recording nothing. `main.attach_log_when_headless()` points both
-  streams at `data\app.log` — which is also the only log that copy will ever produce.
+  streams at `data\app.log`. Kept for when a windowless build comes back, and for `pythonw`.
 - **Only one copy runs.** `main.already_serving()` asks `/healthz` whether the port belongs to
   this app and, if so, opens that URL and exits. Without it a second launch quietly moved to
   8001 and ran a second scheduler against the same database, while the copy on 8000 might have

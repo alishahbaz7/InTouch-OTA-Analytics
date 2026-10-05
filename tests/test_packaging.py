@@ -388,8 +388,11 @@ def test_the_spec_ships_every_runtime_resource():
         assert needed in body, f"{needed} would be missing and the exe would fail at runtime"
 
 
-def test_the_spec_builds_both_executables():
+def test_the_spec_builds_one_console_executable():
+    """The windowless twin was dropped in 1.9.1 — auto-start, its only user, is withdrawn, and run
+    by hand it showed nothing at all. A console build is the one that can say what went wrong."""
     spec = Path(__file__).resolve().parent.parent / "InTouchOTA-Analytics.spec"
     body = spec.read_text(encoding="utf-8")
-    assert "console=True" in body and "console=False" in body
-    assert f'"{startup.SILENT_EXE[:-4]}"' in body or startup.SILENT_EXE[:-4] in body
+    assert "console=True" in body
+    assert "console=False" not in body
+    assert 'name=f"{NAME}-silent"' not in body
