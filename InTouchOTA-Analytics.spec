@@ -1,13 +1,12 @@
 # PyInstaller build. Run it with:  python build.py
 #
-# Two executables from one bundle, mirroring python.exe / pythonw.exe:
+# One executable, with a console: interactive use and the CLI, and it prints its log.
 #
-#   InTouchOTA-Analytics.exe          console — interactive use and the CLI, prints its log
-#   InTouchOTA-Analytics-silent.exe   no window — what auto-start runs after a reboot
-#
-# A single console build would leave a terminal window on the desktop after every restart; a
-# single windowed build would swallow every message, including the refusal to serve the fleet
-# to the network without a password. startup.py prefers the silent one when it is present.
+# There used to be a second, windowless twin (InTouchOTA-Analytics-silent.exe) for auto-start to
+# run after a reboot. Auto-start is withdrawn (startup.AUTO_START_AVAILABLE = False), so nothing
+# launched it any more — and run by hand it showed nothing at all, which reads as a program that
+# failed to start. It was dropped from the build in 1.9.1. Bringing auto-start back means
+# bringing a windowless build back with it; startup.launch_command() still prefers one if present.
 #
 # One-folder rather than one-file on purpose: one-file unpacks itself to a temp directory on
 # every launch, which costs seconds each time and is what antivirus flags hardest on an
@@ -77,19 +76,8 @@ console_exe = EXE(
     version=version_resource(NAME),
 )
 
-silent_exe = EXE(
-    pyz, analysis.scripts, [],
-    exclude_binaries=True,
-    name=f"{NAME}-silent",
-    console=False,
-    debug=False,
-    strip=False,
-    upx=False,
-    version=version_resource(f"{NAME}-silent"),
-)
-
 COLLECT(
-    console_exe, silent_exe,
+    console_exe,
     analysis.binaries, analysis.datas,
     strip=False, upx=False,
     name=NAME,

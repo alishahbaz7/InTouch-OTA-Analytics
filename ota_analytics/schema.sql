@@ -365,3 +365,64 @@ SELECT m.snapshot_id,
 FROM device_current c
 JOIN device_current_meta m ON m.only_row = 1
 JOIN snapshot s ON s.id = m.snapshot_id;
+
+-- ─── COTA: configuration over the air (v10) ────────────────────────────────────────────────
+-- Commands sent to devices through the cloud's own COTA API (ctvms IntouchAdminApi), as jobs
+-- of many devices × many commands. See COTA.md. Nothing here is derived from snapshots and
+-- nothing in the snapshot warehouse reads it; bundles do not carry it.
+
+-- The cloud addresses a device by its internal id, people by IMEI ("Device Unique No").
+-- The send call also needs the device type, so both come from here.
+CREATE TABLE IF NOT EXISTS cota_device (
+  imei        TEXT PRIMARY KEY,
+  device_id   INTEGER NOT NULL,
+  device_type INTEGER NOT NULL,
+  source      TEXT,                 -- file the mapping was loaded from
+  updated_at  TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_cota_device_id ON cota_device(device_id);
+
+CREATE TABLE IF NOT EXISTS cota_job (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT,
+  source_file TEXT,
+  created_at  TEXT NOT NULL,
+  note        TEXT
+);
+
+-- One row per device × command. `state` moves planned → sent | send_failed, and stays
+-- `unmapped` for an IMEI the device map did not know — kept rather than dropped, so the export
+-- accounts for every row of the sheet it came from.
+CREATE TABLE IF NOT EXISTS cota_task (
+  id          INTEGER PRIMARY KEY,
+  job_id      INTEGER NOT NULL REFERENCES cota_job(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,     -- row order in the source sheet
+  imei        TEXT NOT NULL,
+  device_id   INTEGER,
+  device_type INTEGER,
+  cmd_type    INTEGER NOT NULL,
+  params      TEXT NOT NULL,        -- JSON {"val1": ..., "val2": ...}, exactly as sent
+  batch_no    INTEGER,              -- tasks sharing one API call
+  state       TEXT NOT NULL,
+  sent_at     TEXT,
+  http_status INTEGER,
+  send_reply  TEXT,                 -- the cloud's reply to the send call, raw
+  error       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cota_task_job ON cota_task(job_id, state);
+
+-- What getGPRSCommand returned for a device, each time it was asked. Stored raw because the
+-- reply shape is not known yet and differs per command — matching a reply to the command that
+-- caused it is the next step (COTA.md, "Open questions").
+CREATE TABLE IF NOT EXISTS cota_poll (
+  id          INTEGER PRIMARY KEY,
+  job_id      INTEGER NOT NULL REFERENCES cota_job(id) ON DELETE CASCADE,
+  device_id   INTEGER NOT NULL,
+  polled_at   TEXT NOT NULL,
+  window_from INTEGER NOT NULL,     -- epoch seconds, as sent to the API
+  window_to   INTEGER NOT NULL,
+  http_status INTEGER,
+  records     INTEGER,              -- entries found in the reply, when it holds a list
+  raw         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cota_poll_job ON cota_poll(job_id, device_id, polled_at);

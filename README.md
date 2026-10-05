@@ -131,25 +131,18 @@ have been doing. `--allow-interleave` does it properly, but rebuilds everything 
 .\.venv\Scripts\python.exe build.py
 ```
 
-Produces `dist\InTouchOTA-Analytics-v1.2.0-win64.zip` (~27 MB). The recipient unpacks it
-anywhere and runs `InTouchOTA-Analytics.exe` — no Python, no install.
+Produces `dist\InTouchOTA-Analytics-v<version>.zip` (~27 MB), which unpacks to a folder of the
+same name, e.g. `InTouchOTA-Analytics-v1.9.1\`. The recipient unpacks it anywhere and runs
+`InTouchOTA-Analytics.exe` — no Python, no install. It is the only executable in the release.
 
 **The app is portable: its database lives in a `data` folder beside the .exe.** Copy the folder
 to move or back up the history; delete it and you start empty. `OTA_DATA_DIR` still overrides.
 
-The zip contains two executables, the same way Python ships `python.exe` and `pythonw.exe`:
-
-| | |
-|---|---|
-| `InTouchOTA-Analytics.exe` | console — interactive use and the CLI, prints its log |
-| `InTouchOTA-Analytics-silent.exe` | no window — logs to `data\app.log` |
+**Upgrading:** each release unpacks to its own versioned folder, so close the old copy and move
+its `data` folder into the new one before the first start. The database is upgraded on start.
 
 The CLI is the same executable: `InTouchOTA-Analytics.exe db-info`, `... db-export --out
-share.otabundle`, `... passwd --role admin`.
-
-**Run the console one.** `-silent` exists only so a background launch does not leave a terminal
-window on the desktop; double-clicking it starts the app with no visible sign that anything
-happened. It logs to `data\app.log`.
+share.otabundle`, `... passwd --role admin`, `... vacuum`.
 
 Launching the app twice does not start a second copy: it detects the one already running and
 opens that, rather than quietly serving on another port with a second scheduler behind it.
