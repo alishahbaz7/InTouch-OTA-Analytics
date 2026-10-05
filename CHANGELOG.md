@@ -5,6 +5,22 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 2.0.0 — in development
+
+### IntouchCOTA, a separate module
+
+COTA (configuration over the air) is a different surface from everything before it. The rest
+of the app reads the OTA platform's device inventory and works out what happened by comparing
+snapshots. COTA *sends* configuration commands through the cloud's own API
+(ctvms IntouchAdminApi) and records each request and reply. It has its own tables (schema v10),
+its own device map from IMEI to the cloud's internal device id, and its own credential, and it
+shares nothing with the snapshot warehouse. Bundles do not carry it.
+
+This is a major version because it is the first time the app writes to a production system
+rather than only reading from one. The schema also moves to v10.
+
+---
+
 ## 1.9.1 — 2026-10-05
 
 ### One release, named for its version
