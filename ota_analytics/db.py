@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 9
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
