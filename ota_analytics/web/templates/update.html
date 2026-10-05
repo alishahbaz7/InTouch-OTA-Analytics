@@ -37,6 +37,16 @@
     dismiss.hidden = !finished;
     if (finished) {
       result.textContent = d.message || '';
+      // A job whose product is a file says where to collect it. Built first and downloaded
+      // second, so the work is watchable instead of hidden inside a request that never returns.
+      if (d.download) {
+        var link = document.createElement('a');
+        link.href = d.download;
+        link.className = 'job-download';
+        link.textContent = 'Download it';
+        result.appendChild(document.createTextNode(' '));
+        result.appendChild(link);
+      }
       set('job-step', d.status === 'error' ? 'failed' : 'finished');
     }
     return finished;
@@ -51,7 +61,11 @@
           stop();
           // A finished job usually changed the data, so bring the rest of the page up to date
           // once — but only after the result has been on screen long enough to read.
-          if (d.status === 'done') setTimeout(function () { window.location.reload(); }, 4000);
+          // A finished job usually changed the data — but not one that only produced a file,
+          // and reloading would take the download link away before it could be clicked.
+          if (d.status === 'done' && !d.download) {
+            setTimeout(function () { window.location.reload(); }, 4000);
+          }
         }
       })
       .catch(function () { /* server busy or restarting; the next tick tries again */ });
@@ -399,14 +413,18 @@
         that has been emailed around still says where it came from.</p>
     </form>
 
-    <form method="get" action="/update/bundle" class="stack-form">
+    {# POST, not GET: a full history is ~960,000 rows and most of a minute to write. As a plain
+       download the browser showed nothing at all until the last byte, which reads as a button
+       that does nothing. The job builds it with a bar to watch, then offers the file. #}
+    <form method="post" action="/update/bundle" class="stack-form">
       <label>Export snapshots from <span class="opt">— blank for all</span>
         <input type="text" name="since" placeholder="2026-08-15 or 2026-08-15 09:00">
       </label>
-      <div class="form-actions"><button type="submit">Download bundle</button></div>
+      <div class="form-actions"><button type="submit">Build bundle</button></div>
       <p class="footnote">Carries the snapshots themselves, not the database file — the other
         side replays them, so your history and theirs combine instead of one replacing the
-        other.</p>
+        other. A full history takes a minute or so to write; the download appears above when
+        it is ready.</p>
     </form>
   </div>
 

@@ -9,16 +9,20 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import tempfile
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics,
@@ -1030,20 +1034,91 @@ def api_agent():
 
 # ─── sharing the database ───────────────────────────────────────────────────
 
+# The bundle most recently built by a job, waiting to be collected: (path, filename).
+#
+# One slot, like one job. A bundle is a point-in-time copy, so keeping a history of them would
+# accumulate stale files that look current — building a new one replaces the old.
+_built_bundle: tuple[Path, str] | None = None
+_bundle_lock = threading.Lock()
+
+
+def _build_bundle(since: str | None, job=None) -> tuple[Path, str]:
+    """Write a bundle to a scratch file and return it with the name to serve it under.
+
+    Opens its own connection: this runs on a worker thread, and sqlite3 objects belong to the
+    thread that created them.
+    """
+    conn = db.connect()
+    scratch = Path(tempfile.gettempdir()) / f"ota-bundle-{uuid.uuid4().hex}.zip"
+    try:
+        bundle.export_bundle(conn, scratch, since=since or None, job=job)
+    except Exception:
+        scratch.unlink(missing_ok=True)
+        raise
+    return scratch, bundle.suggested_filename(conn)
+
+
+@app.post("/update/bundle")
+def update_bundle_build(request: Request, since: str = Form("")):
+    """Build the bundle as a job, and offer it for download when it is ready.
+
+    A full history is ~960,000 rows of JSON and the better part of a minute. Held open as a
+    plain download that is a request which does not come back — the browser shows nothing at
+    all until the last byte, so there is no download to watch and no bar to read. It was
+    reported, accurately, as "export is not working".
+
+    So it follows the same rule as every other long job here: the POST starts the work and
+    returns at once, the page polls `/api/progress`, and the finished job carries the link to
+    collect the file. `GET /update/bundle` still builds one inline for scripts and small
+    histories — same builder, so the two cannot drift.
+    """
+    global _built_bundle
+
+    try:
+        job = progress.start("bundle", "Building the bundle", bundle.EXPORT_STEPS)
+    except progress.Busy as exc:
+        return templates.TemplateResponse(request, "update.html", _update_context(
+            request, tab="share", result={"level": "warn", "message": str(exc)}))
+
+    def work(job: progress.Job) -> None:
+        global _built_bundle
+        path, filename = _build_bundle(since, job=job)
+        with _bundle_lock:
+            previous, _built_bundle = _built_bundle, (path, filename)
+        if previous:
+            previous[0].unlink(missing_ok=True)      # only the newest is worth keeping
+        job.download = "/update/bundle/download"
+        job.finish(f"{filename} is ready — {path.stat().st_size / 1e6:.1f} MB.")
+
+    run_job(job, work)
+    return RedirectResponse("/update?tab=share", status_code=303)
+
+
+@app.get("/update/bundle/download")
+def update_bundle_collect():
+    """Hand over the bundle the last job built. Kept until the next one replaces it."""
+    with _bundle_lock:
+        ready = _built_bundle
+    if not ready or not ready[0].exists():
+        return RedirectResponse("/update?tab=share", status_code=303)
+    return FileResponse(ready[0], media_type="application/zip", filename=ready[1])
+
+
 @app.get("/update/bundle")
 def update_bundle_export(since: str | None = None):
-    """Download this install's snapshot history for someone else to merge.
+    """Build a bundle and return it in the response. For scripts, and for short histories.
 
-    Built in memory rather than written to disk: a bundle is a point-in-time copy, and leaving
-    them lying around in the data folder would accumulate stale ones that look current.
+    Written to a scratch file and streamed from there rather than assembled in memory: the
+    bundle used to be built whole in a `BytesIO`, so 33 MB compressed — and every row of it as
+    Python objects on the way in — sat in the process before a single byte reached the browser.
+
+    `BackgroundTask` deletes the file after the last byte is sent, which is why the path is
+    handed over rather than opened in a context manager here.
     """
-    conn = get_conn()
-    buffer = io.BytesIO()
-    bundle.export_bundle(conn, buffer, since=since or None)
-    return Response(
-        content=buffer.getvalue(), media_type="application/zip",
-        headers={"Content-Disposition":
-                 f'attachment; filename="{bundle.suggested_filename(conn)}"'})
+    scratch, filename = _build_bundle(since)
+    return FileResponse(
+        scratch, media_type="application/zip", filename=filename,
+        background=BackgroundTask(scratch.unlink, missing_ok=True))
 
 
 def _merge_bundle(content: bytes, allow_interleave: bool, job=None) -> bundle.ImportResult:

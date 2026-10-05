@@ -5,6 +5,153 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 1.9.0 — 2026-10-05
+
+Built on 15 September and released three weeks later, during which the install kept running
+1.8.0 and got worse in exactly the way measured here. On 5 October, opened after five days
+offline, a single fetch sat in "Updating the device registry" for more than eight minutes. Re-
+measured that day on a copy of the live database (362 snapshots, 760 MB): the one statement it
+was stuck in took **360 seconds**, and the post-gap fetch had stored 22,564 changed rows against
+~3,500 for an ordinary hourly one — so a gap multiplies every per-change cost on top of a
+resolution that had grown to 18s. The same scenario on 1.9.0, with an even larger gap fetch
+(34,995 rows): **26.9 seconds**, most of it the first round of retention catching up.
+
+### A fetch took three minutes; it takes about ten seconds
+
+Reported from the live install after a month of hourly fetching: "fetching and ingesting data
+taking very long time, sometimes application get hanged, I have to restart the application",
+and "I try to export the data this is not working".
+
+Measured on a copy of the live database — 574 MB, 272 snapshots, 1,081,179 change rows, 35,848
+devices — one fetch took **194 seconds**, and 453 on a second run. The dashboard's own
+`snapshot.duration_ms` shows the slide: 2.7s in August, 27–53s by September, and that column
+stops counting before the slowest step even starts.
+
+It was four separate problems.
+
+| Step of one fetch | Before | After |
+|---|---|---|
+| Storing what changed | 9.0s | **1.6s** |
+| Checking data quality | 25.9s | **1.0s** |
+| Updating the device registry | 150.6s | **4.7s** |
+| Rebuilding metrics | 8.7s | **0.5s** |
+| **Total** | **194s** | **~8s** |
+
+**SQLite had no query statistics, and guessed catastrophically.** `ANALYZE` had never run on
+this database. Without it the planner chose `ix_change_field` over `ix_change_imei` for the
+registry's `prev_firmware` update, so for each of 35,848 devices it scanned all 21,097 change
+rows with `field = 'firmware'` — 756 million row visits, **367 seconds in a single statement**,
+on every fetch. `ANALYZE` takes 1.2 seconds and makes the same statement take **0.21s**. It runs
+once in migration v9, and `PRAGMA optimize` keeps it current after every ingest.
+
+This was the cheapest fix in the project's history and it hid for a month, because the wrong
+plan still produces the right answer.
+
+**`device_state` was being resolved eighteen times per fetch.** It is a view, and SQLite plans
+it as a full scan of `device_snapshot` with a correlated subquery per row, so one reference
+costs time proportional to *all history stored* — 4 to 18 seconds here, growing by another fetch
+every hour. The quality rules resolved it once per rule; the delta write twice; rollup twice
+more.
+
+The new `resolve.py` does the same resolution as a grouped join over `ix_ds_imei_snap`:
+**17.5s → 1.3s** for all 27 columns of all 35,848 devices, byte-identical output on nine
+snapshots including the first and the last. It cannot be a view — the snapshot id has to bound
+the inner `GROUP BY` and SQLite has no LATERAL — and two other formulations turned out slower
+than the view rather than faster (`ROW_NUMBER() OVER (PARTITION BY imei)` at 17.4s, restricting
+the view's join at 12.5s).
+
+The view stays in the schema. It is the readable statement of what resolving a snapshot *means*
+and it is what `tests/test_resolve.py` checks the fast path against.
+
+**Pages are unaffected**, and that was verified rather than assumed: 1.8.0 and 1.9.0 were run
+side by side against identical copies of the live database, interleaved so machine load hit both
+equally. Every page and every download came out within noise of each other. (Wall-clock on this
+machine swings 2–3× depending on what else is running, which is exactly why the comparison had
+to be interleaved.)
+
+### One fetch at a time
+
+`database is locked` appears twice in the live error log, both times at the very first INSERT of
+a scheduled fetch. A timed fetch ran outside `progress` entirely, so "one job at a time" did not
+cover the one job that runs by itself — pressing "Fetch now" during a scheduled fetch started a
+second concurrent writer, and one of them waited out the 30-second busy timeout and died.
+
+The timed fetch now takes a job like everything else, so the two cannot overlap in either
+direction. A tick that finds something already running **skips** rather than queueing: the next
+tick is along shortly and its data is fresher. A skip is recorded and explained but not counted
+as a failure — an agent that appears to have silently stopped fetching is the thing that gets
+debugged for an afternoon. A job nobody started also clears itself when it finishes, so Update
+Data does not open on a stale panel every hour.
+
+### Retention could never fire, so the database grew for ever
+
+Retention thins by age, and also refused to prune any snapshot that recorded a change. That
+sounds careful. At the hourly cadence the tool actually runs at, a fetch of 35,848 devices
+always contains *some* change — so **268 of 272 snapshots were exempt** and retention removed
+nothing, on every run, while the database grew about 45 MB a day.
+
+The rule is gone, because it protected against a loss that cannot happen: `device_change` has no
+foreign key to `snapshot`, nothing outside `registry.apply_snapshot` reads its `snapshot_id`, and
+every reader works from `changed_at`. Pruning now moves the change-log rows onto the survivor
+along with the device rows, so the log stays consistent and the time a firmware move actually
+happened is untouched.
+
+On the live data this thins **177 of 273 snapshots and 587,211 of 1,081,179 device rows**, and
+every surviving snapshot was verified to resolve byte-identically before and after.
+
+An automatic prune is capped at 20 snapshots (`retention.AUTO_PRUNE_LIMIT`) because it holds the
+write lock inside a fetch: the first run after upgrading has a month of backlog, which in one go
+is another minute of the app apparently hanging. The rest is taken by the next few fetches. The
+CLI's `prune` stays unbounded, because somebody is watching it.
+
+### "Export is not working" — the bundle
+
+Nothing raised, and nothing was ever logged, which is why this was hard to place. A full history
+is ~960,000 rows of JSON and the better part of a minute to write, and it was assembled whole in
+memory before a single byte reached the browser. As a plain download that is a request which
+does not come back: no progress bar, no download indicator, nothing to tell it apart from a
+hang.
+
+**Building the bundle is now a job.** The POST returns in milliseconds, a determinate bar counts
+the rows as they are written, and the finished job offers a link — collecting the file is then
+instant, because it already exists. `GET /update/bundle` still builds one inline for scripts and
+short histories, through the same builder so the two cannot drift.
+
+**Nothing large is assembled in memory any more.** The bundle streams to a scratch file (deleted
+after sending, and on the error path too). The resolved baseline inside it, which was most of
+the export's time, went from 49s to **0.74s** on the fix above.
+
+`exports.to_xlsx` now uses openpyxl's write-only mode: a full device export went from **190 MB
+of Python objects to 3 MB** for the same 3.1 MB file, at the same speed. The trade is that
+nothing can be revisited after it is written, so column widths, the frozen header and the filter
+range are computed up front and the IMEI text format goes on each cell as it is created — all
+four are now covered by tests, because all four would have failed silently.
+
+### So it does not happen again
+
+The pattern behind every one of these is the same, and it is worth naming: **nothing errors, the
+numbers stay correct, and the work just takes longer every week.** There is no exception to find.
+
+- `tests/test_db_performance.py` traces the SQL actually executed and fails if an ingest,
+  rollup, registry fold, quality run or page metric resolves the view. It watches execution
+  rather than grepping source, because naming `device_state` in a SQL literal is correct —
+  `resolve.at` swaps the table name onto the finished statement.
+- `tests/test_resolve.py` holds the fast resolver against the view on every snapshot, including
+  a device that leaves and returns and a snapshot that stores no rows of its own.
+- `tests/test_retention.py` asserts that pruning never changes what a surviving snapshot
+  resolves to.
+- Two project skills, `.claude/skills/db-performance` and `.claude/skills/long-jobs-ux`, carry
+  the rules and the measurements into the next session. Both of these mistakes had by then been
+  made in three separate places each, which is what a rule written only in prose gets you.
+
+### Also
+
+- `python -m ota_analytics.cli vacuum` reclaims file space and refreshes statistics, replacing
+  the `python -c "...VACUUM"` line the docs used to carry.
+- The scheduler's `last_status` gains `skipped`.
+
+---
+
 ## 1.8.0 — 2026-09-08
 
 ### Switching pages no longer takes half a minute

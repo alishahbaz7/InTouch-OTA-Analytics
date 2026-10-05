@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -187,3 +188,160 @@ def test_imei_list_export_is_not_stamped(client):
     assert response.status_code == 200
     for line in response.text.splitlines():
         assert line.isdigit(), f"non-IMEI line in the paste list: {line!r}"
+
+
+# ─── the download is streamed, not assembled in memory ──────────────────────
+#
+# Reported from the live install as "export is not working". Nothing raised and nothing was
+# logged; the bundle was simply built whole in a BytesIO first — 33 MB compressed, and every row
+# of it as Python objects on the way in — so with a month of history the request stopped coming
+# back before it started sending.
+
+def test_the_bundle_download_streams_from_a_file(client, monkeypatch):
+    """Built on disk and handed to the response, rather than held in memory."""
+    from ota_analytics import api, bundle as bundle_module
+
+    written = {}
+    original = bundle_module.export_bundle
+
+    def spy(conn, out, **kwargs):
+        written["target"] = out
+        return original(conn, out, **kwargs)
+
+    monkeypatch.setattr(api.bundle, "export_bundle", spy)
+    response = client.get("/update/bundle")
+
+    assert response.status_code == 200
+    assert response.content[:4] == bundle_module.ZIP_MAGIC
+    assert isinstance(written["target"], Path), (
+        "the bundle must be written to a file, not into an in-memory buffer")
+
+
+def test_the_bundle_scratch_file_is_deleted_after_the_response(client, monkeypatch):
+    """A download that leaves a copy behind fills the temp directory a fetch at a time."""
+    from ota_analytics import api, bundle as bundle_module
+
+    written = {}
+    original = bundle_module.export_bundle
+    monkeypatch.setattr(api.bundle, "export_bundle",
+                        lambda conn, out, **kw: (written.setdefault("p", out),
+                                                 original(conn, out, **kw))[1])
+
+    response = client.get("/update/bundle")
+    assert response.status_code == 200
+    assert not written["p"].exists(), f"{written['p']} was left behind"
+
+
+def test_a_failed_bundle_export_leaves_no_scratch_file(client, monkeypatch):
+    """The error path too — that is the one nobody checks."""
+    from ota_analytics import api, bundle as bundle_module
+
+    seen = {}
+
+    def explode(conn, out, **kwargs):
+        seen["p"] = out
+        out.write_bytes(b"partial")
+        raise bundle_module.BundleError("nope")
+
+    monkeypatch.setattr(api.bundle, "export_bundle", explode)
+    client.get("/update/bundle")
+    assert not seen["p"].exists()
+
+
+# ─── building the bundle is a job, not a held-open request ──────────────────
+
+def _await_job(timeout=20.0):
+    """Wait for the background job to finish, the way the page's poller does."""
+    import time as _time
+    from ota_analytics import progress
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        job = progress.current()
+        if job is not None and job.status != "running":
+            return job
+        _time.sleep(0.02)
+    raise AssertionError("the bundle job never finished")
+
+
+def test_building_a_bundle_returns_at_once_and_reports_progress(client):
+    """The POST starts the work; it does not carry the file back.
+
+    A full history is ~960,000 rows of JSON. Held open, the browser shows nothing until the
+    last byte — no bar, no download, nothing to distinguish it from a hang.
+    """
+    from ota_analytics import progress
+
+    progress.clear()
+    response = client.post("/update/bundle", data={"since": ""}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/update?tab=share"
+
+    job = _await_job()
+    assert job.status == "done", job.error
+    assert job.download == "/update/bundle/download"
+    assert "ready" in job.message
+    progress.clear()
+
+
+def test_the_finished_job_hands_over_a_real_bundle(client):
+    from ota_analytics import bundle as bundle_module, progress
+
+    progress.clear()
+    client.post("/update/bundle", data={"since": ""}, follow_redirects=False)
+    _await_job()
+
+    collected = client.get("/update/bundle/download")
+    assert collected.status_code == 200
+    assert collected.content[:4] == bundle_module.ZIP_MAGIC
+    assert bundle_module.SUFFIX in collected.headers["content-disposition"]
+    described = bundle_module.describe(collected.content)
+    assert described["snapshots"]
+    progress.clear()
+
+
+def test_the_bar_is_drawn_from_rows_written(client):
+    """Determinate, and derived from work done — not from elapsed time."""
+    from ota_analytics import bundle as bundle_module, progress
+
+    progress.clear()
+    seen = []
+
+    class Recorder:
+        def begin(self, name, total=0, detail=""):
+            seen.append((name, total))
+
+        def advance(self, done=None, detail=None):
+            pass
+
+    conn = db.connect()
+    out = config.DATA_DIR / "probe.otabundle"
+    bundle_module.export_bundle(conn, out, job=Recorder())
+
+    names = [n for n, _ in seen]
+    assert names == [n for n, _ in bundle_module.EXPORT_STEPS], names
+    totals = dict(seen)
+    assert totals["Writing the baseline"] > 0, "every step must declare its denominator"
+    out.unlink(missing_ok=True)
+
+
+def test_collecting_before_anything_is_built_does_not_fail(client):
+    """A bookmarked download link, or a restarted app. Redirect, not a 500."""
+    from ota_analytics import api
+
+    api._built_bundle = None
+    response = client.get("/update/bundle/download", follow_redirects=False)
+    assert response.status_code == 303
+
+
+def test_a_second_build_is_refused_while_one_is_running(client):
+    """Same rule as every other job: they all write, and two bars both claiming to move is
+    worse than being told to wait."""
+    from ota_analytics import progress
+
+    progress.clear()
+    progress.start("import", "Merging a bundle", [("Reading the bundle", 1.0)])
+    response = client.post("/update/bundle", data={"since": ""})
+    assert response.status_code == 200
+    assert "still running" in response.text
+    progress.clear()

@@ -48,11 +48,19 @@ def _mark(conn: sqlite3.Connection, snapshot_id: int) -> None:
 
 
 def rebuild(conn: sqlite3.Connection, snapshot_id: int) -> int:
-    """Resolve a snapshot from scratch. Seconds, so only when advancing cannot be used."""
+    """Resolve a snapshot from scratch. Only when advancing cannot be used.
+
+    Through `resolve.select` rather than the view: the view plans as a scan of all of history,
+    so this cost 17s on the live database and now costs 1.3s. It is the same statement either
+    way — see `resolve.py` for why the fast form cannot be expressed as a view.
+    """
+    from . import resolve
+
     columns = ", ".join(COLUMNS)
     conn.execute("DELETE FROM device_current")
     conn.execute(f"INSERT INTO device_current ({columns}) "
-                 f"SELECT {columns} FROM device_state WHERE snapshot_id = ?", (snapshot_id,))
+                 + resolve.select(COLUMNS, with_snapshot_id=False, with_seen_age=False),
+                 (snapshot_id,))
     _mark(conn, snapshot_id)
     return conn.execute("SELECT COUNT(*) FROM device_current").fetchone()[0]
 

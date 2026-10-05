@@ -3,21 +3,26 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-09-08"
-CODENAME = "pace"
+RELEASED = "2026-10-05"
+CODENAME = "keel"
 
 VERSION_HISTORY = [
+    ("1.9.0", "2026-10-05", "A fetch takes seconds instead of minutes: query statistics, a "
+                            "snapshot resolver that stops scanning the whole change table, and "
+                            "one fetch at a time so a manual pull cannot collide with the "
+                            "timer; retention can thin again; the bundle download streams"),
     ("1.8.0", "2026-09-08", "Every page under a second on 245 snapshots — the newest snapshot is "
                             "kept resolved instead of rebuilt on each request, and three reads "
                             "that bypassed it were fixed; fallbacks count how many times each "
                             "device has done it, with filter, sort and paging"),
     ("1.7.0", "2026-08-19", "Version stamped into the executables so Windows can "
                             "report it; per-column filter and sort on the remaining tables"),
-    ("1.6.0", "2026-08-19", "In progress: consistent table behaviour — page size, pinned "
-                            "headers, per-column filter and sort, and search"),
+    ("1.6.0", "2026-08-19", "Devices page filters: firmware as a checkbox list, IMEI search "
+                            "on any part of a number; firmware moves paged 25/50/100; "
+                            "task state by model adds up two ways"),
     ("1.5.0", "2026-08-19", "Determinate progress bars for import, merge and fetch; one name "
                             "and one colour per task state everywhere; per-group task counts "
                             "on the firmware table; a build can no longer delete data"),

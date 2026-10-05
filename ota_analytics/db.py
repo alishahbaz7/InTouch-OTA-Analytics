@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -173,6 +173,19 @@ def migrate(conn: sqlite3.Connection) -> None:
         if newest is not None:
             _current.rebuild(conn, newest[0])
 
+    if current < 9:
+        # v9: give the query planner statistics. Without them SQLite guesses, and on a database
+        # this shape it guessed catastrophically: the registry's prev_firmware update chose
+        # ix_change_field over ix_change_imei, so for each of 35,848 devices it scanned all
+        # 21,097 change rows with field='firmware' — 756 million row visits, measured at **367
+        # seconds for one statement**, on every single fetch. With statistics it picks the imei
+        # index and the same statement takes **0.21s**.
+        #
+        # ANALYZE itself is 1.2s on the live 574 MB database, and this is the one place it can
+        # run against an install that has been accumulating snapshots for a month without ever
+        # having had them.
+        conn.execute("ANALYZE")
+
     if current < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -180,6 +193,22 @@ def migrate(conn: sqlite3.Connection) -> None:
     # a database created by a test or by an older version being upgraded in place.
     identity.ensure(conn)
     conn.commit()
+
+
+def refresh_statistics(conn: sqlite3.Connection) -> None:
+    """Keep the query planner's statistics current. Call after anything that writes in bulk.
+
+    `PRAGMA optimize` re-analyzes only the tables whose statistics have drifted far enough to
+    matter, so on an ordinary fetch it costs milliseconds and usually does nothing at all. It is
+    the maintenance half of the ANALYZE in migration v9: statistics that are never refreshed go
+    stale as the database grows, and a stale plan is how one statement came to take 367 seconds.
+
+    Writes, so it belongs on a write path only — never in a request handler.
+    """
+    try:
+        conn.execute("PRAGMA optimize")
+    except sqlite3.Error:
+        pass    # planner statistics are an optimization; failing to refresh them is not an error
 
 
 @contextmanager

@@ -117,11 +117,18 @@ def fragmentation(conn: sqlite3.Connection, snapshot_id: int,
 
 
 def rollup_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> None:
-    """(Re)build the fact tables for a single snapshot."""
+    """(Re)build the fact tables for a single snapshot.
+
+    Both statements are routed through `resolve.at`, like every other per-snapshot read. Left
+    naming the view they cost a full resolution of all history each — 13s apiece on the live
+    database, paid on every fetch and again for every snapshot of a rebuild.
+    """
+    from . import resolve       # local, to keep the module import graph acyclic
+
     conn.execute("DELETE FROM fact_fleet_version WHERE snapshot_id = ?", (snapshot_id,))
     conn.execute("DELETE FROM fact_snapshot_kpi WHERE snapshot_id = ?", (snapshot_id,))
-    conn.execute(FLEET_VERSION_SQL, (snapshot_id,))
-    conn.execute(KPI_SQL, (snapshot_id,))
+    conn.execute(resolve.at(conn, snapshot_id, FLEET_VERSION_SQL), (snapshot_id,))
+    conn.execute(resolve.at(conn, snapshot_id, KPI_SQL), (snapshot_id,))
     conn.execute("UPDATE fact_snapshot_kpi SET fragmentation = ? WHERE snapshot_id = ?",
                  (fragmentation(conn, snapshot_id), snapshot_id))
     conn.commit()

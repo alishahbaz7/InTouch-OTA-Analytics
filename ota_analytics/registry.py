@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import config
+from . import config, resolve
 
 # Fields whose change is a fact worth keeping forever.
 #
@@ -51,10 +51,11 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
     # made replaying 37 snapshots take nearly nine minutes and put the same cost on every
     # ordinary fetch. Resolving it once into a temp table leaves fourteen scans of a plain
     # 35,000-row table instead.
-    conn.execute("DROP TABLE IF EXISTS _state")
-    conn.execute("CREATE TEMP TABLE _state AS SELECT * FROM device_state WHERE snapshot_id = ?",
-                 (snapshot_id,))
-    conn.execute("CREATE UNIQUE INDEX ix_state_imei ON _state(imei)")
+    #
+    # Built through `resolve.materialize`, not the view: resolving one snapshot the view's way
+    # scans the whole of device_snapshot, so this single build was 4-18s on the live database
+    # and is now ~1.3s. Same rows, different plan — see resolve.py.
+    resolve.materialize(conn, "_state", snapshot_id, indexes=("imei",))
 
     # 1. Record every tracked value that differs from what we currently hold. Devices we have
     #    never seen produce no rows here — their arrival is the 'new device' case below.

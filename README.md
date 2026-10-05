@@ -83,9 +83,10 @@ the snapshot time is read from it, because no column carries it. A CSV that turn
 report this dashboard produced still loads, but is marked second-hand on the quality page: its
 values have already been normalized once and it drops columns the platform sends.
 
-**Always read `device_state`, never `device_snapshot`.** The physical table holds only what
-changed in each fetch, so querying it directly returns a partial fleet — a query that looks
-correct and is silently wrong.
+**Always resolve a snapshot, never read `device_snapshot` raw.** The physical table holds only
+what changed in each fetch, so querying it directly returns a partial fleet — a query that looks
+correct and is silently wrong. `device_state` is the definition of resolving; `resolve.py` is how
+code actually does it, because reading the view scans all of history.
 
 ## Two installs, one reference point
 
@@ -169,7 +170,11 @@ enough: the warning scrolled past and the data went anyway.
 A merge takes minutes and a fetch takes tens of seconds, so both report a **determinate progress
 bar** — the width comes from work completed (snapshots folded, devices read), never from elapsed
 time. The job runs on the server, so closing the tab does not stop it and reopening **Update
-data** finds it mid-flight. One job at a time; they all write to the database.
+data** finds it mid-flight. One job at a time; they all write to the database — including the
+scheduled fetch, so "Fetch now" can no longer collide with it.
+
+**Building a bundle is a job too.** A full history is most of a minute to write; the page shows the
+bar, then offers the file, and collecting it is instant.
 
 The header carries one freshness chip — `Updated 09:06 · 3 hr ago · auto 1 hour` — and a theme
 switch cycling **auto / light / dark**, applied before first paint so there is no flash of the
@@ -177,24 +182,31 @@ wrong theme.
 
 ## Speed
 
-`device_state` is a view: every reference re-resolves each device's most recent row across the
-whole fleet. At 48 snapshots that is **1.0s per reference**, and a page calls six to ten metrics.
-`metrics.snapshot_source()` resolves the snapshot once per request into a temp table instead:
+The slowdowns here all have one shape: nothing errors, the numbers stay right, and the work takes
+longer every week as history accumulates. Measured on the live install, not guessed:
 
-| Page | Before | After |
-|---|---|---|
-| Overview | 12.7s | **1.05s** |
-| Pending | 9.3s | 2.5s |
-| Firmware | 5.2s | 0.9s |
-| Devices | 4.3s | 1.5s |
+**A fetch** went from 194s (and 8+ minutes after a few days offline) to about 10s in 1.9.0.
+SQLite had never been given query statistics and read the change log by the wrong index — one
+statement took **360 seconds**; with `ANALYZE` it takes 0.74s. And `device_state`, a view whose
+cost grows with every fetch ever taken (18s per reference at 362 snapshots), was being resolved
+eighteen times per fetch. `resolve.py` gives the same rows from a grouped join instead.
 
-Every metric keeps its own `WHERE snapshot_id = ?`, so a mismatched snapshot returns nothing
-rather than the wrong rows, and any metric still reading the view is merely slow.
+**Pages** read the newest snapshot from `device_current`, kept resolved as each fetch lands, so
+the overview, devices and pending pages answer in about a second whatever the history length.
+
+**Retention actually thins now.** It used to refuse to prune any snapshot that recorded a change,
+which at an hourly cadence was 99% of them. On the live data that is 777 MB → 431 MB, with the
+change log intact.
+
+Every per-snapshot query keeps its own `WHERE snapshot_id = ?`, so a mismatched snapshot returns
+nothing rather than the wrong rows. `tests/test_db_performance.py` fails if a fetch or a page
+starts resolving the view again.
 
 ## Hosting it
 
-Runs on anything: peak memory for a full 35,475-device fetch is **25 MB**, and the database is
-52 MB growing ~13 MB/day.
+Runs on anything: peak memory for a full 35,475-device fetch is **25 MB**. At an hourly cadence the
+database settles at a few hundred MB once retention has thinned old history — run
+`python -m ota_analytics.cli vacuum` (app stopped) to hand freed space back to the disk.
 
 - **On your own machine, for the office network** — free, and the device data never leaves the
   building. Requires a dashboard password; the app refuses to bind to the network without one.

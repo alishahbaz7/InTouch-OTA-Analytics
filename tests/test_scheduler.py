@@ -111,3 +111,99 @@ def test_auth_status_confirms_automation_with_a_login_url(monkeypatch):
     status = scheduler.auth_status()
     assert status["level"] == "ok"
     assert status["can_automate"] is True
+
+
+# ─── one fetch at a time ────────────────────────────────────────────────────
+#
+# The live error log recorded "database is locked" twice, both at the very first INSERT of a
+# scheduled fetch. The cause was that a timed fetch was invisible to `progress`: it ran
+# `_fetch_and_ingest` directly with a silent job, so "one job at a time" did not cover it and
+# pressing "Fetch now" during one started a second, concurrent writer.
+
+def test_a_timed_fetch_registers_as_a_job(monkeypatch):
+    """So anything else that writes can see it and stand aside."""
+    from ota_analytics import progress
+
+    progress.clear()
+    seen = {}
+
+    def fake_fetch(self, job=None):
+        seen["job"] = progress.current()
+        return "done", "ok", 7
+
+    monkeypatch.setattr(scheduler.Scheduler, "_fetch_and_ingest", fake_fetch)
+    agent = scheduler.Scheduler()
+    agent._run_once()
+
+    assert seen["job"] is not None, "a scheduled fetch must be visible to progress while it runs"
+    assert seen["job"].kind == "fetch"
+    assert agent.state.last_status == "ok"
+
+
+def test_a_timed_fetch_stands_aside_for_a_job_already_running(monkeypatch):
+    """It skips rather than queueing: the next tick is along soon and its data is fresher."""
+    from ota_analytics import progress
+
+    progress.clear()
+    progress.start("import", "Merging a bundle", [("Reading the bundle", 1.0)])
+
+    called = []
+    monkeypatch.setattr(scheduler.Scheduler, "_fetch_and_ingest",
+                        lambda self, job=None: called.append(1) or ("done", "ok", 1))
+    agent = scheduler.Scheduler()
+    agent.configure(enabled=True, interval_seconds=3600)
+    agent._run_once()
+
+    assert called == [], "it must not start a second writer"
+    assert agent.state.last_status == "skipped"
+    assert "Merging a bundle" in agent.state.last_message
+    assert agent.state.failures == 0, "standing aside is not a failure"
+    assert agent.state.next_run, "and the timer must keep running"
+    progress.clear()
+
+
+def test_a_manual_fetch_is_refused_while_a_timed_one_is_running(monkeypatch):
+    """The other direction — this is the collision that actually happened."""
+    from ota_analytics import progress
+
+    progress.clear()
+    blocked = {}
+
+    def fake_fetch(self, job=None):
+        # While the scheduled fetch is mid-flight, the button's own guard must refuse.
+        try:
+            progress.start("fetch", "Fetching from the platform", scheduler.FETCH_STEPS)
+            blocked["refused"] = False
+        except progress.Busy:
+            blocked["refused"] = True
+        return "done", "ok", 3
+
+    monkeypatch.setattr(scheduler.Scheduler, "_fetch_and_ingest", fake_fetch)
+    scheduler.Scheduler()._run_once()
+    assert blocked["refused"] is True
+
+
+def test_a_finished_timed_fetch_does_not_leave_its_panel_behind(monkeypatch):
+    """Nobody asked for it, so nobody should have to dismiss it every hour."""
+    from ota_analytics import progress
+
+    progress.clear()
+    monkeypatch.setattr(scheduler.Scheduler, "_fetch_and_ingest",
+                        lambda self, job=None: ("Loaded 10 devices.", "ok", 2))
+    scheduler.Scheduler()._run_once()
+    assert progress.snapshot() == {"active": False}
+
+
+def test_a_fetch_the_user_started_keeps_its_panel(monkeypatch):
+    """That one was asked for, so its result waits to be read and dismissed."""
+    from ota_analytics import progress
+
+    progress.clear()
+    monkeypatch.setattr(scheduler.Scheduler, "_fetch_and_ingest",
+                        lambda self, job=None: ("Loaded 10 devices.", "ok", 2))
+    job = progress.start("fetch", "Fetching from the platform", scheduler.FETCH_STEPS)
+    scheduler.Scheduler().run_now(job=job)
+
+    assert progress.snapshot()["active"] is True
+    assert progress.current() is job
+    progress.clear()

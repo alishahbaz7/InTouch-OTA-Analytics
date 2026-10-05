@@ -187,3 +187,59 @@ def test_an_empty_result_still_downloads_cleanly(client):  # noqa: F811
     response = client.get("/devices/export?firmware=does-not-exist&format=csv")
     assert response.status_code == 200
     assert rows_from_csv(response.text) == []
+
+
+# ─── the spreadsheet is written a row at a time ─────────────────────────────
+#
+# `to_xlsx` uses openpyxl's write-only mode: the ordinary mode keeps a Cell object per value
+# until save, which measured at 190 MB of Python objects to produce a 3.1 MB file for a full
+# 35,848-device export. The catch is that nothing can be revisited after it is written, so
+# everything that used to be applied by going back over the finished sheet is set up front.
+# These are the four things that would silently stop happening if that were got wrong.
+
+def _workbook(rows, provenance=None):
+    from openpyxl import load_workbook
+
+    blob = exports.to_xlsx(rows, exports.DEVICE_COLUMNS, "Devices", provenance)
+    return load_workbook(io.BytesIO(blob))
+
+
+SAMPLE = [{"imei": "865510082004294", "device_model": "AX1_SCAN", "firmware": "1.2.0",
+           "status": "Inactive", "queue_state": "pending", "queue": 2,
+           "seen_age_hours": 12.3456, "groups_raw": "north,fleet-a"},
+          {"imei": "865510082004295", "device_model": "AX1_SCAN", "firmware": "1.0.0",
+           "status": "Online", "queue_state": "completed", "queue": 0,
+           "seen_age_hours": 1.0, "groups_raw": ""}]
+
+
+def test_the_header_row_is_frozen_and_filterable():
+    """Set before the first row is written, because afterwards is too late."""
+    sheet = _workbook(list(SAMPLE))["Devices"]
+    assert sheet.freeze_panes == "A2"
+    # The range has to be computed from the counts: sheet.dimensions is not available until save.
+    assert sheet.auto_filter.ref == f"A1:S{len(SAMPLE) + 1}"
+
+
+def test_the_imei_column_stays_text():
+    """Excel renders 865510082004294 in scientific notation otherwise, and a paste back into
+    the platform is then wrong — the reason the format is applied at all."""
+    sheet = _workbook(list(SAMPLE))["Devices"]
+    assert sheet["A2"].number_format == "@"
+    assert sheet["A2"].value == "865510082004294"
+    assert isinstance(sheet["A2"].value, str)
+
+
+def test_the_header_keeps_its_styling():
+    sheet = _workbook(list(SAMPLE))["Devices"]
+    assert sheet["A1"].font.bold is True
+    assert sheet["A1"].fill.fgColor.rgb.endswith("2A313B")
+    assert sheet.column_dimensions["A"].width
+
+
+def test_every_source_row_is_the_same_width():
+    """Write-only writes exactly what it is given, where ordinary mode padded short rows out.
+    A one-cell row comes back as a one-element tuple and breaks anything reading column-wise.
+    """
+    sheet = _workbook(list(SAMPLE), {"instance_label": "probe", "digest_short": "abc"})["Source"]
+    widths = {len(row) for row in sheet.iter_rows(values_only=True)}
+    assert widths == {2}, f"ragged Source sheet: rows of width {sorted(widths)}"

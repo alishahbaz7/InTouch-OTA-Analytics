@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import config, current
+from . import config, resolve
 
 # Wait-time buckets for pending devices, in hours. Chosen around the operating reality: a device
 # dark for a day is routine, one dark for three months is effectively retired.
@@ -42,58 +42,28 @@ VIEW = "device_state"
 
 
 def snapshot_source(conn: sqlite3.Connection, snapshot_id: int | None) -> str:
-    """Materialize one snapshot once, and return the table to read it from.
+    """The table to read one snapshot from — resolved once, then reused.
 
-    `device_state` is a view: it resolves, for every device, its most recent row at or before a
-    given snapshot. Every reference to it re-runs that resolution across the whole fleet.
-    Measured on the real 48-snapshot database, **1.0s per reference** against 0.01s for a plain
-    count off the physical table — and a page asks for it six to ten times, once per metric.
-    That is what made the overview take twelve seconds and switching pages feel broken.
+    Kept as the name every metric here calls, but the work lives in `resolve.py` now, because
+    ingest, quality, rollup and the bundle all need exactly the same thing and were each paying
+    a full `device_state` resolution instead. See that module for why the view cannot do this
+    itself and what the grouped join costs instead.
 
-    So it is resolved once and kept in a temp table for the life of the connection, which is the
-    life of one request. Every metric here is scoped to one snapshot and keeps its own
-    `WHERE snapshot_id = ?`, so a caller asking for a different snapshot gets nothing rather than
-    the wrong thing, and a metric still reading the view is merely slow. Both failure modes are
-    safe ones.
-
-    The temp table lives in SQLite's temp schema rather than the main database, so building it
-    takes no write lock on `ota_analytics.db` — a read path stays a read path.
+    Preference order is free, then cheap, then paid: `device_now` when the newest snapshot is
+    what was asked for (it is, almost always), an existing temp table on this connection, and
+    only otherwise a fresh one.
     """
-    if snapshot_id is None:
-        return VIEW
-
-    # The newest snapshot is already resolved and kept in the database, and that is what almost
-    # every page asks for. Using it costs nothing at all — no build, no per-request work — where
-    # the temp table below costs seconds on every single request. It is used only when it holds
-    # exactly the snapshot being asked for, so a stale one is slow rather than wrong.
-    if current.held(conn) == snapshot_id:
-        return current.VIEW
-
-    # Which snapshot is already held is read back out of the table rather than tracked beside it:
-    # sqlite3.Connection does not accept attributes, and a dict keyed on the connection would
-    # outlive it. The rows carry snapshot_id anyway, so they can answer for themselves.
-    try:
-        held = conn.execute("SELECT snapshot_id FROM _snap LIMIT 1").fetchone()
-        if held is not None and held[0] == snapshot_id:
-            return "_snap"
-    except sqlite3.OperationalError:
-        pass                    # not built on this connection yet
-
-    conn.execute("DROP TABLE IF EXISTS _snap")
-    conn.execute("CREATE TEMP TABLE _snap AS SELECT * FROM " + VIEW
-                 + " WHERE snapshot_id = ?", (snapshot_id,))
-    # The columns the metrics group and filter by. A few milliseconds each, and each saves a scan
-    # per metric.
-    conn.execute("CREATE UNIQUE INDEX ix_snap_imei ON _snap(imei)")
-    conn.execute("CREATE INDEX ix_snap_model_fw ON _snap(device_model, firmware)")
-    conn.execute("CREATE INDEX ix_snap_status ON _snap(status, queue_state)")
-    return "_snap"
+    return resolve.source(conn, snapshot_id)
 
 
 def at(conn: sqlite3.Connection, snapshot_id: int | None, sql: str) -> str:
-    """Point a per-snapshot query at the materialized copy of the view."""
-    source = snapshot_source(conn, snapshot_id)
-    return sql if source == VIEW else sql.replace(VIEW, source)
+    """Point a per-snapshot query at whatever currently resolves that snapshot.
+
+    Every query passed here keeps its own `WHERE snapshot_id = ?`, so a caller asking for a
+    snapshot other than the one held gets nothing rather than the wrong rows, and a query that
+    still names the view is merely slow. Both failure modes are safe; neither is quietly wrong.
+    """
+    return resolve.at(conn, snapshot_id, sql)
 
 
 def latest_snapshot_id(conn: sqlite3.Connection) -> int | None:
