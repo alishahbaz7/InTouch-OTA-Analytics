@@ -70,25 +70,33 @@
 
 {% if multi_snapshot %}
 <section class="card">
-  <h2>Task pending across several fetches
-    <span class="hint">{{ stalled | length }} · pending in consecutive snapshots, firmware unchanged</span>
+  <h2>Pending a long time, firmware unchanged
+    <span class="hint">{{ stalled | length }} · pending for over
+      {{ stall_hours }} hours with no firmware move since</span>
   </h2>
   {% if stalled %}
   <table>
     <thead><tr><th>IMEI</th><th>Model</th><th>Firmware</th>
-               <th class="n">Snapshots</th><th>Last seen pending</th></tr></thead>
+               <th class="n">Pending for</th><th>Since</th><th>Last checked</th></tr></thead>
     <tbody>
       {% for d in stalled[:200] %}
       <tr>
         <td class="mono">{{ d.imei }}</td><td>{{ d.device_model or '—' }}</td>
         <td>{{ d.firmware or '—' }}</td>
-        <td class="n">{{ d.pending_streak + 1 }}</td><td class="dim">{{ d.last_seen_pending }}</td>
+        {# Days once it runs past a couple, because "1,417 hours" is not a duration anyone reads. #}
+        <td class="n">{{ '%.0f days' % (d.pending_hours / 24) if d.pending_hours >= 48
+                         else '%.0f hrs' % d.pending_hours }}</td>
+        <td class="dim">{{ d.pending_since[:16] }}</td>
+        <td class="dim">{{ d.last_seen_pending[:16] }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if stalled | length > 200 %}
+  <p class="dim">Showing the 200 longest-pending of {{ stalled | length | comma }}.</p>
+  {% endif %}
   {% else %}
-  <p class="empty">No device has carried the same pending task across several fetches yet.</p>
+  <p class="empty">No device has been pending that long without its firmware moving.</p>
   {% endif %}
 </section>
 {% endif %}

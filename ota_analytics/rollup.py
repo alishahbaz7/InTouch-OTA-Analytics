@@ -92,12 +92,18 @@ def fragmentation(conn: sqlite3.Connection, snapshot_id: int,
         clause = f" AND device_model IN ({','.join('?' * len(models))})"
         params = list(models)
 
-    rows = conn.execute(f"""
+    # Routed through metrics.at like every other per-snapshot read. This one is on the request
+    # path — kpis() calls it, so every page carrying the headline numbers pays for it — and
+    # reading device_state directly cost a full fleet resolution each time: 4.5s on the
+    # 245-snapshot database, which was most of the ten seconds kpis() took.
+    from . import metrics        # imported here to keep the module import graph acyclic
+
+    rows = conn.execute(metrics.at(conn, snapshot_id, f"""
         SELECT device_model, firmware, COUNT(*) c
         FROM device_state
         WHERE snapshot_id = ? AND device_model IS NOT NULL AND firmware IS NOT NULL{clause}
         GROUP BY device_model, firmware
-    """, (snapshot_id, *params)).fetchall()
+    """), (snapshot_id, *params)).fetchall()
 
     by_model: dict[str, list[int]] = {}
     for row in rows:
@@ -111,11 +117,18 @@ def fragmentation(conn: sqlite3.Connection, snapshot_id: int,
 
 
 def rollup_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> None:
-    """(Re)build the fact tables for a single snapshot."""
+    """(Re)build the fact tables for a single snapshot.
+
+    Both statements are routed through `resolve.at`, like every other per-snapshot read. Left
+    naming the view they cost a full resolution of all history each — 13s apiece on the live
+    database, paid on every fetch and again for every snapshot of a rebuild.
+    """
+    from . import resolve       # local, to keep the module import graph acyclic
+
     conn.execute("DELETE FROM fact_fleet_version WHERE snapshot_id = ?", (snapshot_id,))
     conn.execute("DELETE FROM fact_snapshot_kpi WHERE snapshot_id = ?", (snapshot_id,))
-    conn.execute(FLEET_VERSION_SQL, (snapshot_id,))
-    conn.execute(KPI_SQL, (snapshot_id,))
+    conn.execute(resolve.at(conn, snapshot_id, FLEET_VERSION_SQL), (snapshot_id,))
+    conn.execute(resolve.at(conn, snapshot_id, KPI_SQL), (snapshot_id,))
     conn.execute("UPDATE fact_snapshot_kpi SET fragmentation = ? WHERE snapshot_id = ?",
                  (fragmentation(conn, snapshot_id), snapshot_id))
     conn.commit()

@@ -18,7 +18,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-from . import config, db, ingest, rollup, sources
+from . import config, db, ingest, progress, rollup, sources
 
 MIN_INTERVAL = 60           # 1 minute
 MAX_INTERVAL = 24 * 60 * 60  # 24 hours
@@ -32,7 +32,7 @@ class SchedulerState:
     enabled: bool = False
     interval_seconds: int = DEFAULT_INTERVAL
     last_run: str | None = None
-    last_status: str = "never"          # never | ok | unchanged | error
+    last_status: str = "never"          # never | ok | unchanged | skipped | error
     last_message: str = ""
     last_snapshot_id: int | None = None
     next_run: str | None = None
@@ -151,10 +151,35 @@ class Scheduler:
 
     def _run_once(self, job=None) -> None:
         started = datetime.now()
+
+        # A timed fetch registers as a job like any other, so "one job at a time" covers it.
+        #
+        # It did not, and that was a real fault: the timer ran `_fetch_and_ingest` directly with
+        # a silent job, invisible to `progress`, so clicking "Fetch now" during a scheduled
+        # fetch started a *second* one. Both then wrote to the same database, one waited out the
+        # 30s busy timeout and died with "database is locked" — twice in the live error log,
+        # both times at the very first INSERT of the run. A fetch that takes minutes makes that
+        # collision likely rather than theoretical.
+        #
+        # Skipping is the right answer, not queueing: the next tick is along shortly and the
+        # data it would fetch is fresher. A fetch owned by the caller (the "Fetch now" button)
+        # arrives with a job already and keeps it.
+        own_job = None
+        if job is None:
+            try:
+                own_job = job = progress.start("fetch", "Scheduled fetch", FETCH_STEPS)
+            except progress.Busy as exc:
+                self._record_skip(started, str(exc))
+                return
+
         try:
             message, status, snapshot_id = self._fetch_and_ingest(job=job)
+            if own_job:
+                own_job.finish(message)
         except Exception as exc:                     # never let the loop die
             status, message, snapshot_id = "error", f"{type(exc).__name__}: {exc}", None
+            if own_job:
+                own_job.fail(exc)
             from . import errors
             errors.record("agent", exc, path="scheduled fetch")
 
@@ -170,6 +195,33 @@ class Scheduler:
                 self.state.consecutive_failures = 0
                 if snapshot_id:
                     self.state.last_snapshot_id = snapshot_id
+            if self.state.enabled:
+                self.state.next_run = (
+                    datetime.now() + timedelta(seconds=self.state.interval_seconds)
+                ).isoformat(sep=" ", timespec="seconds")
+            self._save()
+
+        # A timed fetch shows its bar while it runs and then gets out of the way. Left behind,
+        # every visit to Update Data would open on a finished panel from a fetch nobody asked
+        # for, needing dismissal each hour. The outcome is not lost — it is on the agent chip in
+        # the header, in `last_message`, and on /errors if it failed. Only a job somebody
+        # started themselves waits to be read and dismissed.
+        if own_job is not None:
+            progress.clear(own_job)
+
+    def _record_skip(self, started: datetime, reason: str) -> None:
+        """Note a tick that stood aside, and schedule the next one.
+
+        Not counted as a failure: nothing went wrong and nothing needs looking at. It is
+        recorded rather than passed over in silence because an agent that appears to have
+        stopped fetching, with no explanation anywhere, is the thing that gets debugged for an
+        afternoon.
+        """
+        with self._lock:
+            self.state.last_run = started.isoformat(sep=" ", timespec="seconds")
+            self.state.last_status = "skipped"
+            self.state.last_message = f"Skipped this run — {reason}"
+            self.state.runs += 1
             if self.state.enabled:
                 self.state.next_run = (
                     datetime.now() + timedelta(seconds=self.state.interval_seconds)
@@ -210,10 +262,15 @@ class Scheduler:
         rollup.rollup_snapshot(conn, result.snapshot_id)
 
         job.begin("Thinning old snapshots")
-        # Retention runs with every fetch: at a short interval the database would otherwise
-        # grow by gigabytes a week, and nobody would notice until it hurt.
+        # Retention runs with every fetch: at a short interval the database would otherwise grow
+        # by gigabytes a week, and nobody would notice until it hurt.
+        #
+        # Bounded, because this holds the write lock inside a fetch. The first run after
+        # upgrading from a version whose retention never fired has a month of history to get
+        # through, and doing it in one go is a minute of the app apparently hanging. The rest is
+        # taken by the next few fetches.
         from . import retention
-        pruned = retention.prune(conn, vacuum=False)
+        pruned = retention.prune(conn, vacuum=False, limit=retention.AUTO_PRUNE_LIMIT)
         note = f" Pruned {pruned.removed} old snapshot(s)." if pruned.removed else ""
 
         return (f"Loaded {result.rows:,} devices as snapshot {result.snapshot_id}.{note}",

@@ -34,7 +34,7 @@ from openpyxl import load_workbook
 # Formats ingest can read. Order matters only for reporting.
 EXPORT_SUFFIXES = (".xlsx", ".csv")
 
-from . import config, normalize, quality, registry
+from . import config, current, db, normalize, quality, registry, resolve
 
 # Phases of loading one export, and what each is worth on the progress bar. Measured on the real
 # 35,475-device export: reading and normalizing dominates, storing is one statement, and folding
@@ -152,11 +152,17 @@ def provided_columns(mapping) -> set[str]:
     return provided
 
 
-def insert_changed_sql(provided: set[str]) -> tuple[str, bool]:
+def insert_changed_sql(provided: set[str], prev_table: str = "device_state") -> tuple[str, bool]:
     """Build the statement that stores a fetch, given the columns this source actually sent.
 
     Returns the SQL and whether it carries columns forward, which decides how many parameters
     it binds — the carry-forward join adds one.
+
+    `prev_table` is whatever currently resolves the *previous* snapshot. It is a parameter
+    rather than the view because the view plans as a scan of all of history: on the live
+    database this one join cost seconds and grew with every fetch, while the resolved copy the
+    last fetch already left behind costs nothing at all. Anything that resolves that snapshot
+    is a correct answer here, so `resolve.source` picks the cheapest one available.
 
     A field the source never sent is *unknown*, not empty, and the difference matters. The
     platform API carries no group information at all, so treating absence as NULL silently wiped
@@ -180,32 +186,37 @@ def insert_changed_sql(provided: set[str]) -> tuple[str, bool]:
     join = ""
     if carried:
         # Only needed when something has to be carried forward; otherwise it is pure cost.
-        join = ("LEFT JOIN device_state prev "
-                "ON prev.snapshot_id = (SELECT MAX(id) FROM snapshot WHERE id < ?) "
-                "AND prev.imei = s.imei")
+        # `?2` is the previous snapshot, resolved by the caller rather than looked up again here.
+        join = (f"LEFT JOIN {prev_table} prev "
+                "ON prev.snapshot_id = ?2 AND prev.imei = s.imei")
 
     return f"""
 INSERT OR IGNORE INTO device_snapshot (snapshot_id, present, {', '.join(DEVICE_COLUMNS)})
-SELECT ?, 1, {values}
+SELECT ?1, 1, {values}
 FROM stage_device s
 {join}
 WHERE NOT EXISTS (
   SELECT 1 FROM device_snapshot p
   WHERE p.imei = s.imei
     AND p.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
-                         WHERE x.imei = s.imei AND x.snapshot_id < ?)
+                         WHERE x.imei = s.imei AND x.snapshot_id < ?1)
     AND p.present = 1
     AND {unchanged}
 )
 """, bool(carried)
 
+
 # A device the platform has stopped listing. Without an explicit marker this is indistinguishable
 # from "nothing changed", and device_state would keep serving its last known values for ever.
-INSERT_TOMBSTONES = """
+#
+# `{prev}` is filled with whatever resolves the previous snapshot, for the same reason as the
+# carry-forward join above — this ran on every single fetch, and against the view it scanned the
+# whole of device_snapshot to answer a question about one snapshot.
+TOMBSTONES_SQL = """
 INSERT OR IGNORE INTO device_snapshot (snapshot_id, imei, present)
-SELECT ?, d.imei, 0
-FROM device_state d
-WHERE d.snapshot_id = ?
+SELECT ?1, d.imei, 0
+FROM {prev} d
+WHERE d.snapshot_id = ?2
   AND NOT EXISTS (SELECT 1 FROM stage_device s WHERE s.imei = d.imei)
 """
 
@@ -292,21 +303,34 @@ def _store_devices(conn: sqlite3.Connection, cursor: sqlite3.Cursor, snapshot_id
     stage_device; only what differs from the last stored row for that device is kept. `provided`
     is the set of columns this source actually sent — anything outside it is carried forward
     rather than overwritten with NULL.
-    """
-    sql, carries = insert_changed_sql(provided)
-    # The placeholders read in source order: the snapshot being written, then the carry-forward
-    # join's "previous snapshot", then the comparison's "last row before this one".
-    params = (snapshot_id, snapshot_id, snapshot_id) if carries else (snapshot_id, snapshot_id)
-    cursor.execute(sql, params)
-    stored = cursor.rowcount
 
+    Both the carry-forward join and the tombstone pass need the previous snapshot resolved, so
+    it is resolved *once* and handed to both. In the ordinary case — one fetch following
+    another — that resolution is already sitting in `device_current` from the last ingest, so it
+    costs nothing; the two references used to cost a full scan of all history each.
+    """
     previous = conn.execute("SELECT MAX(id) AS id FROM snapshot WHERE id < ?",
                             (snapshot_id,)).fetchone()["id"]
+    # No previous snapshot means the first ingest into an empty database: nothing to carry
+    # forward from and nothing that could have gone missing. The view is named only so the SQL
+    # is still well-formed; with no carried columns the join is not emitted at all.
+    prev_table = resolve.source(conn, previous, name="_prev", indexes=("imei",))
+
+    sql, carries = insert_changed_sql(provided, prev_table)
+    # ?1 is the snapshot being written and also bounds the "last row before this one"
+    # comparison; ?2 is the previous snapshot, bound only when the carry-forward join is there.
+    cursor.execute(sql, (snapshot_id, previous) if carries else (snapshot_id,))
+    stored = cursor.rowcount
+
     if previous is not None:
-        cursor.execute(INSERT_TOMBSTONES, (snapshot_id, previous))
+        cursor.execute(TOMBSTONES_SQL.format(prev=prev_table), (snapshot_id, previous))
         stored += cursor.rowcount
 
     cursor.execute("DELETE FROM stage_device")
+    # Dropped rather than left behind, for the same reason registry drops `_state`: the
+    # scheduler holds one connection for the life of a fetch and this is a full copy of the
+    # fleet. It is only ever built at all when the resolved copy could not answer.
+    cursor.execute("DROP TABLE IF EXISTS _prev")
     return stored
 
 
@@ -501,6 +525,16 @@ def ingest_file(conn: sqlite3.Connection, path: Path, job=None) -> IngestResult:
     if job:
         job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
+    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
+    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
+    # that itself would do it again on the next request, because each one opens its own
+    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
+    current.advance(conn, snapshot_id)
+    conn.commit()
+    # Statistics drift as history accumulates, and a stale plan is what made the registry step
+    # take minutes. Refreshed here because a fetch is the only thing that adds bulk, and because
+    # this is a write path already — PRAGMA optimize writes, so it may never run on a read.
+    db.refresh_statistics(conn)
     return result
 
 
@@ -620,6 +654,16 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
     if job:
         job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
+    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
+    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
+    # that itself would do it again on the next request, because each one opens its own
+    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
+    current.advance(conn, snapshot_id)
+    conn.commit()
+    # Statistics drift as history accumulates, and a stale plan is what made the registry step
+    # take minutes. Refreshed here because a fetch is the only thing that adds bulk, and because
+    # this is a write path already — PRAGMA optimize writes, so it may never run on a read.
+    db.refresh_statistics(conn)
     return result
 
 

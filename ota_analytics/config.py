@@ -89,10 +89,15 @@ ONLINE_THRESHOLD_HOURS = 24
 STALE_7D_HOURS = 7 * 24
 STALE_30D_HOURS = 30 * 24
 
-# A device counts as stalled when it carries a pending queue across this many consecutive
-# snapshots with no firmware change. Provisional until the platform owner confirms what
-# QUEUE actually means (see docs/DATA_PROFILE.md, open question 1).
-STALL_SNAPSHOTS = 3
+# A device counts as stalled when its task has been pending for this long with no firmware
+# change in the meantime.
+#
+# Measured in hours rather than in snapshots, which is what this used to be. A snapshot count
+# only means something if the cadence is fixed, and it is not: at the original daily export
+# "3 snapshots" was three days, but at the 15-minute cadence the tool actually runs at it became
+# 45 minutes — so three quarters of the fleet qualified (26,481 devices) and the list stopped
+# being a list of anything. An hour is an hour whatever the cadence.
+STALL_HOURS = 24
 
 
 def ensure_dirs() -> None:

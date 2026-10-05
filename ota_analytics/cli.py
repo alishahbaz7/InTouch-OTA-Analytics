@@ -224,7 +224,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
     result = retention.prune(conn, dry_run=args.dry_run, vacuum=not args.no_vacuum)
     print(f"\nSnapshots: {result.examined} examined, {result.kept} kept, "
           f"{result.removed} {'would be removed' if args.dry_run else 'removed'}")
-    print(f"  kept because they record a change: {result.kept_for_change}")
+    print(f"  of those kept, recording a change: {result.recorded_a_change}")
     print(f"  device rows {'to remove' if args.dry_run else 'removed'}: "
           f"{result.device_rows_removed:,}")
     if not args.dry_run and result.bytes_freed:
@@ -233,6 +233,41 @@ def cmd_prune(args: argparse.Namespace) -> int:
               f"{result.bytes_after / 1024 / 1024:.1f} MB)")
     if args.dry_run:
         print("\n(dry run — nothing was deleted)")
+    return 0
+
+
+def cmd_vacuum(args: argparse.Namespace) -> int:
+    """Rebuild the file and refresh the planner's statistics. Stop the app first.
+
+    Two separate jobs that both want doing after anything bulk, and both of which need the
+    database to themselves:
+
+    VACUUM returns freed pages to the filesystem. SQLite reuses them happily, so a database
+    that has had 177 snapshots pruned out of it is not wrong, just large — but "large" is what
+    people see, and the pages only come back with a rewrite.
+
+    ANALYZE gives the query planner its statistics. Without them it guesses, and this project
+    has one statement that went from 367 seconds to 0.21 on the strength of them. Migration
+    runs it once and every ingest keeps it fresh, so this is here for the case where somebody
+    wants to force it.
+    """
+    conn = db.connect()
+    before = Path(config.DB_PATH).stat().st_size if Path(config.DB_PATH).exists() else 0
+
+    if not args.no_analyze:
+        print("Refreshing query statistics ...")
+        conn.execute("ANALYZE")
+        conn.commit()
+
+    print("Rebuilding the database file ...")
+    conn.execute("VACUUM")
+    conn.commit()
+
+    after = Path(config.DB_PATH).stat().st_size if Path(config.DB_PATH).exists() else 0
+    print(f"  {before / 1024 / 1024:.1f} MB -> {after / 1024 / 1024:.1f} MB "
+          f"({max(0, before - after) / 1024 / 1024:.1f} MB reclaimed)")
+    held = conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0]
+    print(f"  snapshots held: {held}")
     return 0
 
 
@@ -354,12 +389,12 @@ def cmd_target(args: argparse.Namespace) -> int:
         if not rows:
             print("No targets declared. Compliance and coverage-gap views stay empty until "
                   "at least one is set.")
-            models = conn.execute("""
+            latest = metrics.latest_snapshot_id(conn)
+            models = conn.execute(metrics.at(conn, latest, """
                 SELECT device_model, COUNT(*) n FROM device_state
-                WHERE snapshot_id = (SELECT id FROM snapshot ORDER BY snapshot_at DESC LIMIT 1)
-                  AND device_model IS NOT NULL
+                WHERE snapshot_id = ? AND device_model IS NOT NULL
                 GROUP BY device_model ORDER BY n DESC
-            """).fetchall()
+            """), (latest,)).fetchall() if latest else []
             if models:
                 print("\nModels in the latest snapshot:")
                 for m in models:
@@ -423,6 +458,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="report what would go, delete nothing")
     p.add_argument("--no-vacuum", action="store_true", help="skip reclaiming file space")
     p.set_defaults(func=cmd_prune)
+
+    p = sub.add_parser("vacuum", help="reclaim file space and refresh query statistics")
+    p.add_argument("--no-analyze", action="store_true",
+                   help="rebuild the file only, leave statistics alone")
+    p.set_defaults(func=cmd_vacuum)
 
     p = sub.add_parser("db-info", help="identity, coverage and fleet digest of this database")
     p.add_argument("--label", help="name this install, e.g. 'shahbaz-laptop'")

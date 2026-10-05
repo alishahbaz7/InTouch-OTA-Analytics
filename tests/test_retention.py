@@ -62,17 +62,78 @@ def test_older_snapshots_are_thinned_to_one_per_hour(conn, make_export):
     assert len(old_buckets) == len(set(old_buckets))
 
 
-def test_a_snapshot_that_recorded_a_change_is_never_pruned(conn, make_export):
-    """Thinning must not erase the evidence of an upgrade."""
+def test_thinning_keeps_the_evidence_of_an_upgrade_without_keeping_the_snapshot(
+        conn, make_export):
+    """The move survives pruning; the snapshot it happened to arrive in need not.
+
+    This used to be enforced by refusing to prune any snapshot that recorded a change, and that
+    rule quietly disabled retention altogether: on the live fleet an hourly fetch of 35,848
+    devices always contains *some* change, so 268 of 272 snapshots were exempt and the database
+    grew without bound.
+
+    What has to hold is the evidence, not the container. `changed_at` on the change row records
+    when the firmware actually moved, and it is not touched by pruning — only the snapshot the
+    row is filed under moves, onto the survivor.
+    """
     base = NOW - timedelta(days=5)
     ingest_at(conn, make_export, base + timedelta(minutes=0), firmware="7.5.0.27")
     ingest_at(conn, make_export, base + timedelta(minutes=10), firmware="7.5.0.27")
     changed = ingest_at(conn, make_export, base + timedelta(minutes=20), firmware="7.5.0.51A")
     ingest_at(conn, make_export, base + timedelta(minutes=30), firmware="7.5.0.51A")
     ingest_at(conn, make_export, NOW)
+    registry.rebuild(conn)
+
+    moved_at = conn.execute(
+        "SELECT changed_at FROM device_change WHERE field = 'firmware' "
+        "AND new_value = '7.5.0.51A'").fetchone()
+    assert moved_at is not None, "the upgrade should be in the change log to begin with"
+
     keep, remove = retention.plan(conn, now=NOW)
-    assert changed.snapshot_id in keep
-    assert changed.snapshot_id not in remove
+    assert changed.snapshot_id in remove, (
+        "a snapshot inside an already-represented hour is exactly what thinning is for")
+
+    retention.prune(conn, now=NOW, vacuum=False)
+
+    after = conn.execute(
+        "SELECT changed_at FROM device_change WHERE field = 'firmware' "
+        "AND new_value = '7.5.0.51A'").fetchone()
+    assert after is not None, "pruning must not erase the upgrade"
+    assert after["changed_at"] == moved_at["changed_at"], (
+        "the time the firmware actually moved is a fact, not a property of the snapshot it "
+        "was noticed in")
+
+    # And the log is still filed against snapshots that exist.
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM device_change c WHERE c.snapshot_id IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM snapshot s WHERE s.id = c.snapshot_id)").fetchone()[0]
+    assert orphans == 0
+
+
+def test_pruning_does_not_change_what_a_surviving_snapshot_resolves_to(conn, make_export):
+    """The whole safety property of thinning, stated directly.
+
+    A pruned snapshot's rows move onto the next survivor, so every snapshot that is kept must
+    resolve to exactly the devices and values it did before. Anything less is not thinning, it
+    is rewriting history — and it would be invisible, because the numbers would still look
+    plausible.
+    """
+    base = NOW - timedelta(days=5)
+    for minutes in (0, 10, 20, 30, 40, 50):
+        firmware = "7.5.0.27" if minutes < 30 else "7.5.0.51A"
+        ingest_at(conn, make_export, base + timedelta(minutes=minutes), firmware=firmware)
+    ingest_at(conn, make_export, NOW, firmware="7.5.0.51A")
+
+    keep, remove = retention.plan(conn, now=NOW)
+    assert remove
+
+    def resolved(ids):
+        return {sid: sorted(tuple(r) for r in conn.execute(
+            "SELECT imei, firmware, status, queue_state FROM device_state "
+            "WHERE snapshot_id = ?", (sid,))) for sid in ids}
+
+    before = resolved(keep)
+    retention.prune(conn, now=NOW, vacuum=False)
+    assert resolved(keep) == before
 
 
 def test_newest_and_oldest_always_survive(conn, make_export):
@@ -185,3 +246,53 @@ def test_last_checked_advances_even_when_nothing_changed(conn, make_export):
     assert row["last_checked_at"].startswith("2026-08-16")
     assert row["last_changed_at"] is None
 
+
+
+def test_an_automatic_prune_is_bounded(conn, make_export):
+    """It holds the write lock inside a fetch, so one run may not take an unbounded amount of it.
+
+    The first run after upgrading from a version whose retention never fired had 177 snapshots
+    of backlog — 61 seconds on the live database, in one transaction, inside a fetch. That is
+    the shape of "the application hangs and I restart it".
+    """
+    base = NOW - timedelta(days=5)
+    for minutes in range(0, 600, 10):      # 60 old fetches, ten minutes apart
+        ingest_at(conn, make_export, base + timedelta(minutes=minutes))
+    ingest_at(conn, make_export, NOW)
+
+    _, would_remove = retention.plan(conn, now=NOW)
+    assert len(would_remove) > 5, "the fixture needs a real backlog to bound"
+
+    result = retention.prune(conn, now=NOW, vacuum=False, limit=5)
+    assert result.removed == 5
+
+    # What was left over is simply still prunable, not lost or half-done.
+    _, still = retention.plan(conn, now=NOW)
+    assert len(still) == len(would_remove) - 5
+
+
+def test_a_bounded_prune_takes_the_oldest_first(conn, make_export):
+    """The history that has been waiting longest to be thinned."""
+    base = NOW - timedelta(days=5)
+    for minutes in range(0, 300, 10):
+        ingest_at(conn, make_export, base + timedelta(minutes=minutes))
+    ingest_at(conn, make_export, NOW)
+
+    _, would_remove = retention.plan(conn, now=NOW)
+    retention.prune(conn, now=NOW, vacuum=False, limit=3)
+
+    survived = {r["id"] for r in conn.execute("SELECT id FROM snapshot")}
+    assert not (set(would_remove[:3]) & survived)
+    assert set(would_remove[3:]) <= survived
+
+
+def test_an_unbounded_prune_still_clears_everything(conn, make_export):
+    """The CLI asks for the whole job; only the fetch asks for a bounded one."""
+    base = NOW - timedelta(days=5)
+    for minutes in range(0, 300, 10):
+        ingest_at(conn, make_export, base + timedelta(minutes=minutes))
+    ingest_at(conn, make_export, NOW)
+
+    retention.prune(conn, now=NOW, vacuum=False)
+    _, still = retention.plan(conn, now=NOW)
+    assert still == []

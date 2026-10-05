@@ -130,3 +130,71 @@ def test_an_interrupted_build_refuses_rather_than_overwriting_the_rescue(fake_di
     assert "already exists" in str(raised.value)
     assert (tmp_path / ".build-preserved-data" / "InTouchOTA-Analytics" / "data"
             / "ota_analytics.db").read_bytes() == b"the fleet history"
+
+
+# ─── the version Windows reports ────────────────────────────────────────────
+
+def test_the_version_resource_matches_the_code():
+    r"""Windows reads a version out of a resource compiled into the .exe, not out of its name.
+
+    Generated from __version__ rather than kept as a file, so the number on the file cannot drift
+    from the number in the code — a version that lags is worse than none, because a bug report
+    then points at the wrong build.
+    """
+    from ota_analytics import __version__
+
+    written = build_module.write_version_resources()
+    try:
+        assert set(written) == {"InTouchOTA-Analytics", "InTouchOTA-Analytics-silent"}
+        parts = ", ".join((__version__.split(".") + ["0", "0", "0", "0"])[:4])
+
+        for internal, path in written.items():
+            body = path.read_text(encoding="utf-8")
+            assert f"filevers=({parts})" in body
+            assert f"StringStruct('FileVersion', '{__version__}')" in body
+            assert f"StringStruct('ProductVersion', '{__version__}')" in body
+            # Each executable names itself, so Explorer and Task Manager tell them apart.
+            assert f"StringStruct('OriginalFilename', '{internal}.exe')" in body
+            # ASCII only: these strings go into a Windows resource, and there is no reason to
+            # risk an encoding there for a dash.
+            assert body.isascii(), f"{path.name} carries non-ASCII"
+
+        console = written["InTouchOTA-Analytics"].read_text(encoding="utf-8")
+        silent = written["InTouchOTA-Analytics-silent"].read_text(encoding="utf-8")
+        assert "dashboard and CLI" in console
+        assert "no console window" in silent
+    finally:
+        for path in written.values():
+            path.unlink(missing_ok=True)
+
+
+def test_the_resource_is_a_valid_version_structure():
+    """PyInstaller evaluates this file, so a typo in it fails the build rather than the test."""
+    written = build_module.write_version_resources()
+    try:
+        for path in written.values():
+            body = path.read_text(encoding="utf-8")
+            # Parsed as the expression PyInstaller expects, without importing its internals.
+            import ast
+            tree = ast.parse(body.strip(), mode="eval")
+            assert isinstance(tree.body, ast.Call)
+            assert tree.body.func.id == "VSVersionInfo"
+    finally:
+        for path in written.values():
+            path.unlink(missing_ok=True)
+
+
+def test_the_executable_names_stay_unversioned():
+    """startup.launch_command() finds the windowless build by exact name.
+
+    A filename carrying the version would break that lookup at every release unless it were
+    derived, and the zip already carries the version for handover.
+    """
+    from ota_analytics import startup
+
+    assert startup.SILENT_EXE == "InTouchOTA-Analytics-silent.exe"
+    assert "1." not in startup.SILENT_EXE
+    spec = Path(__file__).resolve().parent.parent / "InTouchOTA-Analytics.spec"
+    body = spec.read_text(encoding="utf-8")
+    assert "name=NAME," in body                       # not name=f"{NAME}-v{version}"
+    assert 'name=f"{NAME}-silent"' in body

@@ -10,17 +10,33 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from . import config
+from . import config, resolve
 
 Finding = tuple[str, str, int, list[str], str]  # rule, severity, affected, sample, detail
 
 
+def _at(conn: sqlite3.Connection, sql: str, params: tuple) -> str:
+    """Point one rule at whatever currently resolves the snapshot it is about.
+
+    Every rule here is a separate pass over one snapshot, and every one of them named
+    `device_state` — which plans as a scan of the whole of `device_snapshot`, so each rule cost
+    a full resolution of all history. Twenty rules made this the single most expensive step of a
+    fetch: 26-43s on the live database, against 9s to store the fetch itself.
+
+    The first rule to ask pays to materialize the snapshot and the rest read that copy, so the
+    step now costs one resolution rather than twenty. Every rule keeps its own
+    `WHERE snapshot_id = ?`, so a rule that somehow got a different snapshot would match nothing
+    rather than counting the wrong devices.
+    """
+    return resolve.at(conn, params[0], sql)
+
+
 def _scalar(conn: sqlite3.Connection, sql: str, params: tuple) -> int:
-    return conn.execute(sql, params).fetchone()[0] or 0
+    return conn.execute(_at(conn, sql, params), params).fetchone()[0] or 0
 
 
 def _sample(conn: sqlite3.Connection, sql: str, params: tuple, limit: int = 10) -> list[str]:
-    rows = conn.execute(f"{sql} LIMIT {limit}", params).fetchall()
+    rows = conn.execute(f"{_at(conn, sql, params)} LIMIT {limit}", params).fetchall()
     return [str(r[0]) for r in rows]
 
 
@@ -204,11 +220,11 @@ def run_rules(
     # Single-valued columns carry no analytical signal — worth flagging so nobody builds a
     # segmentation on them.
     for column in ("created_by",):
-        row = conn.execute(f"""
+        row = conn.execute(_at(conn, f"""
             SELECT {column}, COUNT(*) c FROM device_state
             WHERE snapshot_id = ? AND {column} IS NOT NULL
             GROUP BY {column} ORDER BY c DESC LIMIT 1
-        """, sid).fetchone()
+        """, sid), sid).fetchone()
         total = _scalar(conn, "SELECT COUNT(*) FROM device_state WHERE snapshot_id = ?", sid)
         if row and total and row["c"] / total > 0.95:
             findings.append((

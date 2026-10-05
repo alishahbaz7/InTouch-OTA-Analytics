@@ -64,6 +64,10 @@ class Job:
         default_factory=lambda: datetime.now().isoformat(sep=" ", timespec="seconds"))
     finished_at: str | None = None
     error: str = ""
+    # Where the thing this job produced can be fetched, for a job whose output is a file. The
+    # alternative is holding the request open while the file is built, which is what made a
+    # perfectly good bundle export read as a broken button.
+    download: str = ""
 
     # ── writing ────────────────────────────────────────────────────────────
 
@@ -142,6 +146,7 @@ class Job:
                 "detail": step.detail,
                 "message": self.message,
                 "error": self.error,
+                "download": self.download,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
             }
@@ -172,11 +177,17 @@ def current() -> Job | None:
         return _current
 
 
-def clear() -> None:
-    """Forget the last job, once its result has been shown."""
+def clear(job: Job | None = None) -> None:
+    """Forget the last job, once its result has been shown.
+
+    Pass the job to clear only that one. The scheduler tidies its own finished job away, and
+    between finishing and tidying somebody can legitimately start a new one — an unconditional
+    clear would then wipe a bar that has just started moving.
+    """
     global _current
     with _lock:
-        _current = None
+        if job is None or _current is job:
+            _current = None
 
 
 def snapshot() -> dict:

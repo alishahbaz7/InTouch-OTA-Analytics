@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from ota_analytics import ingest, metrics  # noqa: E402
+from ota_analytics import current, ingest, metrics  # noqa: E402
 from tests.test_pages import client  # noqa: F401,E402
 
 
@@ -49,6 +49,10 @@ def fleet(conn):
     # 'never_tasked' must genuinely have no task recorded
     conn.execute("UPDATE device_snapshot SET queue_state='never_tasked', queue=NULL "
                  "WHERE imei='never_tasked'")
+    # Editing device_snapshot behind the application's back is something only a fixture does —
+    # ingest is append-only and every real writer refreshes this itself. Without it the resolved
+    # copy of this snapshot still holds the pre-edit row, and the metrics read that instead.
+    current.refresh_latest(conn)
     conn.commit()
     return conn, result.snapshot_id
 

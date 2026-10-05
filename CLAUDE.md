@@ -436,6 +436,36 @@ metrics. The overview took 12.7s and switching pages felt broken.
 and every per-snapshot metric reads that instead. Result: overview 12.7s → **1.05s**, pending
 9.3s → 2.5s, firmware 5.2s → 0.9s, devices 4.3s → 1.5s.
 
+**That was not enough on its own, because the cost grows with snapshot count and `_snap` does
+not outlive a request.** By 245 snapshots a single reference was 4.5s and building `_snap` was
+10.9s — and `get_conn()` opens a new connection per request, so a temp table is rebuilt on every
+page load. The overview was back to 18s, devices 42s, pending 77s.
+
+So the newest snapshot — which is what almost every read asks for, and which only changes when a
+fetch lands — is resolved once *when that happens* and kept in `device_current` (`current.py`).
+`snapshot_source()` returns it whenever `device_current_meta` holds exactly the snapshot asked
+for. Advancing it is incremental: a fetch of a fixed fleet changes ~150 devices, so it costs
+~150 upserts rather than re-resolving 35,848.
+
+- **Anything that writes `device_snapshot` directly must refresh the materialization**
+  (`current.refresh_latest`, or `invalidate` to fall back to the view). Ingest, `retention.prune`
+  and `bundle.import_bundle` all do. The guard is snapshot *identity*, not content: a copy that
+  holds snapshot N is trusted for snapshot N, so mutating N's rows underneath it is the one way
+  to get a stale answer — and the append-only rule is what normally makes that impossible.
+  A fixture doing surgery on stored rows is the realistic case, and `test_fallback_tag` shows it.
+- **Empty is safe.** With nothing materialized, readers fall back to the view: slower, never
+  wrong. That is what makes it correct to invalidate whenever anything is uncertain.
+- **A per-snapshot read that does not go through `metrics.at()` is a bug that only shows up as
+  slowness.** It returns the right answer, so nothing fails; it just costs a full fleet
+  resolution. Three were found this way, all outside metrics.py and all on the request path:
+  `rollup.fragmentation` (called by `kpis`, so every page with headline numbers), and the count
+  and the select inside `api._device_rows` — two resolutions per load, which is why `/devices`
+  took 41s. Grep for `device_state` outside metrics.py before assuming a page is slow for an
+  interesting reason.
+
+Measured on the 245-snapshot database, before → after: `/` 18.36s → **0.84s**, `/devices`
+41.54s → **0.25s**, `/pending` 76.79s → **0.45s**, `/firmware` 6.95s → **0.28s**.
+
 - **Every metric keeps its own `WHERE snapshot_id = ?`.** A caller asking for a different
   snapshot than the one held gets *nothing* rather than the wrong rows, and a metric that still
   reads the view is merely slow. Both failure modes are safe; neither is silent wrongness.
@@ -449,11 +479,129 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
   runs. Editing inside the literals corrupted them twice while this was being written — once
   turning SQL's `'Online'` into `'Onlinef'`, once rewriting the helper's own query into a
   reference to itself.
-- Anything that spans **all** snapshots — `registry.stalled_devices` — must keep using the view,
-  and is what the pending page still spends its time on.
+- **Anything that spans *all* snapshots is the thing to be suspicious of.** It grows by another
+  fetch every 15 minutes. `registry.stalled_devices` grouped `device_state` across every
+  snapshot — 245 × 35,848 resolved rows to answer a question about the present — and took 118s.
+  It now reads the registry and the change log instead, which already record when each device
+  became pending and when its firmware last moved.
+- **A threshold counted in snapshots is a threshold in disguise.** That same function called a
+  device stalled after 3 consecutive pending snapshots. At the original daily export that meant
+  three days; at the 15-minute cadence it means 45 minutes, so 26,481 devices qualified and the
+  list stopped meaning anything. `config.STALL_HOURS` is in hours for that reason.
 - If you touch metrics.py: Python 3.12 tokenizes f-strings as `FSTRING_START/MIDDLE/END`, not
   `STRING` (PEP 701), and adjacent literals are one implicit concatenation. Any script that
   rewrites SQL here has to handle both.
+
+## Resolving a snapshot: the view states the meaning, `resolve.py` does the work
+
+The page work above fixed the *reads*. It left the writes, and by 272 snapshots a single fetch
+took **194 seconds** — sometimes 450 — while the hourly timer kept firing at it. Same shape as
+before: nothing errors, the numbers stay right, it just takes longer every week.
+
+`device_state` expresses resolution with a correlated subquery per row, and SQLite plans that as
+a full scan of `device_snapshot`. Its cost is proportional to *all history*, not to fleet size.
+The same answer comes out of a grouped join on `ix_ds_imei_snap` — **17.5s → 1.3s for all 27
+columns of all 35,848 devices**, byte-identical on nine snapshots including the first and last.
+
+- **It cannot be a view.** The snapshot id has to bound the inner `GROUP BY`, and SQLite has no
+  LATERAL. Two other formulations were tried and are *slower* than the view: `ROW_NUMBER() OVER
+  (PARTITION BY imei)` at 17.4s, and adding `d.snapshot_id <= s.id` to the view's join at 12.5s.
+- **The view stays in the schema regardless.** It is the readable statement of what resolving
+  means and it is what `tests/test_resolve.py` holds the fast path against. An optimization with
+  nothing to check it against is just an assertion.
+- **Three ways in, cheapest first**: `resolve.source()` returns the table to read a snapshot
+  from — free when `device_current` already holds it; `resolve.materialize()` builds a named
+  temp table; `resolve.select()` is the bare SELECT, for streaming. `metrics.at` delegates here,
+  so nothing that already used it had to change.
+- **Every per-snapshot query keeps its own `WHERE snapshot_id = ?`.** A caller handed a copy of
+  the wrong snapshot then matches nothing, which is visible, rather than returning plausible
+  rows for the wrong moment.
+- **The tripwire is at runtime, not in the source.** `tests/test_db_performance.py` traces the
+  SQL actually executed and fails if an ingest, rollup, registry fold, quality run or page
+  metric resolves the view. Grepping the source would be wrong: naming `device_state` in a
+  literal is correct, because `resolve.at` swaps the name onto the finished statement so the
+  query in the file is what it appears to be.
+
+Where the 194 seconds went, and where it went to:
+
+| Step | Before | After |
+|---|---|---|
+| Storing what changed | 9.0s | **1.6s** |
+| Checking data quality | 25.9s | **1.0s** |
+| Updating the device registry | 150.6s | **4.7s** |
+| Rebuilding metrics | 8.7s | **0.5s** |
+
+## Statistics, and the 367-second statement
+
+**`ANALYZE` had never run on this database.** Without statistics SQLite guesses, and here it
+guessed that `ix_change_field` was the way into `device_change` — so the registry's
+`prev_firmware` update scanned all 21,097 rows with `field = 'firmware'` once per device. 756
+million row visits. **367 seconds, in one statement, on every fetch.** With statistics it picks
+`ix_change_imei` and takes **0.21s**.
+
+Migration v9 runs `ANALYZE` once (1.2s on the live database) and `db.refresh_statistics`
+(`PRAGMA optimize`) runs after every ingest, because statistics that are never refreshed go
+stale as the database grows. `PRAGMA optimize` writes, so it may never run on a read path.
+
+This is the cheapest fix in the project's history and it was invisible for a month: the wrong
+plan produces the right answer.
+
+## Retention has to be able to fire
+
+Retention thins by age — everything for 2 days, then hourly, daily, weekly — and it also refused
+to prune any snapshot that recorded a change. That sounds careful. At the hourly cadence the
+tool actually runs at, a fetch of 35,848 devices always contains *some* change, so **268 of 272
+snapshots were exempt**: retention removed nothing on any run, ever, while the database grew
+~45 MB a day. On the live data the rule now thins 177 of 273 snapshots and 587,211 of 1,081,179
+device rows.
+
+- **If you add a protection rule, work out what fraction of real snapshots it exempts.** Above a
+  few percent it is not a safeguard, it is an off switch.
+- **Thinning costs time resolution, never facts.** A pruned snapshot's device rows *and* its
+  change-log rows move onto the next survivor; `changed_at` keeps the real time of the move. The
+  test asserts every surviving snapshot resolves identically before and after — keep that true.
+- **An automatic prune is bounded** (`retention.AUTO_PRUNE_LIMIT`, 20 snapshots). It holds the
+  write lock inside a fetch, and the first run after upgrading had 177 of backlog — 61 seconds
+  of the app apparently hanging. The rest is taken by the next few fetches; the policy describes
+  the shape history should have, not a sequence that must complete. The CLI's `prune` is
+  unbounded, because someone is watching it.
+
+## One fetch at a time
+
+A scheduled fetch used to run `_fetch_and_ingest` directly with a silent job, invisible to
+`progress` — so "one job at a time" did not cover the one job that runs by itself. Pressing
+"Fetch now" during a scheduled fetch started a second concurrent writer; one waited out the 30s
+busy timeout and died with `database is locked`. Twice in the live error log, both at the very
+first INSERT of the run.
+
+The timed fetch now takes a job like everything else. A tick that finds one already running
+**skips** rather than queueing — the next tick is along shortly and its data is fresher — and
+records `last_status = "skipped"`, which is not counted as a failure. A job nobody asked for
+also clears itself when it finishes, or every visit to Update Data would open on a stale panel.
+
+## Building a file is a job; downloading it is a download
+
+Reported as "export is not working": the bundle. Nothing raised and nothing was logged — a full
+history is ~960,000 rows of JSON and the better part of a minute, and it was assembled whole in
+a `BytesIO` before a single byte reached the browser. As a plain download that is a request
+which does not come back: no bar, no download indicator, nothing to distinguish it from a hang.
+
+- **`POST /update/bundle` builds it as a job** with a determinate bar drawn from rows written,
+  then the finished job carries `download` and the page renders a link. Collecting is instant,
+  because the file already exists. `GET /update/bundle` still builds one inline for scripts and
+  short histories — same builder, so the two cannot drift.
+- **Nothing large is assembled in memory any more.** The bundle streams to a scratch file;
+  `exports.to_xlsx` uses openpyxl's `write_only=True`, which took a full device export from
+  **190 MB of Python objects to 3 MB** for the same 3.1 MB file, at the same speed. The cost is
+  that nothing can be revisited after it is written, so column widths, the freeze and the filter
+  range are all set up front and the IMEI text format goes on the cell as it is created.
+- **Clean up on the error path too** — that is the one nobody checks.
+
+## Two skills carry these rules
+
+`.claude/skills/db-performance` and `.claude/skills/long-jobs-ux`. They exist because the same
+two mistakes have now been made in three different places each, and a rule written only in prose
+gets read once. Load them before touching the warehouse or adding a slow route.
 
 ## Theme: three states, and the CSS order that makes them work
 
@@ -483,10 +631,11 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
 
   `device_state` is a view that reconstructs any snapshot from those rows (each device's most
   recent row at or before it) and carries its own `snapshot_id`, so `WHERE snapshot_id = ?`
-  works exactly as it did against the old full-copy table. **Every read goes through it** —
+  works exactly as it did against the old full-copy table. **Every read resolves a snapshot** —
   querying `device_snapshot` directly returns only the devices that changed in that fetch,
   which looks like a working query and is silently wrong. Only ingest and retention touch the
-  physical table. Verified on the real database: 19/19 snapshots resolve identically, rows fell
+  physical table. **Resolve through `resolve.py`, not the view itself**: the view is the
+  definition, and reading it costs a scan of all history (see the section above). Verified on the real database: 19/19 snapshots resolve identically, rows fell
   88.5% and the file went 305 MB → 52 MB.
 - **Never store a value derived from the snapshot time.** `seen_age_hours` is `snapshot_at`
   minus `seen_at`, so storing it made *every row of every fetch* differ and defeated the scheme
@@ -533,6 +682,42 @@ and every per-snapshot metric reads that instead. Result: overview 12.7s → **1
   ingest is one transaction lasting up to 10.6s.
 - **Never query the platform's production DB from a request path** (applies from Phase 6 on).
 - No secrets in the repo. `ANTHROPIC_API_KEY` comes from the environment or `.env` (gitignored).
+
+## Working rules for this repo
+
+- **Branch per version, and `main` only on request.** Work happens on a branch named exactly the
+  app version (`1.7.0`), and the version in `ota_analytics/__init__.py` matches the branch it is
+  on. Once something is pushed to `main`, the next change starts on a new branch — never carry on
+  committing to `main`.
+- **Three shipping steps, each containing the one before it** — the `ship` skill has the detail:
+
+  | Say | Means |
+  |---|---|
+  | **push** | commit → update the literature → push the version branch |
+  | **land** | push, then merge into `main` and start the next version branch |
+  | **release** | land, then build the exe and tag `v<version>` |
+
+  Note "push" is deliberately *not* called "commit": in git that word means the local step, and
+  giving it a second meaning here would collide with every terminal command.
+- **One version number for the whole application.** `ota_analytics/__init__.py:__version__` is
+  the only declaration; `build.py` imports it and generates the .exe's version resource from it,
+  and the UI reads it through `build_info()`. Never add a second — a UI version and a build
+  version drift, and the one that lags makes a bug report point at the wrong code.
+  `tests/test_version_hygiene.py` fails if a second declaration appears, if the changelog has no
+  section for the current version, or if the branch name and the version disagree.
+- **The version is set once, when the branch starts** — not on every push. Later pushes go to the
+  branch already named for it.
+- **A release is not done until the running copy says so.** A long-lived process holds the old
+  code in memory and keeps reporting the old version after a build. Ask it (`/api/version`) and
+  say plainly if it needs restarting. A release was once reported as finished while every screen
+  the user looked at still showed the previous version: the filename was right and the running
+  app was wrong, and only one of those is visible.
+- **Never build unless asked.** `python build.py` is not part of finishing a change. It happens
+  at a release.
+- **Never leave scratch scripts in the tree.** Patch helpers written to make an edit are deleted
+  in the same step, not committed.
+- **`dist/` holds live data on this machine** — the database, bundles and reports. Treat anything
+  in it as the user's; see the build-safety section.
 
 ## Commands
 
@@ -584,8 +769,13 @@ python -m ota_analytics.cli db-import theirs.otabundle --inspect
 python -m ota_analytics.cli db-import theirs.otabundle
 python -m ota_analytics.cli db-import theirs.otabundle --allow-interleave   # slow, rebuilds
 
-# reclaim space after the delta compaction migration (stop the app first)
-python -c "from ota_analytics import db; db.connect().execute('VACUUM')"
+# reclaim file space and refresh query statistics (stop the app first)
+python -m ota_analytics.cli vacuum
+python -m ota_analytics.cli vacuum --no-analyze
+
+# apply the retention policy by hand — unbounded, unlike the one a fetch runs
+python -m ota_analytics.cli prune --dry-run
+python -m ota_analytics.cli prune
 
 # tests
 python -m pytest -q
@@ -600,6 +790,7 @@ ota_analytics/
   config.py      paths, settings, env
   db.py          sqlite connection, migrate-once, versioned migrations
   schema.sql     DDL, versioned, plus the device_state view
+  resolve.py     resolving one snapshot fast — what device_state means, without the scan
   identity.py    db_id, instance label, fleet digest — "are we looking at the same data?"
   bundle.py      export/import snapshot history between installs (merge, not replace)
   ingest.py      export -> change rows (streaming, idempotent, delta writes)

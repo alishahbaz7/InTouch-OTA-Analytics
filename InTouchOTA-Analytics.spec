@@ -13,9 +13,21 @@
 # every launch, which costs seconds each time and is what antivirus flags hardest on an
 # unsigned binary.
 
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
 
 NAME = "InTouchOTA-Analytics"
+
+
+def version_resource(internal):
+    """The version resource build.py generated for this executable, if it ran.
+
+    Optional so the spec still builds when PyInstaller is invoked directly — it produces an
+    unstamped exe rather than failing, and build.py is the documented entry point.
+    """
+    path = f"version_{internal}.txt"
+    return path if os.path.exists(path) else None
 
 # Files the program reads at runtime. They are not modules, so nothing imports them and
 # PyInstaller cannot find them by analysis — config.resource() locates them inside the bundle.
@@ -62,6 +74,7 @@ console_exe = EXE(
     debug=False,
     strip=False,
     upx=False,               # UPX-packed binaries trip antivirus far more often than they save
+    version=version_resource(NAME),
 )
 
 silent_exe = EXE(
@@ -72,6 +85,7 @@ silent_exe = EXE(
     debug=False,
     strip=False,
     upx=False,
+    version=version_resource(f"{NAME}-silent"),
 )
 
 COLLECT(

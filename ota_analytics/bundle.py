@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import identity, normalize, registry, retention, rollup
+from . import current, identity, normalize, registry, resolve, retention, rollup
 
 SUFFIX = ".otabundle"
 
@@ -154,9 +154,27 @@ def _row_json(sha: str, row: sqlite3.Row, columns: list[str]) -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+# Phases of building a bundle, and what each is worth on the bar. Measured on the live database:
+# the baseline is one resolved fleet (35,475 rows, under a second) and the deltas are everything
+# else (926,020 rows, most of a minute), so even weights would leave the bar stuck at the end.
+EXPORT_STEPS = [
+    ("Selecting snapshots", 1.0),
+    ("Writing the baseline", 3.0),
+    ("Writing the changes", 45.0),
+    ("Finishing the file", 1.0),
+]
+
+
 def export_bundle(conn: sqlite3.Connection, out, *, since: str | None = None,
-                  until: str | None = None) -> ExportResult:
-    """Write the snapshot history to a bundle. `out` may be a path or a binary file object."""
+                  until: str | None = None, job=None) -> ExportResult:
+    """Write the snapshot history to a bundle. `out` may be a path or a binary file object.
+
+    `job` makes the row counts visible while it runs. A full history is ~960,000 rows of JSON
+    and the better part of a minute, which is long enough that a download with no feedback reads
+    as a broken button — which is exactly how it was reported.
+    """
+    job = job or _Silent()
+    job.begin("Selecting snapshots")
     selected = _selected_snapshots(conn, since, until)
     if not selected:
         raise BundleError("There are no snapshots to export"
@@ -192,28 +210,49 @@ def export_bundle(conn: sqlite3.Connection, out, *, since: str | None = None,
             # The baseline is the sender's full resolved state, not its change rows — every
             # device it knew, at the value it held, tombstones included. This is what makes the
             # bundle a self-contained chain instead of a fragment only the sender can read.
+            #
+            # `present` is deliberately not filtered here, unlike everywhere else: a tombstone is
+            # part of the baseline, because the receiver has to learn that the device had left.
+            # That is why this builds the grouped join itself rather than calling
+            # `resolve.select`, which exists to serve readers and drops them. The shape is the
+            # same, and it is the reason this went from most of a 24s download to under a second.
+            job.begin("Writing the baseline",
+                      total=conn.execute(
+                          "SELECT COUNT(DISTINCT imei) FROM device_snapshot "
+                          "WHERE snapshot_id <= ?", (baseline["id"],)).fetchone()[0])
             cursor = conn.execute(f"""
-                SELECT {', '.join(columns)} FROM device_snapshot d
-                WHERE d.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
-                                       WHERE x.imei = d.imei AND x.snapshot_id <= ?)
+                SELECT {', '.join('d.' + c for c in columns)} FROM device_snapshot d
+                JOIN (SELECT imei, MAX(snapshot_id) AS ms FROM device_snapshot
+                      WHERE snapshot_id <= ?1 GROUP BY imei) m
+                  ON m.imei = d.imei AND m.ms = d.snapshot_id
             """, (baseline["id"],))
             for row in cursor:
                 stream.write(_row_json(baseline["file_sha256"], row, columns))
                 baseline_rows += 1
+                if baseline_rows % 2000 == 0:
+                    job.advance(baseline_rows, detail=f"{baseline_rows:,} devices")
 
             # Everything after it is deltas, exactly as stored — which is why a bundle covering
             # weeks of fetches is barely larger than one covering a single day.
             if rest_ids:
+                placeholders = ','.join('?' * len(rest_ids))
+                job.begin("Writing the changes",
+                          total=conn.execute(
+                              f"SELECT COUNT(*) FROM device_snapshot "
+                              f"WHERE snapshot_id IN ({placeholders})", rest_ids).fetchone()[0])
                 sha_by_id = {s["id"]: s["file_sha256"] for s in selected[1:]}
                 cursor = conn.execute(f"""
                     SELECT snapshot_id, {', '.join(columns)} FROM device_snapshot
-                    WHERE snapshot_id IN ({','.join('?' * len(rest_ids))})
+                    WHERE snapshot_id IN ({placeholders})
                     ORDER BY snapshot_id
                 """, rest_ids)
                 for row in cursor:
                     stream.write(_row_json(sha_by_id[row["snapshot_id"]], row, columns))
                     device_rows += 1
+                    if device_rows % 10_000 == 0:
+                        job.advance(device_rows, detail=f"{device_rows:,} changes")
 
+        job.begin("Finishing the file")
         manifest_data["baseline_rows"] = baseline_rows
         manifest_data["delta_rows"] = device_rows
         archive.writestr(MANIFEST, json.dumps(manifest_data, indent=2))
@@ -431,16 +470,18 @@ def _rebuild_groups(conn: sqlite3.Connection, snapshot_ids: list[int], on_step=N
     """Re-derive group membership for the imported snapshots.
 
     device_group is not carried in the bundle: it is fully derivable from `groups_raw`, which
-    is delta-stored and therefore a fraction of the size. Resolved through `device_state` rather
-    than the raw rows, because a device that did not change carries no row of its own.
+    is delta-stored and therefore a fraction of the size. Resolved rather than read from the raw
+    rows, because a device that did not change in a snapshot carries no row of its own there.
     """
     written = 0
     for position, snapshot_id in enumerate(snapshot_ids, start=1):
         if on_step:
             on_step(position)
+        # Once per imported snapshot, so naming the view here made an import pay a full scan of
+        # all history per snapshot — the cost that grows fastest as a database fills up.
         rows = conn.execute(
-            "SELECT imei, groups_raw FROM device_state "
-            "WHERE snapshot_id = ? AND groups_raw IS NOT NULL", (snapshot_id,)).fetchall()
+            resolve.select(("imei", "groups_raw"), with_snapshot_id=False, with_seen_age=False)
+            + " AND d.groups_raw IS NOT NULL", (snapshot_id,)).fetchall()
         batch = [(snapshot_id, row["imei"], name)
                  for row in rows for name in normalize.split_groups(row["groups_raw"])]
         if batch:
@@ -481,6 +522,11 @@ def _finish_merge(conn: sqlite3.Connection, bundle_start: str | None,
                                 (bundle_start,)).fetchone()["id"]
     job.begin("Removing duplicate rows")
     compacted = retention.compact(conn, first_id)
+
+    # Snapshots have been renumbered and rows moved between them, and the newest snapshot may
+    # now be one that arrived in the bundle. Nothing about the resolved copy can be trusted
+    # across that, so it is rebuilt rather than advanced.
+    current.refresh_latest(conn)
     conn.commit()
 
     ids: list[int] = []

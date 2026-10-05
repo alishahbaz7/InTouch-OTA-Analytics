@@ -4,7 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}OTA Analytics{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  {# Versioned so a stylesheet change actually reaches the browser. Without it the file is
+     cached under a URL that never varies, and a restyled page keeps rendering with the old
+     rules — which looks exactly like the new CSS being broken. #}
+  <link rel="stylesheet" href="/static/app.css?v={{ build.version }}">
   <script>
   // Applied before the stylesheet paints, so a reader who chose light does not get a flash of
   // dark on every page load. Inline and tiny for that reason — an external file would arrive

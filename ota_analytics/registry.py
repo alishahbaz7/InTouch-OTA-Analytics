@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import config
+from . import config, resolve
 
 # Fields whose change is a fact worth keeping forever.
 #
@@ -51,10 +51,11 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
     # made replaying 37 snapshots take nearly nine minutes and put the same cost on every
     # ordinary fetch. Resolving it once into a temp table leaves fourteen scans of a plain
     # 35,000-row table instead.
-    conn.execute("DROP TABLE IF EXISTS _state")
-    conn.execute("CREATE TEMP TABLE _state AS SELECT * FROM device_state WHERE snapshot_id = ?",
-                 (snapshot_id,))
-    conn.execute("CREATE UNIQUE INDEX ix_state_imei ON _state(imei)")
+    #
+    # Built through `resolve.materialize`, not the view: resolving one snapshot the view's way
+    # scans the whole of device_snapshot, so this single build was 4-18s on the live database
+    # and is now ~1.3s. Same rows, different plan — see resolve.py.
+    resolve.materialize(conn, "_state", snapshot_id, indexes=("imei",))
 
     # 1. Record every tracked value that differs from what we currently hold. Devices we have
     #    never seen produce no rows here — their arrival is the 'new device' case below.
@@ -277,53 +278,209 @@ def fallback_segments(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     }
 
 
-def stalled_devices(conn: sqlite3.Connection, min_snapshots: int | None = None) -> list[dict]:
-    """Devices carrying a pending task across several snapshots with no firmware change.
+def stalled_devices(conn: sqlite3.Connection, min_hours: float | None = None,
+                    limit: int = 500) -> list[dict]:
+    """Devices whose task has been pending a long time with no firmware change since.
 
-    Derived from the snapshots themselves: "still pending and nothing changed" is a non-event,
-    and storing a row per device per pair to represent it cost more than the rest of the
-    database combined.
+    An inference, not a platform-reported state: the platform records no task history, so
+    "pending and not moving" has to be read off what we have watched happen.
 
-    An inference, not a platform-reported state — its reliability follows snapshot cadence.
+    Read from the registry rather than from the snapshots. The previous version grouped
+    `device_state` across *every* snapshot, which resolved 245 × 35,848 rows to answer a
+    question about the present: 118 seconds, and growing by another fetch every 15 minutes. The
+    change log already records when each device became pending and when its firmware last moved,
+    so the same question costs one pass over 35,000 registry rows.
+
+    `pending_since` falls back to when the device was first seen: a device that has been pending
+    since before this tool started watching has no recorded transition into that state, and
+    dropping it would hide exactly the longest-standing cases.
     """
-    n = min_snapshots or config.STALL_SNAPSHOTS
+    hours = config.STALL_HOURS if min_hours is None else min_hours
     rows = conn.execute("""
-        SELECT d.imei,
-               MAX(d.device_model)  AS device_model,
-               COUNT(*)             AS pending_streak,
-               MAX(d.firmware)      AS firmware,
-               MAX(d.queue)         AS pending_tasks,
-               MAX(s.snapshot_at)   AS last_seen_pending
-        FROM device_state d
-        JOIN snapshot s ON s.id = d.snapshot_id
-        WHERE d.queue_state = 'pending'
-        GROUP BY d.imei
-        HAVING COUNT(*) >= ? AND COUNT(DISTINCT d.firmware) = 1
-        ORDER BY pending_streak DESC, pending_tasks DESC
-    """, (n,)).fetchall()
+        WITH became_pending AS (
+          -- Grouped once over the change log rather than looked up per device. As a correlated
+          -- subquery this was 40s+: SQLite prefers ix_change_field for the equality on `field`,
+          -- so every one of the ~8,000 pending devices scanned all 51,178 queue_state rows to
+          -- find its own. One pass and a join is immune to that choice.
+          SELECT imei, MAX(changed_at) AS at
+            FROM device_change
+           WHERE field = 'queue_state' AND new_value = 'pending'
+           GROUP BY imei
+        ),
+        pending AS (
+          SELECT d.imei, d.device_model, d.firmware, d.queue AS pending_tasks,
+                 d.last_checked_at AS last_seen_pending, d.last_fw_change_at,
+                 COALESCE(b.at, d.first_seen_at) AS pending_since
+          FROM device d
+          LEFT JOIN became_pending b ON b.imei = d.imei
+          WHERE d.queue_state = 'pending'
+        )
+        SELECT imei, device_model, firmware, pending_tasks, last_seen_pending, pending_since,
+               (julianday(last_seen_pending) - julianday(pending_since)) * 24.0 AS pending_hours
+          FROM pending
+         WHERE (julianday(last_seen_pending) - julianday(pending_since)) * 24.0 >= ?
+           -- No firmware movement since it went pending. A device that did move has not
+           -- stalled; it updated and was given something else to do.
+           AND (last_fw_change_at IS NULL OR last_fw_change_at <= pending_since)
+         ORDER BY pending_hours DESC, pending_tasks DESC
+         LIMIT ?
+    """, (hours, limit)).fetchall()
     return [dict(r) for r in rows]
 
 
-def fallbacks(conn: sqlite3.Connection, limit: int = 300) -> list[dict]:
-    """Devices that returned to their BASE firmware — the platform owner's definition.
+# One occurrence of a device returning to its BASE firmware — the platform owner's definition.
+# Written once and shared by every query below, because a list, a count and a "how many times"
+# that disagreed about what a fallback is would be worse than any of them being missing.
+#
+# Read straight from the change log, so every occurrence is caught regardless of how many
+# fetches happened around it. A device that fell back and was pushed forward again still shows
+# the fallback, which comparing two snapshots would miss.
+FALLBACK_FROM = """
+    FROM device_change c
+    JOIN device d ON d.imei = c.imei
+"""
 
-    Read straight from the change log, so every occurrence is caught regardless of how many
-    fetches happened around it. A device that fell back and was pushed forward again still
-    shows the fallback, which comparing two snapshots would miss.
+FALLBACK_WHERE = """
+    c.field = 'firmware'
+      AND d.base_firmware IS NOT NULL
+      AND c.new_value = d.base_firmware
+      AND c.old_value <> d.base_firmware
+"""
+
+# Kept as one string for the callers that need nothing between the FROM and the WHERE.
+FALLBACK_EVENT = FALLBACK_FROM + " WHERE " + FALLBACK_WHERE
+
+
+# How many times each device has fallen back, ever. Joined rather than counted per row, so the
+# same number reaches the list, the repeat table and the download without three definitions of
+# it — and so filtering on it is possible at all, which a window function in the SELECT is not.
+FALLBACK_COUNTS = (f"SELECT c.imei AS imei, COUNT(*) AS times {FALLBACK_EVENT} "
+                   f"GROUP BY c.imei")
+
+# What the fallback list can be ordered by. Whitelisted: a query parameter must never reach an
+# ORDER BY as raw SQL.
+FALLBACK_SORTS = {
+    "when": "c.changed_at DESC, c.imei",
+    "times": "fb.times DESC, c.changed_at DESC",
+    "model": "d.device_model, c.changed_at DESC",
+    "imei": "c.imei, c.changed_at DESC",
+}
+DEFAULT_FALLBACK_SORT = "when"
+
+
+def fallbacks(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
+              sort: str = DEFAULT_FALLBACK_SORT, min_times: int = 1,
+              model: str | None = None) -> list[dict]:
+    """Fallback occurrences, one row per occurrence.
+
+    `times` is how many times *that device* has fallen back in all of recorded history, not just
+    within this page — a device on its sixth fallback is a different problem from one on its
+    first, and the row has to say so wherever it is read.
+
+    `min_times=2` narrows to devices that have done it more than once: the same population the
+    repeat table summarizes, seen as individual occurrences rather than totals.
     """
-    rows = conn.execute("""
+    order = FALLBACK_SORTS.get(sort, FALLBACK_SORTS[DEFAULT_FALLBACK_SORT])
+    extra, params = "", []
+    if min_times > 1:
+        extra += " AND fb.times >= ?"
+        params.append(min_times)
+    if model:
+        extra += " AND d.device_model = ?"
+        params.append(model)
+
+    rows = conn.execute(f"""
         SELECT c.imei, c.changed_at, c.old_value AS from_firmware, c.new_value AS to_firmware,
                d.device_model, d.base_firmware, d.update_firmware, d.firmware AS current_firmware,
-               d.hw_ver, d.status, d.queue_state, d.groups_raw, d.last_checked_at
-        FROM device_change c
-        JOIN device d ON d.imei = c.imei
-        WHERE c.field = 'firmware'
-          AND d.base_firmware IS NOT NULL
-          AND c.new_value = d.base_firmware
-          AND c.old_value <> d.base_firmware
-        ORDER BY c.changed_at DESC
-        LIMIT ?
-    """, (limit,)).fetchall()
+               d.hw_ver, d.status, d.queue_state, d.groups_raw, d.last_checked_at,
+               fb.times AS times
+        {FALLBACK_FROM}
+        JOIN ({FALLBACK_COUNTS}) fb ON fb.imei = c.imei
+        WHERE {FALLBACK_WHERE}{extra}
+        ORDER BY {order}
+        LIMIT ? OFFSET ?
+    """, (*params, limit, offset)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fallback_count(conn: sqlite3.Connection, min_times: int = 1,
+                   model: str | None = None) -> int:
+    """How many occurrences the current filter selects — what the pager has to count.
+
+    Built from the same clauses `fallbacks()` uses, so the pager can never disagree with the
+    number of rows the list actually returns.
+    """
+    extra, params = "", []
+    if min_times > 1:
+        extra += " AND fb.times >= ?"
+        params.append(min_times)
+    if model:
+        extra += " AND d.device_model = ?"
+        params.append(model)
+
+    return conn.execute(f"""
+        SELECT COUNT(*)
+        {FALLBACK_FROM}
+        JOIN ({FALLBACK_COUNTS}) fb ON fb.imei = c.imei
+        WHERE {FALLBACK_WHERE}{extra}
+    """, params).fetchone()[0]
+
+
+def fallback_models(conn: sqlite3.Connection) -> list[dict]:
+    """Models that have ever fallen back, for the filter — a pick-list beats typing a name."""
+    rows = conn.execute(f"""
+        SELECT COALESCE(d.device_model, '(unknown)') AS label, COUNT(*) AS events
+        {FALLBACK_EVENT}
+        GROUP BY d.device_model ORDER BY events DESC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fallback_totals(conn: sqlite3.Connection) -> dict:
+    """How many fallbacks, how many devices, and how many of those are repeats.
+
+    The repeat count is the number worth acting on. A fleet-wide total of 186 reads as noise
+    spread thinly; 23 devices doing it more than once is a shortlist.
+    """
+    row = conn.execute(f"""
+        SELECT COUNT(*) AS events, COUNT(DISTINCT c.imei) AS devices
+        {FALLBACK_EVENT}
+    """).fetchone()
+    repeats = conn.execute(f"""
+        SELECT COUNT(*) AS n FROM (
+          SELECT c.imei {FALLBACK_EVENT} GROUP BY c.imei HAVING COUNT(*) > 1
+        )
+    """).fetchone()
+    return {"events": row["events"] or 0, "devices": row["devices"] or 0,
+            "repeat_devices": repeats["n"] or 0}
+
+
+def fallback_repeats(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
+                     min_times: int = 2) -> list[dict]:
+    """Devices that have fallen back more than once, worst first.
+
+    A chronological list of occurrences hides this completely: a device that reverts every few
+    days appears as a handful of unrelated rows scattered down the page. Counting per device is
+    what turns the same data into a shortlist of hardware to actually go and look at.
+    """
+    rows = conn.execute(f"""
+        SELECT c.imei,
+               COUNT(*)          AS times,
+               MIN(c.changed_at) AS first_fallback,
+               MAX(c.changed_at) AS last_fallback,
+               MAX(d.device_model)    AS device_model,
+               MAX(d.base_firmware)   AS base_firmware,
+               MAX(d.firmware)        AS current_firmware,
+               MAX(d.update_firmware) AS update_firmware,
+               MAX(d.hw_ver)          AS hw_ver,
+               MAX(d.status)          AS status,
+               MAX(d.groups_raw)      AS groups_raw
+        {FALLBACK_EVENT}
+        GROUP BY c.imei
+        HAVING COUNT(*) >= ?
+        ORDER BY times DESC, last_fallback DESC
+        LIMIT ? OFFSET ?
+    """, (min_times, limit, offset)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -433,9 +590,14 @@ def firmware_moves(conn: sqlite3.Connection, since: str | None = None,
                     THEN 'upgrade' ELSE 'downgrade' END AS direction,
                CASE WHEN d.base_firmware IS NOT NULL AND c.new_value = d.base_firmware
                     THEN 1 ELSE 0 END AS is_fallback,
-               CASE WHEN d.update_firmware = c.new_value THEN 1 ELSE 0 END AS matched_target
+               CASE WHEN d.update_firmware = c.new_value THEN 1 ELSE 0 END AS matched_target,
+               -- How many times this device has EVER fallen back, from the shared definition.
+               -- Carried here so the download says it too: reading a fallback in a file without
+               -- knowing it is the device's sixth is the same blind spot the page had.
+               COALESCE(fb.times, 0) AS fallback_times
         FROM device_change c
         JOIN device d ON d.imei = c.imei
+        LEFT JOIN ({FALLBACK_COUNTS}) fb ON fb.imei = c.imei
         WHERE c.field = 'firmware' AND {window}
         -- id breaks the tie: several moves share a changed_at, since a snapshot stamps every
         -- change it observes with the same time. Without it the same row can appear on two

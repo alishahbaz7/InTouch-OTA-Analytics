@@ -13,12 +13,19 @@ consequences, and every operation in this module exists because of one of them:
 `compact` is the inverse of `densify` and squeezes the duplicates back out afterwards.
 
 
-A snapshot costs roughly one row per device, so a 15-minute cadence over 35,000 devices is
-~3.4 M device rows a day. Almost all of it is identical to the row before it. The fleet does
-not need that resolution once it is a week old — but it must never lose a snapshot where
-something actually changed, or the change history is destroyed.
+A snapshot costs roughly one row per device, and the fleet does not need fetch-by-fetch
+resolution once it is a fortnight old. The policy is therefore to thin by age: keep everything
+recent, then one per hour, one per day, one per week.
 
-The policy is therefore: thin by age, but always keep snapshots that recorded a change.
+**Thinning costs time resolution, never facts.** A pruned snapshot's rows move onto the next
+surviving one and its change-log entries move with them, so the only thing lost is the knowledge
+of which of two adjacent fetches a value arrived in — `changed_at` still records when the move
+really happened. That is exactly what "one per day" is asking to give up.
+
+This used also to refuse to prune any snapshot that recorded a change, which sounds careful and
+was in fact a bug: at an hourly cadence a fetch of 35,848 devices always contains *some* change,
+268 of 272 snapshots qualified, and retention therefore removed nothing on any run while the
+database grew ~45 MB a day. See `snapshots_with_changes`.
 """
 
 from __future__ import annotations
@@ -42,7 +49,7 @@ class PruneResult:
     examined: int = 0
     kept: int = 0
     removed: int = 0
-    kept_for_change: int = 0
+    recorded_a_change: int = 0
     device_rows_removed: int = 0
     bytes_before: int = 0
     bytes_after: int = 0
@@ -75,11 +82,24 @@ def _bucket_key(taken: datetime, hours: int) -> tuple:
 
 
 def snapshots_with_changes(conn: sqlite3.Connection) -> set[int]:
-    """Snapshots in which something actually changed — never prune these.
+    """Snapshots in which something actually changed. Reported, no longer protected.
 
-    Read from the change log, which is now the single record of movement. Losing one of these
-    would erase the evidence of an upgrade, rollback or fallback, which is the whole reason the
-    history exists.
+    This used to be a veto: a snapshot that recorded any change was never pruned. At a daily
+    export that kept the handful of interesting days. At the hourly cadence the tool actually
+    runs at, **268 of 272 snapshots qualified** — a fetch of 35,848 devices essentially always
+    contains *some* change — so retention removed nothing at all, on every run, while the
+    database grew by ~45 MB a day and every resolution got slower with it. A rule that protects
+    99% of the rows is not a retention policy.
+
+    It is also protecting against a loss that cannot happen. `device_change` has no foreign key
+    to `snapshot` (see schema.sql) and nothing outside `registry.apply_snapshot` reads its
+    `snapshot_id` — every reader works from `changed_at`, which records the real time of the
+    move. So the change log survives pruning whatever happens to the snapshot row, and
+    `_carry_state_forward` now repoints it as well, to keep the two consistent.
+
+    What thinning actually costs is stated in `_carry_state_forward`: not facts, but the
+    knowledge of exactly which of two adjacent fetches a value arrived in. That is precisely
+    what "one per hour" is asking to give up.
     """
     rows = conn.execute(
         "SELECT DISTINCT snapshot_id AS id FROM device_change "
@@ -128,6 +148,13 @@ def _carry_state_forward(conn: sqlite3.Connection, remove: list[int]) -> None:
         conn.execute("UPDATE device_snapshot SET snapshot_id = ? WHERE snapshot_id = ?",
                      (survivor["id"], snapshot_id))
 
+        # The change log moves with them. It has no foreign key to `snapshot`, so its rows would
+        # survive either way — but pointing at a snapshot id that no longer exists is the kind
+        # of quiet inconsistency that later reads as data loss. `changed_at` is untouched, so
+        # when the move actually happened is preserved exactly; only its filing moves.
+        conn.execute("UPDATE device_change SET snapshot_id = ? WHERE snapshot_id = ?",
+                     (survivor["id"], snapshot_id))
+
 
 def plan(conn: sqlite3.Connection, *, now: datetime | None = None, tiers=None) -> tuple[list, list]:
     """Decide which snapshots to keep and which to drop. Returns (keep, remove) id lists."""
@@ -139,7 +166,6 @@ def plan(conn: sqlite3.Connection, *, now: datetime | None = None, tiers=None) -
     if len(rows) <= 1:
         return [r["id"] for r in rows], []
 
-    protected = snapshots_with_changes(conn)
     newest_id = rows[-1]["id"]
     oldest_id = rows[0]["id"]
 
@@ -160,9 +186,11 @@ def plan(conn: sqlite3.Connection, *, now: datetime | None = None, tiers=None) -
 
         bucket = _bucket_key(taken, hours)
 
-        # A snapshot kept for another reason still occupies its bucket — otherwise the bucket
-        # would keep a second copy on top of it and thinning would quietly under-deliver.
-        if row["id"] in (newest_id, oldest_id) or row["id"] in protected:
+        # The ends of the history are kept whatever the tier says: the newest is what every
+        # page reads, and the oldest is where coverage starts. A snapshot kept for that reason
+        # still occupies its bucket — otherwise the bucket would keep a second copy on top of it
+        # and thinning would quietly under-deliver.
+        if row["id"] in (newest_id, oldest_id):
             seen_buckets.add(bucket)
             keep.append(row["id"])
             continue
@@ -176,19 +204,47 @@ def plan(conn: sqlite3.Connection, *, now: datetime | None = None, tiers=None) -
     return keep, remove
 
 
+# How many snapshots one automatic prune will take, when the caller asks for a bounded run.
+#
+# Retention runs inside a fetch, holding the write lock, so the question is not how long the
+# whole backlog takes but how long any single fetch may be made to wait. Measured on the live
+# database at roughly a third of a second per snapshot: 20 is about seven seconds, and a backlog
+# clears over the next few fetches instead of stalling one of them.
+#
+# It matters because the first run after upgrading has a month of never-thinned history to get
+# through — 177 snapshots and 61 seconds in one go, which is precisely the kind of "it hung
+# again" that this release exists to remove.
+AUTO_PRUNE_LIMIT = 20
+
+
 def prune(conn: sqlite3.Connection, *, dry_run: bool = False, now: datetime | None = None,
-          tiers=None, vacuum: bool = True) -> PruneResult:
-    """Apply the retention policy. Child rows go with the snapshot via ON DELETE CASCADE."""
+          tiers=None, vacuum: bool = True, limit: int | None = None) -> PruneResult:
+    """Apply the retention policy. Child rows go with the snapshot via ON DELETE CASCADE.
+
+    `limit` caps how many snapshots one run removes, oldest first. What is left over is simply
+    still prunable next time — the policy is a description of the shape history should have, not
+    a sequence of steps, so stopping part-way is a valid state rather than a half-finished one.
+    """
     from pathlib import Path
 
-    from . import config
+    from . import config, current
 
     keep, remove = plan(conn, now=now, tiers=tiers)
-    protected = snapshots_with_changes(conn)
+    if limit is not None and len(remove) > limit:
+        # Oldest first: `plan` walks snapshots in time order, so the head of the list is the
+        # history that has been waiting longest to be thinned.
+        remove, deferred = remove[:limit], remove[limit:]
+        keep = keep + deferred
+
+    # Once, not once per kept snapshot: as a call inside the comprehension below this ran 196
+    # times in a single prune and scanned the whole change log each time.
+    with_changes = snapshots_with_changes(conn)
 
     result = PruneResult(
         examined=len(keep) + len(remove), kept=len(keep), removed=len(remove),
-        kept_for_change=len([i for i in keep if i in protected]),
+        # Reported so the effect of the policy is visible, not because these are spared. They
+        # used to be, and that is why nothing was ever thinned — see snapshots_with_changes.
+        recorded_a_change=len([i for i in keep if i in with_changes]),
     )
 
     db_path = Path(config.DB_PATH)
@@ -212,6 +268,11 @@ def prune(conn: sqlite3.Connection, *, dry_run: bool = False, now: datetime | No
     for batch_start in range(0, len(remove), 400):
         batch = remove[batch_start:batch_start + 400]
         conn.execute(f"DELETE FROM snapshot WHERE id IN ({','.join('?' * len(batch))})", batch)
+
+    # Rows have just moved between snapshots, so the resolved copy of the newest one can no
+    # longer be advanced from what it holds — the rows that would be applied are not the ones
+    # that follow it any more. Re-resolving is seconds, and this is already a batch operation.
+    current.refresh_latest(conn)
     conn.commit()
 
     if vacuum:
