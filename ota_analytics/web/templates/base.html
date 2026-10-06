@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}OTA Analytics{% endblock %}</title>
+  <title>{% if build.channel == 'dev' %}DEV · {% endif %}{% block title %}OTA Analytics{% endblock %}</title>
   {# Versioned so a stylesheet change actually reaches the browser. Without it the file is
      cached under a URL that never varies, and a restyled page keeps rendering with the old
      rules — which looks exactly like the new CSS being broken. #}
@@ -18,27 +18,91 @@
       if (choice === 'light' || choice === 'dark') {
         document.documentElement.setAttribute('data-theme', choice);
       }
+      // The sidebar's collapsed state, for the same reason: applied after paint, every page
+      // load would open wide and then snap shut.
+      if (localStorage.getItem('ota-nav') === 'rail') {
+        document.documentElement.setAttribute('data-nav', 'rail');
+      }
+      // Configure's details panel: folded unless it was left open.
+      if (localStorage.getItem('ota-cota-side') === 'open') {
+        document.documentElement.setAttribute('data-cota-side', 'open');
+      }
     } catch (e) { /* private browsing blocks localStorage; the system theme still applies */ }
   })();
   </script>
 </head>
 <body>
-<header>
-  <div class="brand">InTouch <span>OTA Analytics</span>
-    <a class="version" href="/api/version" title="Version {{ build.version }} ·
+{# Which module and page this is, from one definition (nav.py) — so a page added later lands in
+   the right module by its URL alone, and the rail and the top bar cannot disagree. #}
+{%- set nav_now = nav_state(request.url.path) -%}
+{%- set module = nav_now.module -%}
+<div class="shell">
+<aside class="rail" aria-label="Modules">
+  <div class="rail-brand">
+    <span class="rail-logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{{ nav_icons.mark | safe }}</svg></span>
+    <div class="rail-brand-text">
+      <div class="rail-title">InTouch <span>Utility</span></div>
+      <div class="rail-sub">Over-the-air workbench</div>
+      <div class="rail-meta">
+        <a class="version" href="/api/version" title="Version {{ build.version }} ·
 schema {{ build.schema_version }} · released {{ build.released }} · Python {{ build.python }}"
-    >v{{ build.version }}</a>
+        >v{{ build.version }}</a>
+        {# The release and a source copy run side by side; without this the two windows are
+           identical and a change gets tested in the wrong one. #}
+        {% if build.channel == 'dev' %}<span class="channel-dev"
+          title="Running from source on port {{ request.url.port }} — the release is a separate copy with its own data">DEV</span>{% endif %}
+      </div>
+    </div>
   </div>
-  {# Reachability, Groups and Quality are still served — they are simply not in the nav.
-     Restore any of them by adding a line here. #}
-  <nav>
-    <a href="/{{ qs() }}" class="{{ 'on' if request.url.path == '/' }}">Overview</a>
-    <a href="/changes{{ qs() }}" class="{{ 'on' if request.url.path == '/changes' }}">Changes</a>
-    <a href="/devices{{ qs() }}" class="{{ 'on' if request.url.path == '/devices' }}">Devices</a>
-    <a href="/pending{{ qs() }}" class="{{ 'on' if request.url.path == '/pending' }}">Pending</a>
-    <a href="/firmware{{ qs() }}" class="{{ 'on' if request.url.path == '/firmware' }}">Firmware</a>
+
+  {# One group per way a device is changed over the air. Reachability, Groups and Quality are
+     still served under Web FOTA — they are simply not listed. Add them in nav.py. #}
+  <nav class="rail-nav">
+    {% for m in nav_modules %}
+    <div class="rail-group {{ 'is-current' if m.key == module }}">{{ m.label }}</div>
+    {% for it in m.items if it.in_rail %}
+    {%- set on = nav_now.active == it -%}
+    <a href="{{ it.href }}{{ qs() if m.key == 'fota' and it.href != '/update' }}"
+       class="rail-item {{ 'on' if on }} {{ 'is-soon' if it.pill == 'Soon' }}"
+       title="{{ m.label }} · {{ it.label }} — {{ it.desc }}"
+       {%- if on %} aria-current="page"{% endif %}>
+      <svg class="rail-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">{{ nav_icons[it.icon] | safe }}</svg>
+      <span class="rail-label">{{ it.label }}</span>
+      {% if it.pill %}<span class="rail-pill {{ 'pill-soon' if it.pill == 'Soon' }}">{{ it.pill }}</span>{% endif %}
+    </a>
+    {% endfor %}
+    {% endfor %}
   </nav>
+
+  <div class="rail-legend">
+    <span><b>Soon</b> · listed, not built in this release</span>
+    <span>Each group is one way of changing a device over the air</span>
+  </div>
+</aside>
+
+{# A page can ask to fill the window exactly (`fit-window`): Configure does, so nothing on it
+   moves with the page — only its conversation scrolls. #}
+<div class="page {% block page_class %}{% endblock %}">
+<header class="topbar">
+  <button type="button" class="icon-btn" id="nav-toggle" aria-label="Collapse or expand the sidebar"
+          title="Collapse the sidebar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">{{ nav_icons.menu | safe }}</svg>
+  </button>
+  <div class="topbar-titles">
+    {% if nav_now.active %}
+    <h1>{{ nav_now.active.label }}</h1>
+    <div class="view-desc"><strong>{{ nav_now.module_label }}</strong> · {{ nav_now.active.desc }}</div>
+    {% else %}
+    {# Pages served but not listed in the rail take their heading from their own title. #}
+    <h1>{{ self.title().split(' — ')[0] }}</h1>
+    <div class="view-desc"><strong>{{ nav_now.module_label }}</strong></div>
+    {% endif %}
+  </div>
   <div class="header-right">
+    {% if module == 'fota' %}
     {# Connection + agent status. Kept in the header so it is answerable at a glance from any
        page: am I signed in, and when does data next refresh? #}
     <a class="status-chip status-{{ auth.level }}" href="/update" title="{{ auth.detail }}">
@@ -71,12 +135,30 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
       <span class="status-text">{{ error_summary.last_24h }} error{{ 's' if error_summary.last_24h != 1 }}</span>
     </a>
     {% endif %}
+    {% elif module == 'intouch_cota' %}
+    {# The COTA counterpart of FOTA's connection chip: is there a token to send with? #}
+    {# The chip is the way in to Sign in — no separate button: it already says the state and
+       goes where it is changed. Marked while on that page. #}
+    <a class="status-chip status-{{ cota_status.level }} {{ 'is-current' if nav_now.active and nav_now.active.href == '/cota/signin' }}"
+       href="/cota/signin" id="cota-signin-chip" title="{{ cota_status.title }}">
+      <span class="dot"></span><span class="status-text">{{ cota_status.label }}</span>
+    </a>
+    {% endif %}
+    {% if code_stale %}
+    {# Dev copy only: the code on disk is newer than what this process is running. #}
+    <span class="status-chip status-warn" id="code-stale"
+          title="Python files changed since this copy started. Templates reload by themselves; code does not — restart (F5) to load it.">
+      <span class="dot"></span><span class="status-text">Restart to load new code</span></span>
+    {% endif %}
     <button type="button" class="theme-btn" id="theme-btn"
             title="Switch between following the system theme, light and dark">
       <span class="theme-icon" id="theme-icon">◐</span><span id="theme-label">Auto</span>
     </button>
+    {# Each module's primary action sits top-right: FOTA's data refresh, COTA's sign-in. #}
+    {% if module == 'fota' %}
     <a class="btn-update {{ 'on' if request.url.path.startswith('/update') }}"
        href="/update">Update data</a>
+    {% endif %}
   </div>
 </header>
 
@@ -91,6 +173,7 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
 </main>
 
 <footer>
+  {% if module == 'fota' %}
   {% if current %}
     {{ current.row_count | comma }} devices &middot; {{ current.snapshot_at }}
     &middot; <span class="dim">{{ current.source_file }}</span>
@@ -100,6 +183,7 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
   {% endif %}
   {% if agent.last_run %}
     <span>Last auto-fetch {{ agent.last_run }} — {{ agent.last_status }}</span>
+  {% endif %}
   {% endif %}
   {# The reconciliation line. Two installs report the same numbers if and only if these match,
      so it is on every page rather than buried on a settings screen. #}
@@ -114,6 +198,8 @@ Compare this with a colleague before comparing numbers.">
   <span class="dim">v{{ build.version }} ({{ build.codename }}) · schema {{ build.schema_version }}
     · Python {{ build.python }}</span>
 </footer>
+</div>{# .page #}
+</div>{# .shell #}
 
 <script>
 // Keeps the agent chip honest between page loads: counts down to the next fetch and refreshes
@@ -175,7 +261,7 @@ Compare this with a colleague before comparing numbers.">
 // above it, which changes when the window is narrow enough for the header to wrap. A
 // hard-coded offset would leave the column names either overlapped or floating.
 (function () {
-  var header = document.querySelector('header');
+  var header = document.querySelector('header.topbar');
   if (!header) return;
 
   function measure() {
@@ -196,6 +282,29 @@ Compare this with a colleague before comparing numbers.">
   // Fonts land after first paint and change the header height, so measure again once the
   // page has settled.
   window.addEventListener('load', measure);
+})();
+
+// Sidebar: open, or folded to an icon rail. Remembered per browser; applied in <head> so the
+// page does not open wide and then snap shut. On a narrow window the rail is forced by CSS and
+// this button has nothing to undo, so it is hidden there.
+(function () {
+  var button = document.getElementById('nav-toggle');
+  if (!button) return;
+  var root = document.documentElement;
+
+  function label() {
+    button.title = root.getAttribute('data-nav') === 'rail' ? 'Expand the sidebar'
+                                                           : 'Collapse the sidebar';
+  }
+
+  label();
+  button.addEventListener('click', function () {
+    var rail = root.getAttribute('data-nav') !== 'rail';
+    if (rail) { root.setAttribute('data-nav', 'rail'); } else { root.removeAttribute('data-nav'); }
+    try { localStorage.setItem('ota-nav', rail ? 'rail' : 'open'); } catch (e) { /* not kept */ }
+    label();
+    window.dispatchEvent(new Event('resize'));   // sticky offsets depend on the header height
+  });
 })();
 
 // Theme switch: follow the system, or override it. Three states rather than two, because

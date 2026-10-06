@@ -1,0 +1,95 @@
+{# A job's live state: progress, the command × outcome grid, and its devices. Rendered with the
+   page and again by /cota/jobs/<id>/status while the job runs. #}
+{%- set r = job.results -%}
+{% if job.state == 'paused' and job.pause_reason %}
+<div class="notice notice-warn">{{ job.pause_reason }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="job-progress-head">
+    <strong>{{ job.percent }}%</strong>
+    <span class="hint">{{ job.finished | comma }} of {{ job.total | comma }} device commands finished</span>
+    <span class="hint job-calls">{{ job.send_calls | comma }} send calls · {{ job.poll_calls | comma }} checks
+      · batch {{ job.batch_size }} · {{ job.rate_per_sec }} calls/s</span>
+  </div>
+  <div class="job-track"><div class="job-fill" style="width: {{ job.percent }}%"></div></div>
+  <div class="job-counts">
+    <span class="count-pill answered-count">Answered <b>{{ r.get('done', 0) | comma }}</b></span>
+    <span class="count-pill waiting-count">Waiting for devices <b>{{ job.waiting | comma }}</b></span>
+    <span class="count-pill failed-count">Failed <b>{{ r.get('failed', 0) | comma }}</b></span>
+    <span class="count-pill">Expired <b>{{ r.get('expired', 0) | comma }}</b></span>
+    {#- A sent command is still 'queued' as a result until it is judged; it is counted once,
+        under Waiting, not again here. -#}
+    <span class="count-pill">Not sent yet <b>{{ (r.get('queued', 0) - job.waiting) | comma }}</b></span>
+    {% if job.canary_size and job.active_wave == 0 %}<span class="count-pill waiting-count">Canary first — {{ job.canary_size }} device{{ '' if job.canary_size == 1 else 's' }}</span>{% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>By command</h2>
+  <table class="job-grid">
+    <thead><tr><th>#</th><th>Command</th><th class="n">Answered</th><th class="n">In flight</th>
+      <th class="n">Failed</th><th class="n">Expired</th><th class="n">Skipped</th>
+      <th class="n">Not sent yet</th></tr></thead>
+    <tbody>
+      {% for g in grid %}
+      <tr>
+        <td class="dim">{{ g.step + 1 }}</td>
+        <td><strong>{{ g.name }}</strong> <span class="mono dim small">{{ g.value[:16] }}{% if g.value | length > 16 %}…{% endif %}</span></td>
+        <td class="n ok-text">{{ g.counts.get('done', 0) | comma }}</td>
+        <td class="n">{{ g.in_flight | comma }}</td>
+        <td class="n {{ 'bad-text' if g.counts.get('failed') }}">{{ g.counts.get('failed', 0) | comma }}</td>
+        <td class="n">{{ g.counts.get('expired', 0) | comma }}</td>
+        <td class="n dim">{{ g.counts.get('skipped', 0) | comma }}</td>
+        <td class="n dim">{{ (g.counts.get('queued', 0) - g.in_flight) | comma }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <div class="page-toolbar">
+    <h2 style="margin:0">Devices <span class="hint">{{ devices_total | comma }}</span></h2>
+    <span class="job-filters">
+      {% for key, label in [('', 'All'), ('waiting', 'Waiting'), ('ready', 'Up next'), ('done', 'Finished'),
+                            ('failed', 'With a failure'), ('expired', 'Expired')] %}
+      <a href="/cota/jobs/{{ job.id }}?state={{ key }}&q={{ q | urlencode }}" class="{{ 'on' if state == key }}">{{ label }}</a>
+      {% endfor %}
+    </span>
+    <form method="get" action="/cota/jobs/{{ job.id }}" class="inline-search">
+      <input type="hidden" name="state" value="{{ state }}">
+      <input type="text" name="q" value="{{ q }}" placeholder="Device id" aria-label="Search devices">
+      <button type="submit">Search</button>
+    </form>
+  </div>
+  {% if devices %}
+  <table>
+    <thead><tr><th class="n">Device ID</th><th>IMEI</th><th>State</th><th>Now at</th>
+      <th class="n">Attempt</th><th class="n">Answered</th><th class="n">Failed</th><th></th></tr></thead>
+    <tbody>
+      {% for dv in devices %}
+      <tr>
+        <td class="n mono">{{ dv.device_id }}</td>
+        <td class="mono dim">{{ dv.imei or '—' }}</td>
+        <td><span class="pill pill-dev-{{ dv.state }}">{{ {'ready': 'up next', 'waiting': 'waiting', 'done': 'finished', 'expired': 'expired', 'cancelled': 'cancelled'}.get(dv.state, dv.state) }}</span></td>
+        <td>{% if dv.state in ('ready', 'waiting') %}{{ job.names[dv.step] }}{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td class="n">{{ dv.attempt if dv.state in ('ready', 'waiting') and dv.attempt else '—' }}</td>
+        <td class="n">{{ dv.answered }}/{{ job.names | length }}</td>
+        <td class="n {{ 'bad-text' if dv.failed }}">{{ dv.failed }}</td>
+        <td><a href="/cota/console?device={{ dv.device_id }}&type={{ job.device_type }}">Conversation</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if pages > 1 %}
+  <nav class="pager">
+    {% if page > 1 %}<a href="/cota/jobs/{{ job.id }}?state={{ state }}&q={{ q | urlencode }}&page={{ page - 1 }}">&larr; Previous</a>{% endif %}
+    <span>{{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a href="/cota/jobs/{{ job.id }}?state={{ state }}&q={{ q | urlencode }}&page={{ page + 1 }}">Next &rarr;</a>{% endif %}
+  </nav>
+  {% endif %}
+  {% else %}
+  <p class="hint">No devices match.</p>
+  {% endif %}
+</section>

@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 15
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -40,6 +40,11 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "device": {
         "prev_firmware": "TEXT",
         "prev_configuration": "TEXT",
+    },
+    # v12: when a command record stopped appearing in the cloud's answers for its period —
+    # deleted in the portal, most likely. Kept, and shown as such, rather than shown as current.
+    "cota_command": {
+        "missing_since": "TEXT",
     },
     "device_transition": {
         "from_configuration": "TEXT",

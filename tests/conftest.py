@@ -79,6 +79,97 @@ def make_csv(tmp_path: Path):
     return _make
 
 
+# This machine's own databases: the dev copy's beside the repo, and the release's in dist/. A
+# test that forgot to point the database at a temp file opened the dev one and migrated it — so
+# opening either is now a failure, not a quiet write to someone's live history.
+_REPO = Path(__file__).resolve().parent.parent
+_LIVE_DATABASES = {(_REPO / "data" / "ota_analytics.db").resolve(),
+                   (_REPO / "dist" / "InTouchOTA-Analytics" / "data" / "ota_analytics.db").resolve()}
+
+
+@pytest.fixture(autouse=True)
+def isolated_data(tmp_path_factory, monkeypatch):
+    """Every file the app writes under data/ goes to a temp folder for every test — the database,
+    both connection settings, the scheduler's state, the error log and the session key. Seven
+    tests rendered pages without this and were writing to the dev copy's real data."""
+    from ota_analytics import config, cota_connection, errors, scheduler, sources
+
+    data = tmp_path_factory.mktemp("data")
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(config, "DB_PATH", data / "ota_analytics.db")
+    monkeypatch.setattr(config, "EXPORT_DIR", data / "exports")
+    monkeypatch.setattr(config, "REPORT_DIR", data / "reports")
+    monkeypatch.setattr(cota_connection, "SETTINGS_PATH", data / "cota_connection.json")
+    monkeypatch.setattr(errors, "LOG_PATH", data / "errors.log")
+    monkeypatch.setattr(scheduler, "STATE_PATH", data / "scheduler.json")
+    monkeypatch.setattr(sources, "SETTINGS_PATH", data / "connection.json")
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    return data
+
+
+class _MemoryKeyring:
+    """An empty credential store per test, in place of Windows Credential Manager."""
+
+    def __init__(self):
+        self.store = {}
+
+    def set_password(self, service, user, secret):
+        self.store[(service, user)] = secret
+
+    def get_password(self, service, user):
+        return self.store.get((service, user))
+
+    def delete_password(self, service, user):
+        self.store.pop((service, user), None)
+
+
+@pytest.fixture(autouse=True)
+def no_real_network_or_credentials(monkeypatch):
+    """No test reaches the network or the real credential store.
+
+    A runner test once started a real background run, which used the real cloud client and the
+    real stored token — one live request to the desk device. Now every HTTP client a test did not
+    give a fake transport fails before anything leaves the machine, and every test starts with an
+    empty in-memory credential store. Tests that fake the cloud pass their own transport (or
+    patch the client) as before; that still works, because it is checked first.
+    """
+    import httpx
+
+    from ota_analytics import sources
+
+    real_client = httpx.Client
+
+    def refuse(request):
+        raise RuntimeError(f"tests may not reach the network: {request.method} {request.url}")
+
+    def guarded(*args, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(refuse))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", guarded)
+    keyring = _MemoryKeyring()
+    monkeypatch.setattr(sources, "_keyring", lambda: keyring)
+    monkeypatch.delenv("OTA_COTA_TOKEN", raising=False)
+    monkeypatch.delenv("OTA_PLATFORM_PASSWORD", raising=False)
+    return keyring
+
+
+@pytest.fixture(autouse=True)
+def never_the_live_database(isolated_data, monkeypatch):
+    from ota_analytics import config
+
+    real_connect = db.connect
+
+    def guarded(db_path=None, **kwargs):
+        target = Path(db_path or config.DB_PATH).resolve()
+        if target in _LIVE_DATABASES:
+            pytest.fail(f"a test opened the live database {target} — use the `client` or "
+                        "`conn` fixture, which point it at a temp file")
+        return real_connect(db_path, **kwargs)
+
+    monkeypatch.setattr(db, "connect", guarded)
+
+
 @pytest.fixture
 def conn(tmp_path: Path):
     connection = db.connect(tmp_path / "test.db")

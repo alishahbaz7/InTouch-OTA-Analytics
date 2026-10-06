@@ -1,0 +1,18 @@
+{# The portal's "Total Count / Pending Count" for this device, in the console's own words.
+   Rendered with the page and again after every check. #}
+{%- set n = thread.counts -%}
+<span class="count-pill" title="Every command the cloud or this page knows for this device">
+  Total <b>{{ n.total }}</b></span>
+<span class="count-pill waiting-count" title="The cloud holds them; the device has not answered (status 0)">
+  Waiting for device <b>{{ n.waiting }}</b></span>
+<span class="count-pill answered-count" title="The device answered (status 1)">
+  Answered <b>{{ n.answered }}</b></span>
+{%- if n.not_seen %}
+<span class="count-pill" title="Accepted by the cloud, but not yet in its records">
+  Not in the cloud yet <b>{{ n.not_seen }}</b></span>{% endif %}
+{%- if n.gone %}
+<span class="count-pill" title="In the cloud's list once, absent from a later complete answer">
+  No longer in the cloud <b>{{ n.gone }}</b></span>{% endif %}
+{%- if n.failed %}
+<span class="count-pill failed-count" title="The cloud refused the send">
+  Not accepted <b>{{ n.failed }}</b></span>{% endif %}

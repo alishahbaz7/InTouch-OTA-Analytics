@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Job #{{ job.id }} — Intouch COTA{% endblock %}
+
+{% block content %}
+<section class="card job-head-card">
+  <div class="job-title-row">
+    <h2>#{{ job.id }} · {{ job.name }}</h2>
+    <span class="pill pill-job-{{ job.state }}" id="job-state">{{ job.state }}</span>
+    <span class="hint">{{ job.devices | comma }} devices · {{ job.names | join(' → ') }}</span>
+    <span class="job-actions">
+      <form method="post" action="/cota/jobs/{{ job.id }}/control" class="inline-form">
+        {% if job.state == 'running' %}<button type="submit" name="action" value="pause" class="tool-btn">Pause</button>
+        {% elif job.state == 'paused' %}<button type="submit" name="action" value="resume" class="tool-btn">Resume</button>{% endif %}
+        {% if job.state in ('running', 'paused') %}<button type="submit" name="action" value="cancel" class="tool-btn">Cancel</button>{% endif %}
+      </form>
+      <details class="dropdown export">
+        <summary class="tool-btn" title="Every device × command"><svg viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+          aria-hidden="true">{{ nav_icons['download'] | safe }}</svg><span>Export</span></summary>
+        <div class="dropdown-panel">
+          <a class="dropdown-item" href="/cota/jobs/{{ job.id }}/export?format=csv"><span>CSV</span><em>.csv</em></a>
+          {% if job.total <= 200000 %}<a class="dropdown-item" href="/cota/jobs/{{ job.id }}/export?format=xlsx"><span>Excel workbook</span><em>.xlsx</em></a>{% endif %}
+        </div>
+      </details>
+    </span>
+  </div>
+</section>
+
+<div id="job-live" data-job="{{ job.id }}" data-state="{{ job.state }}"
+     data-query="state={{ state }}&q={{ q | urlencode }}&page={{ page }}">
+  {% include "_cota_job_live.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// A running job redraws itself from this install's record every few seconds — the scheduler is
+// the one asking the cloud, so watching costs the cloud nothing.
+(function () {
+  var live = document.getElementById('job-live');
+  if (!live || live.getAttribute('data-state') !== 'running') return;
+  var url = '/cota/jobs/' + live.getAttribute('data-job') + '/status?' + live.getAttribute('data-query');
+  function tick() {
+    fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) return;
+      live.innerHTML = d.html;
+      if (d.state === 'running') { setTimeout(tick, 5000); } else { window.location.reload(); }
+    }).catch(function () { setTimeout(tick, 10000); });
+  }
+  setTimeout(tick, 5000);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+{% block title %}Devices — Intouch COTA{% endblock %}
+
+{% block content %}
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+
+<div class="tiles">
+  <div class="tile">
+    <div class="tile-label">Devices mapped</div>
+    <div class="tile-value">{{ mapped | comma }}</div>
+    <div class="tile-sub">can be addressed by the cloud</div>
+  </div>
+  {% for t in by_type[:5] %}
+  <div class="tile muted-tile">
+    <div class="tile-label">Device type {{ t.device_type }}</div>
+    <div class="tile-value">{{ t.devices | comma }}</div>
+    <div class="tile-sub">one send call per type</div>
+  </div>
+  {% endfor %}
+</div>
+
+{# Send a command: the portal's own request, typed in. Three explicit steps because this writes
+   to real devices — read a pasted payload, preview the exact bodies, then send with the box
+   ticked. Read and Preview touch no network. #}
+{%- set c = cmd or {} -%}
+{%- set vals = c.get('values') or ([''] * 9) -%}
+<section class="card highlight" id="send">
+  <h2>Send a command <span class="hint">the same request the portal makes —
+    <code>saveCOTAConfig</code></span></h2>
+  <form method="post" action="/cota/devices/send#preview" class="stack-form">
+    <div class="send-grid">
+      <div class="send-fields">
+        <div class="field-row">
+          <label>Device model — deviceType
+            <input type="text" name="device_type" inputmode="numeric" class="mono"
+                   value="{{ c.get('device_type', '') }}" placeholder="124">
+          </label>
+          <label>Command type — type
+            <input type="text" name="cmd_type" inputmode="numeric" class="mono"
+                   value="{{ c.get('cmd_type', '') }}" placeholder="36">
+          </label>
+        </div>
+        <label>Device ids — deviceList
+          <textarea name="device_ids" rows="2" class="mono" spellcheck="false"
+                    placeholder="14906, 14907, 14908">{{ c.get('device_ids', '') }}</textarea>
+          <span class="field-hint">The cloud's device ids, comma separated — not IMEIs. Up to
+            {{ max_manual }} — for more, or for a sequence, use <a href="/cota">Jobs</a>.</span>
+        </label>
+        <label>Command value — val1
+          <input type="text" name="val1" class="mono" spellcheck="false"
+                 value="{{ vals[0] }}" placeholder="DBD76B82D531">
+        </label>
+        <details class="advanced" {{ 'open' if vals[1:] | select | list }}>
+          <summary>More values — val2 … val9 <span class="opt">only for commands that take
+            them</span></summary>
+          <div class="vals-grid">
+            {% for n in range(2, 10) %}
+            <label>val{{ n }}
+              <input type="text" name="val{{ n }}" class="mono" spellcheck="false"
+                     value="{{ vals[n - 1] }}">
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {# First submit button in the form, so Enter in a field previews rather than reads. #}
+        <div class="form-actions">
+          <button type="submit" name="action" value="preview">Preview</button>
+          <span class="hint">Shows the exact request. Nothing is sent.</span>
+        </div>
+      </div>
+
+      <div class="send-paste">
+        <label>Or paste the portal's payload
+          <textarea name="payload" rows="6" class="mono" spellcheck="false"
+                    placeholder='{"deviceType":[124],"deviceList":[14906],"type":36,"val1":"DBD76B82D531"}'
+          >{{ c.get('payload', '') }}</textarea>
+        </label>
+        <p class="footnote">Plain JSON, or the portal request copied with <em>Copy as cURL
+          (cmd)</em> — the <code>^"</code> escapes are fine. Reading fills the form on the left
+          and sends nothing.</p>
+        <div class="form-actions">
+          <button type="submit" name="action" value="read" class="ghost">Read payload</button>
+        </div>
+      </div>
+    </div>
+  </form>
+</section>
+
+{% if preview %}
+<section class="card" id="preview">
+  <h2>Preview <span class="hint">{{ preview.count }} device{{ '' if preview.count == 1 else 's' }}
+    · {{ preview.payloads | length }} call{{ '' if preview.payloads | length == 1 else 's' }}
+    · nothing sent yet</span></h2>
+  {% for body in preview.payloads %}
+  <pre class="payload">{{ body }}</pre>
+  {% endfor %}
+
+  {% if preview.unknown %}
+  <div class="notice notice-warn">
+    {{ preview.unknown }} of these device ids {{ 'is' if preview.unknown == 1 else 'are' }} not
+    in the device map. The cloud is addressed by id, so they are sent all the same — the record
+    just has no IMEI beside them.
+  </div>
+  {% endif %}
+
+  <details class="advanced" {{ 'open' if preview.count <= 10 }}>
+    <summary>Devices in this send</summary>
+    <table class="compact-table">
+      <thead><tr><th class="n">Device id</th><th>IMEI</th></tr></thead>
+      <tbody>
+        {% for d in preview.devices %}
+        <tr><td class="n mono">{{ d.device_id }}</td>
+            <td class="mono">{{ d.imei or '' }}{% if not d.imei %}<span class="dim">not in the
+              device map</span>{% endif %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <form method="post" action="/cota/devices/send#preview" class="stack-form send-confirm">
+    <input type="hidden" name="action" value="send">
+    <input type="hidden" name="previewed" value="{{ preview.digest }}">
+    <input type="hidden" name="device_type" value="{{ c.get('device_type', '') }}">
+    <input type="hidden" name="cmd_type" value="{{ c.get('cmd_type', '') }}">
+    <input type="hidden" name="device_ids" value="{{ c.get('device_ids', '') }}">
+    {% for n in range(1, 10) %}<input type="hidden" name="val{{ n }}" value="{{ vals[n - 1] }}">{% endfor %}
+    {% if cota_status.token_held %}
+    <label class="inline">
+      <input type="checkbox" name="confirm" value="true">
+      Send command <strong>{{ c.get('cmd_type') }}</strong> to
+      <strong>{{ preview.count }} device{{ '' if preview.count == 1 else 's' }}</strong> now
+    </label>
+    <div class="form-actions">
+      {%- set noun = 'device' if preview.count == 1 else 'devices' %}
+      <button type="submit" class="btn-send">Send to {{ preview.count }} {{ noun }}</button>
+      <span class="hint">Goes to the cloud straight away, and is recorded under Jobs.</span>
+    </div>
+    {% else %}
+    <div class="notice notice-warn">Not signed in to the cloud.
+      <a href="/cota/signin">Sign in</a> (top right), then preview again to send.</div>
+    {% endif %}
+  </form>
+</section>
+{% endif %}
+
+{% if sent %}
+<section class="card" id="preview">
+  <h2>Sent <span class="hint">recorded as job #{{ sent.job_id }} — <a href="/cota">see Jobs</a></span></h2>
+  <table>
+    <thead><tr><th class="n">Call</th><th class="n">Devices</th><th>State</th>
+      <th class="n">HTTP</th><th>Cloud reply</th></tr></thead>
+    <tbody>
+      {% for call in sent.calls %}
+      <tr>
+        <td class="n">{{ call.batch_no }}</td>
+        <td class="n">{{ call.devices }}</td>
+        <td><span class="pill pill-{{ call.state }}">{{ {'sent': 'Accepted',
+              'send_failed': 'Not accepted', 'planned': 'Not sent'}.get(call.state, call.state) }}</span></td>
+        <td class="n mono">{{ call.http_status or '—' }}</td>
+        <td><pre class="payload reply">{{ (call.send_reply or call.error or '—')[:600] }}</pre></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="footnote">"Accepted" means the cloud took the request. What the device itself
+    answered is read separately, later — the cloud does not push replies.</p>
+</section>
+{% endif %}
+
+<div class="module-grid">
+  <section class="card">
+    <h2>Load the device map <span class="hint">.xlsx or .csv — columns matched by name</span></h2>
+    {# People hold IMEIs; the cloud only answers to its own device id, and the send call also
+       needs the device type. Until the cloud's device-search call is captured, this sheet is
+       where that mapping comes from. #}
+    <form method="post" action="/cota/devices/import" enctype="multipart/form-data"
+          class="stack-form">
+      <label>Sheet
+        <input type="file" name="file" accept=".xlsx,.csv" required>
+      </label>
+      <p class="footnote">Needs three columns: <strong>IMEI</strong> (or Device Unique No),
+        <strong>Device ID</strong> and <strong>Device Type</strong>. Loading again updates
+        devices already mapped; nothing is removed.</p>
+      <div class="form-actions"><button type="submit">Load map</button></div>
+    </form>
+  </section>
+
+  {# A group is a list of device ids saved under a name, so a job can be pointed at it again.
+     Groups are set-up rather than the day's record: they are kept across days. #}
+  <section class="card" id="groups">
+    <h2>Groups <span class="hint">device ids under a name, for Jobs</span></h2>
+    <form method="post" action="/cota/groups" enctype="multipart/form-data" class="stack-form">
+      <label>Name
+        <input type="text" name="name" required placeholder="e.g. Delhi fleet">
+      </label>
+      <label>Device ids
+        <textarea name="devices" rows="3" class="mono" spellcheck="false"
+                  placeholder="786, 14906"></textarea>
+      </label>
+      <label>…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
+          <a href="/cota/groups/template.csv">Download template</a></span>
+        <input type="file" name="file" accept=".csv">
+      </label>
+      <div class="form-actions"><button type="submit">Save group</button>
+        <span class="hint">Saving under an existing name replaces it.</span></div>
+    </form>
+    {% if groups %}
+    <table class="group-table">
+      <thead><tr><th>Name</th><th class="n">Devices</th><th>Saved</th><th></th></tr></thead>
+      <tbody>
+        {% for g in groups %}
+        <tr>
+          <td>{{ g.name }}</td>
+          <td class="n">{{ g.devices | comma }}</td>
+          <td class="dim small">{{ g.created_at[:16] }}</td>
+          <td class="n">
+            {# The name goes through a data attribute: HTML-escaping does not make it safe
+               inside a script string, because the attribute is decoded before the script runs. #}
+            <form method="post" action="/cota/groups/{{ g.id }}/delete" class="inline-form"
+                  data-name="{{ g.name }}"
+                  onsubmit="return confirm('Delete the group “' + this.dataset.name + '”? Jobs already started keep their devices.')">
+              <button type="submit" class="link-btn">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card">
+  <div class="page-toolbar">
+    <h2 style="margin:0">Mapped devices
+      <span class="hint">{{ total | comma }}{% if q %} matching “{{ q }}”{% endif %}</span></h2>
+    <form method="get" action="/cota/devices" class="inline-search">
+      <input type="text" name="q" value="{{ q }}" placeholder="Part of an IMEI, or a device id"
+             aria-label="Search devices">
+      <select name="size" aria-label="Rows per page">
+        {% for n in sizes %}<option value="{{ n }}" {{ 'selected' if n == size }}>{{ n }} / page</option>{% endfor %}
+      </select>
+      <button type="submit">Search</button>
+      {% if q %}<a class="ghost-link" href="/cota/devices">Clear</a>{% endif %}
+    </form>
+  </div>
+  {% if rows %}
+  <table>
+    <thead><tr><th>IMEI</th><th class="n">Device ID</th><th class="n">Device type</th>
+      <th>Loaded from</th><th>Updated</th></tr></thead>
+    <tbody>
+      {% for d in rows %}
+      <tr>
+        <td class="mono">{{ d.imei }}</td>
+        <td class="n mono">{{ d.device_id }}</td>
+        <td class="n">{{ d.device_type }}</td>
+        <td class="dim">{{ d.source or '—' }}</td>
+        <td class="dim small">{{ d.updated_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif q %}
+  <p class="hint">No mapped device matches “{{ q }}”.</p>
+  {% else %}
+  <p class="hint">No devices mapped yet — load a sheet above.</p>
+  {% endif %}
+</section>
+
+{% if pages > 1 %}
+<nav class="pager">
+  {% set base = '/cota/devices?q=' ~ (q | urlencode) ~ '&size=' ~ size %}
+  {% if page > 1 %}<a href="{{ base }}&page={{ page - 1 }}">&larr; Previous</a>{% endif %}
+  <span>{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="{{ base }}&page={{ page + 1 }}">Next &rarr;</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

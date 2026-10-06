@@ -12,12 +12,346 @@ carries one line per release; this file explains the reasoning.
 COTA (configuration over the air) is a different surface from everything before it. The rest
 of the app reads the OTA platform's device inventory and works out what happened by comparing
 snapshots. COTA *sends* configuration commands through the cloud's own API
-(ctvms IntouchAdminApi) and records each request and reply. It has its own tables (schema v10),
+(ctvms IntouchAdminApi) and records each request and reply. It has its own tables (schema v10, v11),
 its own device map from IMEI to the cloud's internal device id, and its own credential, and it
 shares nothing with the snapshot warehouse. Bundles do not carry it.
 
 This is a major version because it is the first time the app writes to a production system
 rather than only reading from one. The schema also moves to v10.
+
+### One sidebar for three modules
+
+The header tabs are replaced by a sidebar modelled on the CAN utility's workbench. Each module is
+a group and each page an item: **Web FOTA** (everything that existed before), **Web COTA**
+(listed, dimmed and marked *Soon*, because it is not built yet) and **Intouch COTA**. The top bar
+names the page, the module and what the page is for. The sidebar folds to an icon rail, the
+choice is remembered, and on a narrow window it is always a rail that flies out on hover.
+`nav.py` is the one definition the sidebar, the top bar and the tests all read.
+
+FOTA's fetch chips and *Update data* button are shown only on FOTA pages. On a COTA page they
+would claim a freshness that has nothing to do with what is on screen. COTA pages show their own
+sign-in chip instead. The fleet digest stays in every footer.
+
+### Intouch COTA: Configure — a conversation with one device
+
+The first step of COTA is the simplest whole loop: **one device, one command, and what the
+device said back**. *Configure* is the first page of the module, laid out as a conversation:
+
+- **Start configuration** with the cloud's device id, or an IMEI the device map knows. An IMEI
+  the map does not know is refused rather than guessed. Devices already configured are listed
+  with their last command, newest first.
+- **The thread** shows commands sent as bubbles on the right, marked *Accepted by cloud* or
+  *Not accepted* with the reason. What the cloud returned shows on the left, headed
+  `Device-<IMEI>`, with day separators. Replies that read as failed (`FAIL`, `ERROR`, …) or
+  as OK are badged. This is a reading of the device's own words, labelled as one; failure wins
+  a tie, so `KEEP,FAIL,KEEP FAILED` is not read as fine.
+- **The composer** takes the command type and value (val2–val9 when needed). The exact JSON
+  that will go is shown as you type, which stands in for a separate preview step. Recent
+  commands are one-click chips. Sending answers with a redirect, so refreshing the page cannot
+  send a command twice.
+- **Watching for the reply.** The cloud does not push replies, so after a send the page checks
+  every 10 seconds for three minutes, with a live *Waiting for reply · 0:42*. It stops when a
+  new entry arrives. *Check replies* asks at any time.
+- **What Web FOTA knows**, beside the thread: online or offline at the last fetch, last seen,
+  model, firmware, config. It says up front whether a reply is even possible; an offline device
+  holds the command until it next connects. It is the registry's single row for the IMEI, so it
+  costs no snapshot resolution.
+
+Each device's console is its own job (`Console · device <id>`): every send is a task and every
+check a `cota_poll` row, so nothing new was added to the schema and all of it appears under
+Jobs. A rejected token is recorded on that command instead of stopping a job, so nothing is
+left planned to go out by surprise with the next send.
+
+### Configure: ticks, the IMEI, and the cloud's record of each command
+
+A real `getGPRSCommand` record (captured 2026-10-06) settled what the cloud returns: **one record
+per command sent to the device**, from any source, with its own id
+(`865510083360422_6AC48E16`), the send `timestamp` in epoch seconds, the device's `imei`, a
+`status`, and `response` / `responseTime`, which are empty until answered. It is not a list of
+replies. The console is now built around that:
+
+- **Ticks, like a messenger.** ✓ *command via API*: the send call answered
+  `{"msg":"Command send Successfully.."}`. White ✓✓ *response via API*: `getGPRSCommand`
+  returned the command's record (`status` 0, `response` null). Green ✓✓ *response via device*:
+  the same record now carries the device's answer in `response`, with `status` 1. All of this
+  was confirmed on the live cloud and matches the portal's own COTA screen, where *Pending
+  Count* counts status 0. ✗ in red when the cloud refused the send; 🕓 while sending. After a
+  send the page keeps watching until the device answers, saying which side it is waiting for.
+- **The device's answer is shown as it came**, control bytes and all: `\x16`-style codes rather
+  than garbled characters. The cloud gives no `responseTime` even after answering, so the time
+  shown is when this page first saw the answer, and it never moves on a later check.
+- **Counts like the portal's** *Total / Pending*: total, waiting for the device, answered, plus
+  not-yet-in-the-cloud and not-accepted when there are any.
+- **Command names**: type 36 is *Zenithra Command*, as the portal calls it
+  (`cota.COMMAND_NAMES`); other types show their number.
+- **Matching a send to its record.** The cloud rewrites `val1`, so values cannot be compared.
+  A record belongs to a send when the device and type are the same and its timestamp is within
+  2 minutes. Closest pairs decide which belong together, and time order decides which goes
+  with which: closest-first alone crossed two quick sends over, giving the newer send the older
+  one's answer. Replayed on the live records for device 14906, both sends paired correctly. Records with no send of ours were
+  sent from the portal or another install, and appear outlined as *sent elsewhere*, so the
+  thread is the device's whole history.
+- **"ID: 14906 | IMEI: 865510083360422".** The IMEI comes from the device map, or from the
+  first cloud record, and is then saved into the map (source *cloud record*). That lights up
+  the Web FOTA card with no manual upload. An IMEI a person already mapped is never overwritten.
+- **Model 124 and type 36 are locked defaults**: pre-filled and sent, changeable only with
+  *Edit*.
+- **Click a command** for what was sent from this page, the cloud's full record (rewritten
+  `val1` and all) with Copy, and the three stages with their times. Hover shows the record too.
+- The page stops checking on its own once the latest command has its cloud record.
+
+### Configure, cleaned up
+
+- **The thread is command → answer**, nothing between. The tick legend and the "response via
+  API" bubbles are gone; each tick explains itself on hover, and the waiting line under the
+  newest command says who it is waiting for.
+- **Raw data lives in a side panel**, folded by default and remembered. Clicking a command *or*
+  its answer opens it on **Raw**: the stages with times, the raw request (`saveCOTAConfig`),
+  the send reply, and the cloud's raw record, each with Copy. A **Device** tab holds what Web
+  FOTA knows; the header keeps one line of it — *● Online · last seen 4 hr ago* — so the fact
+  that matters stays in view while the panel is folded. Below 1800px wide the device list
+  folds to avatars while the panel is open, so the thread keeps a readable width.
+- **⟳ refresh** replaces *Check replies*, spinning while it works. After a send the page checks
+  three times, 30 seconds apart (*Auto-check 2/3 · in 0:18*), stops early once the device
+  answers, and then leaves it to ⟳.
+- **A time range**, `DD-MM-YYYY HH:MM` in 24-hour time, typed or picked from the calendar,
+  defaulting to today 00:00–23:59, with *Today / Yesterday / Last 7 days*. It drives both what
+  the cloud is asked for and what is shown, and lives in the URL. The browser's own date-time
+  box was not used: it follows the PC's locale and can show 12:00 AM. Ranges are capped at 15
+  days because the cloud's limit is unknown. After a send the start stays and the end moves to
+  the end of today, so the new command is always in view.
+- **Export** the conversation in the range as Excel or CSV: one row per command, what was sent
+  beside what came back, control bytes written as `\xNN` exactly as on screen. Columns: IMEI,
+  Device ID, Sent at, Value sent, Cloud val1, Cloud status, Response via API seen, Response via
+  device, Answer seen. The workbook's
+  *Source* sheet names the device, the range and the counts.
+
+### Sequences: one device, several commands, none missed
+
+**Configure → Sequence** takes commands one per line and sends them in order, in the
+background, by rules agreed with the user:
+
+- **One at a time.** The next goes only once the current one has an outcome, so every answer
+  belongs to exactly one command.
+- **2 s after an answer, a guard band after anything else.** Once the device has answered, the
+  next command goes 2 s later. Resending the same command, and moving on after one that gave
+  up, wait the guard band: **30 s, 60 s for an unrecognised command** — three of the device's 10 s
+  heartbeats. The cloud is checked every 10 s, a command not in the cloud's list after 30 s
+  never arrived, and an attempt waits 2 minutes for an answer.
+- **Up to 3 attempts, then the next command.** A resend never duplicates by accident: it is
+  always safe when the earlier attempt provably never reached the device (refused, or never
+  listed by the cloud); once it may have, a GET (`DA…`) or SET (`DB…`) can go again — repeating
+  it changes nothing — and so can a CLR (`DD…`, e.g. `DDD76D66` CLR SOS), by the user's decision,
+  knowing a resend minutes later could clear a new SOS raised in between. Only an unrecognised
+  command is never resent once it may have arrived. Commands show readable names built from
+  their parts — `GET FTP_SETTINGS`, `CLR SOS`, `SET 6C0A`. A late answer to an earlier attempt still
+  counts.
+- **It pauses rather than fails** when the session cannot be renewed or the cloud stops
+  answering three calls in a row, and resumes from the same attempt. Runs live in the database
+  (schema **v13**: `cota_run`, `cota_run_step`), so closing the page changes nothing, and a run
+  interrupted by a restart comes back paused, saying so.
+- A command that is not a command — not hex, an odd length, not `XX D7 …` — is refused before
+  anything is sent. While a sequence is live, sending by hand is blocked.
+
+`tests/test_cota_run.py` drives the runner against a simulated device and cloud that act out
+every failure case — asleep, API down, missed reply, never received, wrong command, late answer,
+an expired session mid-run, pause, resume, cancel — using the user's own five commands. Time is
+simulated, so every wait is its real length and the whole matrix runs in about a second.
+
+### Jobs: many devices, the same sequence each
+
+**Jobs** sends a sequence of commands to many devices, up to the whole fleet (23,103 today,
+sized for 30,000), and shows where every device is.
+
+- **Choose the devices** from a saved group, by typing ids, or by uploading a CSV in the cloud's
+  own device-list format, `id,trackingCode`. `id` is required and `trackingCode` (the IMEI) is
+  optional. **Download template** on both upload forms gives the format. Tracking codes in an
+  upload are added to the device map. **Groups** are saved on the Devices page and kept across
+  days. Saving under an existing name replaces the group.
+- **Preview before anything is sent.** The plan shows each command by name, the canary, how many
+  send and check calls the job will take, and roughly how long. A bad command, a device already in
+  a live job or sequence, or no cloud session blocks *Start*.
+- **Each device moves through the sequence by the Configure rules**: 2 s after an answer, a
+  30 s guard band, up to 3 attempts, no accidental duplicates. A scheduler ticks every 10 s and
+  sends one command to every device ready for it in one call per batch (default 50 devices). It
+  paces calls to the job's rate (default 5 a second) and checks only devices with something
+  outstanding, less and less often while they sleep.
+- **A sleeping device is not sent the command again.** The cloud holds the command until the
+  device wakes. The device is waited for until the job's validity runs out (default 12 h), then
+  marked expired.
+- **It starts small and stops itself.** Jobs over 20 devices send to a canary first (1%, between
+  1 and 20 devices). A job pauses itself after three failed calls in a row, or when more than 10%
+  of finished commands fail. Resuming after a canary stop releases the rest. A refused call (for
+  example, the session expired) is not counted as an attempt.
+- **The job page** shows progress, a command × outcome grid, and every device with its state,
+  current command, attempt and answers, filtered and searchable. Each device links to its own
+  conversation on Configure. While the job runs, the page redraws every 5 s from this install's
+  record, so watching it costs the cloud nothing. Pause, resume and cancel are on the page, and
+  **Export** writes every device × command to CSV (streamed) or Excel.
+- **One job at a time**, and a job that was running when the app stopped comes back paused.
+- **The COTA record lives for the day.** The first COTA page opened on a later day clears the
+  earlier days' jobs, sequences, sends and cloud records. Groups and the device map stay.
+  Single sends from Devices are listed on Jobs too, since that page links there.
+- Schema **v14** (`cota_group`, `cota_group_member`, `cota_campaign`, `cota_campaign_device`,
+  `cota_campaign_result`) and **v15** (`ix_cota_task_device`). Without that index a 5,000-device
+  job took 303 s of scheduler time; with it, 48 s.
+
+**What decides how long a large job takes: checks, not sends.** A check (`getGPRSCommand`) reads
+one device per call. On the live cloud, a comma list of ids got HTTP 400. 30,000 devices × 5
+commands, simulated end to end (`OTA_SCALE_DEVICES=30000`): **162 send calls, 152,072 checks**,
+every command answered. At the default 5 calls a second that is about 8½ hours. Raising the rate
+is the lever, but the rate the cloud tolerates is not yet known. The plan states this beside its
+estimate.
+
+### Tests can no longer reach the network or the real credential store
+
+Writing those tests, one of them started a real background run, and a real run uses the real
+cloud client and the token in Windows Credential Manager: it most likely made **one live
+request** — `DAD76C0A`, a GET from the user's own list, to the desk device — which the expired
+token probably made the cloud refuse. Now every test runs with HTTP refused unless it fakes the
+cloud itself, an empty in-memory credential store, and no real background runs.
+
+### "Command sent at …" is delivered, not answered
+
+On 2 of the first 7 live commands the cloud set `status` 1 and wrote `Command sent at
+2026-10-06 16:05:09` into `response`. That is the cloud saying it *delivered* the command, not the
+device answering, and the console showed it as a green ✓✓. It is now its own stage, **delivered ·
+no answer from the device** (white ✓✓), counted as waiting for the device. Rows stored before
+the fix are read the same way.
+
+### Username and password sign-in, and a token that renews itself
+
+The portal's own sign-in request was captured (2026-10-06): `POST
+IntouchAdminApi/user/login`, multipart form, `username` and `password` with the password sent
+as its MD5 hash — the same scheme as Web FOTA's. The InTouch cloud preset now carries all of
+it, locked like the API URL, so signing in with a username and password just works, and nothing
+posted can redirect the password elsewhere.
+
+With the password remembered, an expired token no longer stops anything: on a 401 the tool signs
+in again by itself and repeats the step once — a check simply asks again; a refused send, which
+never reached the device, is sent once more, with the refused attempt kept in the record. A
+token from the environment is never renewed over, because the environment would still win.
+
+### An expired token shows on the cloud chip
+
+When the cloud answers 401 or 403, the chip turns red — **"Cloud: session expired"**, with the time
+and HTTP code in its tooltip — the moment it happens, including during a Refresh without a
+reload, and the page stops checking on its own. The message box and the Sign in page say the
+same, with a link. It clears itself when a fresh token is saved or the cloud next accepts the
+held one. The message itself no longer tells people to run `cota token set`, a command that was
+never built.
+
+### Configure, tidied
+
+- **The page no longer scrolls.** Top bar, console and footer together fill the window exactly,
+  so the side strip, the header and the composer stay put; only the conversation (and a long
+  device list) scrolls.
+- **One surface, split by a line**: the device list and the conversation share a frame with a
+  visible divider between them, as in a messenger. Finding why it was missing turned up a bug:
+  retiring an old style earlier had cut half of a shared rule, so both panes had lost their
+  background and border and the conversation had taken the list's padding. A test now fails
+  if one rule names the same selector twice — the shape that mistake left behind.
+- **The check status says when, not how many**: *Checked 16:59:10*.
+- **The composer is one line**: the value and Send. *More values (val2…val9)* and the live
+  *Sends {…}* preview are hidden for now — type 36 takes one value, and the exact request is in
+  the Raw panel once sent. The send route still accepts val2…val9.
+- **Model and type left the composer.** They are set from **Edit** beside "ID: 14906 | IMEI: …";
+  they are still sent with every command, a pill beside the name shows when they are not the
+  defaults, and a changed command type survives the reload after a send.
+
+### The whole conversation for the period, as the cloud holds it
+
+`getGPRSCommand` returns every command for the device in the window asked — from this tool, the
+portal or anyone else — with its answer. The console now mirrors exactly that:
+
+- **Opening the page, or choosing a new range, loads that period from the cloud**, once. It is
+  skipped when the same period was loaded within the last minute. Until now it asked only after
+  a send or on Refresh, so a period this copy had never asked for looked empty. The header
+  says what it holds: *Loaded 16:45 · 6 records in the cloud for this period*.
+- **A command that leaves the cloud is shown as such.** A record stored from an earlier check
+  that is in the window but missing from a later, complete answer — deleted in the portal, most
+  likely — is marked *no longer in the cloud since 16:47*, faded and counted, rather than shown
+  as current. It is unmarked if it reappears. An empty `data` list counts as an answer; a body
+  with no list at all marks nothing. Schema **v12** adds `cota_command.missing_since`.
+- **Cloud sign-in is the status chip.** The separate *Cloud sign-in* button beside
+  "Cloud: signed in" did the same thing and is gone; the chip opens Sign in and is highlighted
+  while you are there.
+
+### Tests can no longer touch this machine's data
+
+A new test opened the database without pointing it at a temp file and migrated the dev copy's
+real database to v12. It was harmless: one empty column, which the dev copy would have added on
+its next start, with every command and snapshot intact. But the guard written after it found
+**seven older tests that had been opening the real database all along** — page renders in
+`test_auth.py` and `test_startup.py`. Now every test runs with all of `data/` (the database,
+both connection settings, scheduler state, the error log) redirected to a temp folder, and
+opening either live database (`data/` or `dist/…/data/`) fails the test outright.
+
+### Buttons you can see, and a heading that stays put
+
+- The console's actions were dim outlines on the dark theme, and three of them blank: a running
+  copy had new templates but older code without their icons. They are now named buttons —
+  **⟳ Refresh**, **⤓ Export**, and **Raw** / **Device** on the side strip (clicking the open one
+  folds the panel; **Fold** inside it does too) — with full-colour text and a visible border.
+  A test fails if a template asks for an icon that does not exist.
+- **The dev copy now says "Restart to load new code"** when Python files on disk are newer than
+  the code it is running. Templates reload by themselves and code does not; that mismatch had
+  already shown up as 500s, an empty command table and blank icons. Never shown by a release.
+- Scrolling the page made the thread's heading paint over the top bar. A rule meant for the top
+  bar was written against every `<header>` element, so the heading was sticky too. The rule is
+  now `header.topbar`, and a test keeps it that way.
+
+### Scrollbars and native controls follow the theme
+
+Reported as "not acceptable at all", rightly: a white scrollbar on the dark theme. The page
+never told the browser its colour scheme, so everything the browser draws itself —
+scrollbars, dropdowns, date pickers — came out light. Every theme state now declares
+`color-scheme`, and scrollbars everywhere are thin and drawn in the theme's own colours.
+
+Schema **v11** adds `cota_command`: the cloud's records, upserted by their id so checking again
+never duplicates, with `first_seen_at` marking when each reached the white ✓✓.
+
+### Intouch COTA: Jobs, Devices, Sign in
+
+- **Jobs** lists the jobs held in this install (it became the many-device page; see above).
+- **Devices** sends a command, and loads the IMEI → cloud device id map from a sheet, which
+  it searches and pages. **Send a command** takes exactly the fields of the portal's request:
+  device model (`deviceType`), device ids (`deviceList`, comma separated), command type
+  (`type`) and its values (`val1` … `val9`). Or paste the portal's payload, including the
+  `^"`-escaped *Copy as cURL (cmd)* form, and *Read payload* fills the form. It takes three
+  explicit steps because this writes to real devices. Read and Preview touch no network, and
+  Preview shows the exact JSON of every call. Send needs a ticked box naming the device count,
+  and is refused if the form no longer matches the preview. A typed command becomes a job like
+  any sheet does, so it is sent and recorded by the same code (`cota.send_job`) and appears
+  under Jobs with the cloud's reply. Lists over 50 devices are split into calls of 50. Over 200,
+  or for a sequence, use Jobs.
+- **Sign in** is the filled button top-right, where FOTA keeps *Update data*, beside the
+  "Cloud: signed in / not signed in" chip. It chooses the cloud and how to get a token. There are two ways, as on the FOTA
+  connection: paste the token from the portal, which works today, or sign in with username and
+  password. The cloud's login call has not been captured yet, so its URL is entered rather than
+  guessed. Sending a password to an address nobody verified is the one thing this must not do.
+  Tokens and passwords live in the credential store or the environment, never in
+  `cota_connection.json`. The COTA password has its own account name, so it cannot overwrite the
+  FOTA password for the same user.
+
+### The release and a source copy run side by side
+
+Both used to default to port 8000. A dev launch then found the release answering there, decided
+the app was "already running", opened the release and exited, so a code change looked like it
+had not taken effect. Each copy now has a **channel**: `release` when packaged, `dev` from
+source, or set by `OTA_CHANNEL`. Everything the two could fight over is keyed on it:
+
+| | release | dev |
+|---|---|---|
+| Default port | 8000 | 8100 |
+| Defers to a running copy of | release only | dev only |
+| Session cookie | `ota_session` | `ota_session_dev` |
+| Marked in the UI | — | **DEV** badge, "DEV ·" in the tab title |
+
+The cookie matters because browsers keep cookies per host, not per port: with a password set,
+signing in to one copy would have signed you out of the other. The databases were already
+separate, because each copy writes beside itself. A server deployed from source is a release in
+every sense but packaging, so the deploy templates now set `OTA_CHANNEL=release`.
 
 ---
 

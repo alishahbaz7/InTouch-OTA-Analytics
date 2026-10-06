@@ -12,21 +12,23 @@ import sqlite3
 import tempfile
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
                                RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, bundle, config, db, errors, exports, identity, ingest, metrics,
-               normalize, progress, registry, rollup, scheduler, sources, startup)
+from . import (auth, bundle, config, cota, cota_campaign, cota_connection, cota_run, db, errors,
+               exports, identity,
+               ingest, metrics, nav, normalize, progress, registry, rollup, scheduler, sources,
+               startup)
 
 from . import __version__, build_info      # noqa: E402  (kept beside the app metadata)
 
@@ -89,7 +91,7 @@ APP_ID = "intouch-ota-analytics"
 @app.get("/healthz")
 def healthz():
     """Liveness for the service manager and the tunnel. Deliberately says nothing about data."""
-    return JSONResponse({"status": "ok", "app": APP_ID})
+    return JSONResponse({"status": "ok", "app": APP_ID, "channel": config.CHANNEL})
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -157,6 +159,10 @@ templates.env.filters["comma"] = lambda v: f"{v:,}" if isinstance(v, (int, float
 templates.env.filters["from_json"] = lambda v: json.loads(v) if v else []
 # One mapping from stored status to the word on screen, so no template invents its own.
 templates.env.filters["status"] = normalize.status_label
+# The sidebar and the top bar title read one definition (nav.py).
+templates.env.globals["nav_modules"] = nav.MODULES
+templates.env.globals["nav_state"] = nav.state
+templates.env.globals["nav_icons"] = nav.ICONS
 
 
 def _relative_age(timestamp: str | None) -> str:
@@ -176,6 +182,55 @@ def _relative_age(timestamp: str | None) -> str:
         hours = seconds / 3600
         return f"{hours:.0f} hr ago" if hours < 24 else "yesterday"
     return f"{int(seconds // 86400)} days ago"
+
+
+def _day_label(moment: datetime | None) -> str:
+    """The separator between days in a console thread."""
+    if not moment:
+        return ""
+    today = datetime.now().date()
+    if moment.date() == today:
+        return "Today"
+    if moment.date() == today - timedelta(days=1):
+        return "Yesterday"
+    return f"{moment:%a %d %b %Y}"
+
+
+def _printable(text) -> str:
+    """A device's answer with its control bytes shown as \\x16 rather than rendered as
+    garbage. The live cloud returns them inside otherwise readable text."""
+    return cota.visible(text) or ""
+
+
+templates.env.filters["printable"] = _printable
+templates.env.filters["command_name"] = cota.command_name
+templates.env.filters["describe_command"] = lambda v: cota.describe_command(v) or ""
+templates.env.filters["ago"] = _relative_age
+templates.env.filters["day_label"] = _day_label
+
+
+# A long-running dev copy keeps the Python it started with while Jinja reloads templates from
+# disk — so a template can ask for something the running code does not have. That served 500s,
+# an empty command table and blank icons before it got a guard: the dev copy now says so.
+_CODE_DIR = Path(__file__).resolve().parent
+
+
+def _code_mtime() -> float:
+    try:
+        return max(p.stat().st_mtime for p in _CODE_DIR.glob("*.py"))
+    except (OSError, ValueError):
+        return 0.0
+
+
+_STARTED_WITH_CODE = _code_mtime()
+
+
+def code_is_stale() -> bool:
+    """True when this dev copy is running older code than is on disk. Never in a release: a
+    packaged build's code cannot change underneath it."""
+    if config.CHANNEL != "dev" or config.is_frozen():
+        return False
+    return _code_mtime() > _STARTED_WITH_CODE + 1
 
 
 def page_context(conn: sqlite3.Connection, request: Request, snapshot: int | None) -> dict:
@@ -198,6 +253,7 @@ def page_context(conn: sqlite3.Connection, request: Request, snapshot: int | Non
         # Carries the selected snapshot across navigation.
         "qs": lambda: f"?snapshot={snapshot_id}" if snapshot_id else "",
         "build": BUILD,
+        "code_stale": code_is_stale(),
         # On every page, because "are we even looking at the same data?" is the first question
         # whenever two people compare numbers, and it is not answerable from anything else here.
         "identity": identity.manifest(conn),
@@ -492,6 +548,851 @@ def pending_export(snapshot: int | None = None, format: str = "csv"):
         return _download(exports.to_xlsx(rows, exports.DEVICE_COLUMNS, "Task pending - Online",
                                          identity.manifest(conn)), "xlsx", "pending_online")
     return _download(exports.to_csv(rows, exports.DEVICE_COLUMNS), "csv", "pending_online")
+
+
+# ─── the other modules in the rail ──────────────────────────────────────────
+# Web FOTA is every page above. The two COTA modules share nothing with the snapshot
+# warehouse; they only borrow the page frame, so the header and footer hide FOTA's chips there.
+
+@app.get("/web-cota", response_class=HTMLResponse)
+def web_cota(request: Request):
+    """Listed in the rail before it exists, and says so, rather than linking nowhere."""
+    ctx = page_context(get_conn(), request, None)
+    return templates.TemplateResponse(request, "web_cota.html", ctx)
+
+
+def _cota_context(conn: sqlite3.Connection, request: Request, tab: str, **extra) -> dict:
+    """What every Intouch COTA tab needs: the page frame, the tab, and the sign-in chip."""
+    # The day's COTA record lives for the day: a session started on a later day clears the
+    # earlier ones (once per process). Jobs left running by a restart come back paused.
+    cota_campaign.purge_previous_days(conn)
+    cota_campaign.recover(conn)
+    ctx = page_context(conn, request, None)
+    ctx.update(tab=tab, cota_status=cota_connection.status(), **extra)
+    return ctx
+
+
+# ─── Intouch COTA: jobs — many devices, a sequence each ─────────────────────
+
+def _jobs_context(conn, request: Request, **extra) -> dict:
+    # One-off sends from the Devices page are listed too — that page says "see Jobs". A job's
+    # own calls and a console's are not: they have their own pages.
+    sends = [j for j in cota.jobs(conn) if j["source_file"] != "campaign"
+             and not (j["source_file"] or "").startswith("console:")]
+    return _cota_context(conn, request, "jobs", jobs=cota_campaign.campaigns(conn), sends=sends,
+                         groups=cota_campaign.groups(conn), live=cota_campaign.active(conn),
+                         defaults={"batch": cota_campaign.DEFAULT_BATCH,
+                                   "rate": cota_campaign.DEFAULT_RATE,
+                                   "validity": cota_campaign.DEFAULT_VALIDITY_HOURS,
+                                   "type": cota.DEFAULT_DEVICE_TYPE, "cmd": cota.DEFAULT_CMD_TYPE},
+                         **extra)
+
+
+@app.get("/cota", response_class=HTMLResponse)
+def cota_jobs(request: Request):
+    return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(get_conn(), request))
+
+
+def _job_form_devices(conn, group_id: str, device_text: str) -> tuple[list[int], list[str]]:
+    if group_id.isdigit():
+        return cota_campaign.group_devices(conn, int(group_id)), []
+    ids, problems, _ = cota_campaign.parse_device_ids(device_text)
+    return ids, problems
+
+
+@app.post("/cota/jobs/preview", response_class=HTMLResponse)
+async def cota_jobs_preview(request: Request):
+    """The plan, before anything is sent. A CSV may come with it, hence async to read it."""
+    form = await request.form()
+    upload = form.get("file")
+    content = await upload.read() if upload is not None and getattr(upload, "filename", "") else b""
+
+    def build():
+        conn = get_conn()
+        draft = {k: str(form.get(k, "")) for k in ("name", "group_id", "devices", "commands",
+                                                    "batch_size", "rate_per_sec", "validity_hours",
+                                                    "device_type", "cmd_type")}
+        if content:
+            rows, _ = cota_campaign.read_csv_devices(content)
+            draft["devices"] = "\n".join(d for d, _ in rows)
+            draft["group_id"] = ""
+            cota_campaign.learn_tracking_codes(conn, rows)
+        ids, problems = _job_form_devices(conn, draft["group_id"], draft["devices"])
+        try:
+            batch = max(1, int(draft["batch_size"] or cota_campaign.DEFAULT_BATCH))
+            rate = max(0.1, float(draft["rate_per_sec"] or cota_campaign.DEFAULT_RATE))
+        except ValueError:
+            batch, rate = cota_campaign.DEFAULT_BATCH, cota_campaign.DEFAULT_RATE
+        the_plan = cota_campaign.plan(conn, ids, draft["commands"], batch_size=batch,
+                                      rate_per_sec=rate)
+        the_plan["problems"] = problems
+        the_plan["device_ids"] = ",".join(map(str, ids))
+        return _jobs_context(conn, request, draft=draft, preview=the_plan)
+
+    ctx = await run_in_threadpool(build)
+    return templates.TemplateResponse(request, "cota_jobs.html", ctx)
+
+
+@app.post("/cota/jobs/start", response_class=HTMLResponse)
+def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Form(""),
+                    commands: str = Form(""), batch_size: int = Form(cota_campaign.DEFAULT_BATCH),
+                    rate_per_sec: float = Form(cota_campaign.DEFAULT_RATE),
+                    validity_hours: float = Form(cota_campaign.DEFAULT_VALIDITY_HOURS),
+                    device_type: int = Form(cota.DEFAULT_DEVICE_TYPE),
+                    cmd_type: int = Form(cota.DEFAULT_CMD_TYPE)):
+    conn = get_conn()
+    ids, _, _ = cota_campaign.parse_device_ids(device_ids)
+    if not cota.load_token() and not cota_connection.renew():
+        return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(
+            conn, request, result={"level": "error",
+                                   "message": "Not signed in to the cloud — sign in, then start."}))
+    try:
+        cid = cota_campaign.create(conn, name=name, device_ids=ids, commands_text=commands,
+                                   device_type=device_type, cmd_type=cmd_type,
+                                   batch_size=batch_size, rate_per_sec=rate_per_sec,
+                                   validity_hours=validity_hours)
+    except cota_campaign.CampaignError as exc:
+        return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(
+            conn, request, result={"level": "error", "message": str(exc)}))
+    cota_campaign.start(cid)
+    return RedirectResponse(f"/cota/jobs/{cid}", status_code=303)
+
+
+JOB_DEVICE_FILTERS = ("", "waiting", "ready", "done", "failed", "expired", "cancelled")
+
+
+def _job_context(conn, request: Request, job_id: int, state: str = "", q: str = "",
+                 page: int = 1, **extra) -> dict | None:
+    job = cota_campaign.summary(conn, job_id)
+    if not job:
+        return None
+    state = state if state in JOB_DEVICE_FILTERS else ""
+    rows, total = cota_campaign.device_rows(conn, job_id, state=state, search=q, page=page)
+    return _cota_context(conn, request, "jobs", job=job, grid=cota_campaign.grid(conn, job_id),
+                         devices=rows, devices_total=total, state=state, q=q,
+                         page=max(1, page), pages=max(1, -(-total // 50)),
+                         words=cota_campaign.RESULT_WORDS, **extra)
+
+
+@app.get("/cota/jobs/{job_id}", response_class=HTMLResponse)
+def cota_job(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1):
+    conn = get_conn()
+    ctx = _job_context(conn, request, job_id, state, q, page)
+    if ctx is None:
+        return RedirectResponse("/cota", status_code=303)
+    return templates.TemplateResponse(request, "cota_job.html", ctx)
+
+
+@app.get("/cota/jobs/{job_id}/status")
+def cota_job_status(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1):
+    """What the job page redraws every few seconds — this install's record only, no cloud call."""
+    conn = get_conn()
+    ctx = _job_context(conn, request, job_id, state, q, page)
+    if ctx is None:
+        return JSONResponse({"ok": False})
+    return JSONResponse({"ok": True, "state": ctx["job"]["state"],
+                         "html": templates.get_template("_cota_job_live.html").render(ctx)})
+
+
+@app.post("/cota/jobs/{job_id}/control", response_class=HTMLResponse)
+def cota_job_control(job_id: int, action: str = Form("")):
+    conn = get_conn()
+    if action in ("pause", "resume", "cancel"):
+        cota_campaign.request(conn, job_id, action)
+    return RedirectResponse(f"/cota/jobs/{job_id}", status_code=303)
+
+
+@app.get("/cota/jobs/{job_id}/export")
+def cota_job_export(job_id: int, format: str = "csv"):
+    """Every device × command. CSV streams, so 150,000 rows never sit in memory; Excel is offered
+    up to its practical size, and the page says so beyond it."""
+    conn = get_conn()
+    job = cota_campaign.summary(conn, job_id)
+    if not job:
+        return JSONResponse({"error": "no such job"}, status_code=404)
+    stem = f"cota_job_{job_id}"
+    if format == "xlsx":
+        if job["total"] > 200_000:
+            return JSONResponse({"error": "Too many rows for Excel — download the CSV."},
+                                status_code=413)
+        rows = list(cota_campaign.export_rows(conn, job_id))
+        source = [("Job", f"#{job_id} {job['name']}"), ("Devices", job["devices"]),
+                  ("Commands", " → ".join(job["names"])), ("Answered", job["results"].get("done", 0)),
+                  ("Failed", job["results"].get("failed", 0)),
+                  ("Expired", job["results"].get("expired", 0)),
+                  ("Send calls", job["send_calls"]), ("Checks", job["poll_calls"]),
+                  ("Exported", f"{datetime.now():{cota.RANGE_FORMAT}}")]
+        return _download(exports.to_xlsx(rows, cota_campaign.EXPORT_COLUMNS, sheet_name="Job",
+                                         source=source), "xlsx", stem)
+
+    def stream():
+        import csv as _csv
+        yield "\ufeff"
+        buffer = io.StringIO()
+        writer = _csv.writer(buffer, lineterminator="\n")
+        writer.writerow([h for _, h in cota_campaign.EXPORT_COLUMNS])
+        for row in cota_campaign.export_rows(get_conn(), job_id):
+            writer.writerow([exports._clean(row.get(k)) for k, _ in cota_campaign.EXPORT_COLUMNS])
+            if buffer.tell() > 64_000:
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate()
+        yield buffer.getvalue()
+
+    return StreamingResponse(stream(), media_type=EXPORT_MEDIA["csv"], headers={
+        "Content-Disposition": f'attachment; filename="{exports.timestamped(stem, "csv")}"'})
+
+
+# ── groups, on the Devices page ──
+
+@app.post("/cota/groups", response_class=HTMLResponse)
+async def cota_groups_save(request: Request):
+    form = await request.form()
+    upload = form.get("file")
+    content = await upload.read() if upload is not None and getattr(upload, "filename", "") else b""
+    name = str(form.get("name", ""))
+
+    def save():
+        conn = get_conn()
+        rows = []
+        if content:
+            rows, _ = cota_campaign.read_csv_devices(content)
+            text = "\n".join(d for d, _ in rows)
+        else:
+            text = str(form.get("devices", ""))
+        ids, problems, dupes = cota_campaign.parse_device_ids(text)
+        if problems:
+            return {"level": "error", "message": "Not saved — " + "; ".join(problems[:5])
+                    + (" …" if len(problems) > 5 else "")}
+        try:
+            cota_campaign.save_group(conn, name, ids)
+        except cota_campaign.CampaignError as exc:
+            return {"level": "error", "message": str(exc)}
+        learned = cota_campaign.learn_tracking_codes(conn, rows)
+        note = f" ({dupes} duplicate{'' if dupes == 1 else 's'} dropped)" if dupes else ""
+        mapped = (f" {learned:,} tracking code{'' if learned == 1 else 's'} added to the device "
+                  "map." if learned else "")
+        return {"level": "ok", "message": f"Group “{name.strip()}” saved with {len(ids):,} "
+                                          f"device{'' if len(ids) == 1 else 's'}{note}.{mapped}"}
+
+    result = await run_in_threadpool(save)
+    ctx = await run_in_threadpool(lambda: _cota_devices_context(get_conn(), request, result=result))
+    return templates.TemplateResponse(request, "cota_devices.html", ctx)
+
+
+@app.get("/cota/groups/template.csv")
+def cota_groups_template():
+    """The upload format — the cloud's own device list: id (required), trackingCode (optional)."""
+    return Response(content=("\ufeff" + cota_campaign.TEMPLATE_CSV).encode("utf-8"),
+                    media_type=EXPORT_MEDIA["csv"],
+                    headers={"Content-Disposition": 'attachment; filename="cota_devices_template.csv"'})
+
+
+@app.post("/cota/groups/{group_id}/delete", response_class=HTMLResponse)
+def cota_groups_delete(request: Request, group_id: int):
+    conn = get_conn()
+    cota_campaign.delete_group(conn, group_id)
+    return RedirectResponse("/cota/devices#groups", status_code=303)
+
+
+COTA_DEVICE_PAGE_SIZES = (25, 50, 100)
+
+
+def _cota_devices_context(conn, request: Request, q: str = "", page: int = 1, size: int = 50,
+                          **extra) -> dict:
+    size = size if size in COTA_DEVICE_PAGE_SIZES else 50
+    q = q.strip()
+    # Any part of an IMEI, or an exact cloud device id — the two numbers people hold.
+    where, params = ("WHERE imei LIKE ? OR CAST(device_id AS TEXT) = ?",
+                     (f"%{q}%", q)) if q else ("", ())
+    total = conn.execute(f"SELECT COUNT(*) FROM cota_device {where}", params).fetchone()[0]
+    pages = max(1, -(-total // size))
+    page = min(max(1, page), pages)
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT imei, device_id, device_type, source, updated_at FROM cota_device {where} "
+        "ORDER BY imei LIMIT ? OFFSET ?", (*params, size, (page - 1) * size))]
+    by_type = [dict(r) for r in conn.execute(
+        "SELECT device_type, COUNT(*) AS devices FROM cota_device "
+        "GROUP BY device_type ORDER BY devices DESC")]
+    mapped = sum(r["devices"] for r in by_type)
+    extra.setdefault("groups", cota_campaign.groups(conn))
+    return _cota_context(conn, request, "devices", rows=rows, total=total, q=q, page=page,
+                         pages=pages, size=size, sizes=COTA_DEVICE_PAGE_SIZES,
+                         by_type=by_type, mapped=mapped,
+                         max_manual=cota.MAX_MANUAL_DEVICES, **extra)
+
+
+@app.get("/cota/devices", response_class=HTMLResponse)
+def cota_devices(request: Request, q: str = "", page: int = 1, size: int = 50):
+    ctx = _cota_devices_context(get_conn(), request, q, page, size)
+    return templates.TemplateResponse(request, "cota_devices.html", ctx)
+
+
+def _import_device_map(filename: str, content: bytes) -> dict:
+    """Runs in the threadpool. The connection is opened here because sqlite3 objects belong
+    to the thread that created them."""
+    # Only "is this really a sheet" is checked here. sources' CSV check insists on an IMEI
+    # column, which suits a snapshot but not a map headed "Device Unique No"; the COTA parser
+    # names any missing column itself.
+    is_csv = sources.looks_like_csv(filename, content)
+    head = content[:400].decode("utf-8", errors="replace").lower()
+    if not content.strip():
+        return {"level": "error", "message": "The uploaded file is empty."}
+    if "<html" in head or "<!doctype" in head:
+        return {"level": "error", "message": "The uploaded file is a web page, not a sheet."}
+    if not is_csv and not content.startswith(sources.XLSX_MAGIC):
+        return {"level": "error",
+                "message": "The uploaded file is not a spreadsheet or a CSV."}
+
+    # A scratch file, not the export folder: a device map is not a snapshot, and left where
+    # ingest-dir looks it would be ingested as one.
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / sources.safe_filename(filename, fallback_stem="device_map",
+                                                     suffix=".csv" if is_csv else ".xlsx")
+        path.write_bytes(content)
+        try:
+            result = cota.import_device_map(db.connect(), path)
+        except cota.CotaError as exc:
+            return {"level": "error", "message": str(exc)}
+
+    message = f"{result.added:,} added, {result.updated:,} updated"
+    if result.skipped:
+        shown = ", ".join(result.skipped[:5]) + (" …" if len(result.skipped) > 5 else "")
+        message += (f"; {len(result.skipped):,} skipped for a missing IMEI, device id or "
+                    f"type ({shown})")
+    return {"level": "warn" if result.skipped else "ok", "message": message + "."}
+
+
+@app.post("/cota/devices/import", response_class=HTMLResponse)
+async def cota_devices_import(request: Request, file: UploadFile = File(...)):
+    # async only to await the read; the import goes to the threadpool so it cannot stall the
+    # event loop (see "Two upload routes" in CLAUDE.md).
+    content = await file.read()
+    result = await run_in_threadpool(_import_device_map, file.filename or "", content)
+    ctx = await run_in_threadpool(lambda: _cota_devices_context(get_conn(), request,
+                                                                result=result))
+    return templates.TemplateResponse(request, "cota_devices.html", ctx)
+
+
+def _payload_digest(payloads: list[dict]) -> str:
+    """Ties a Send to the Preview it confirms: the same form must produce the same bodies."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps(payloads, sort_keys=True).encode()).hexdigest()[:16]
+
+
+@app.post("/cota/devices/send", response_class=HTMLResponse)
+def cota_devices_send(
+    request: Request,
+    action: str = Form("preview"),         # read | preview | send
+    payload: str = Form(""),
+    device_type: str = Form(""),
+    device_ids: str = Form(""),
+    cmd_type: str = Form(""),
+    val1: str = Form(""), val2: str = Form(""), val3: str = Form(""),
+    val4: str = Form(""), val5: str = Form(""), val6: str = Form(""),
+    val7: str = Form(""), val8: str = Form(""), val9: str = Form(""),
+    previewed: str = Form(""),
+    confirm: bool = Form(False),
+):
+    """Send one command to devices typed in by id. Three explicit steps, because this writes
+    to real devices: read a pasted payload (no network), preview the exact bodies (no network),
+    then send — only with the box ticked, and only if the form still matches the preview."""
+    conn = get_conn()
+    values = [val1, val2, val3, val4, val5, val6, val7, val8, val9]
+    cmd = {"payload": payload, "device_type": device_type.strip(),
+           "device_ids": device_ids.strip(), "cmd_type": cmd_type.strip(),
+           "values": [v.strip() for v in values]}
+    extra: dict = {"cmd": cmd}
+
+    def render(**more):
+        extra.update(more)
+        return templates.TemplateResponse(
+            request, "cota_devices.html", _cota_devices_context(conn, request, **extra))
+
+    try:
+        if action == "read":
+            read = cota.parse_portal_payload(payload)
+            cmd.update(device_type=str(read["device_type"]),
+                       device_ids=", ".join(str(i) for i in read["device_ids"]),
+                       cmd_type=str(read["cmd_type"]),
+                       values=[read["params"].get(f"val{n}", "") for n in range(1, 10)])
+            return render(result={"level": "ok", "message": "Payload read into the form. "
+                                  "Check it, then Preview."})
+
+        ids, bad = cota.parse_device_ids(cmd["device_ids"])
+        if bad:
+            raise cota.CotaError(f"Not a device id: {', '.join(bad[:5])}. Device ids are the "
+                                 "cloud's numbers (e.g. 14906), not IMEIs.")
+        if not cmd["device_type"].isdigit() or not cmd["cmd_type"].isdigit():
+            raise cota.CotaError("Device model (type) and command type must be numbers.")
+        params = {f"val{n}": v for n, v in enumerate(cmd["values"], start=1) if v}
+        the_plan = cota.manual_plan(conn, int(cmd["device_type"]), ids, int(cmd["cmd_type"]),
+                                    params)
+        payloads = cota.plan_payloads(the_plan)
+        digest = _payload_digest(payloads)
+        preview = {"payloads": [json.dumps(p) for p in payloads], "digest": digest,
+                   "devices": [{"device_id": t.device_id, "imei": t.imei}
+                               for t in the_plan.tasks],
+                   "count": len(the_plan.tasks),
+                   "unknown": sum(1 for t in the_plan.tasks if not t.imei)}
+
+        if action != "send":
+            return render(preview=preview)
+        if previewed != digest:
+            return render(preview=preview, result={
+                "level": "warn", "message": "The form changed since the preview. Check the "
+                                            "new preview below, then send again."})
+        if not confirm:
+            return render(preview=preview, result={
+                "level": "warn", "message": "Tick the box to confirm before sending."})
+        if not cota.load_token():
+            return render(preview=preview, result={
+                "level": "error", "message": "Not signed in to the cloud — use Sign in, top "
+                                             "right, then send again."})
+
+        job_id = cota.create_job(conn, the_plan, source_file="typed in",
+                                 name=f"Command {cmd['cmd_type']} → "
+                                      f"{len(the_plan.tasks)} device"
+                                      f"{'' if len(the_plan.tasks) == 1 else 's'}")
+        client = cota_connection.client()
+        try:
+            sent = cota.send_job(conn, job_id, client)
+            stopped = None
+        except cota.CotaError as exc:
+            sent, stopped = None, str(exc)
+        finally:
+            client.close()
+        calls = [dict(r) for r in conn.execute("""
+            SELECT batch_no, COUNT(*) AS devices, MAX(state) AS state,
+                   MAX(http_status) AS http_status, MAX(send_reply) AS send_reply,
+                   MAX(error) AS error
+            FROM cota_task WHERE job_id = ? GROUP BY batch_no ORDER BY batch_no
+        """, (job_id,))]
+        if stopped:
+            result = {"level": "error", "message": stopped}
+        elif sent.failed:
+            result = {"level": "error",
+                      "message": f"{sent.failed} of {sent.sent + sent.failed} device(s) were "
+                                 f"not accepted by the cloud — see the reply below."}
+        else:
+            result = {"level": "ok",
+                      "message": f"Sent to {sent.sent} device(s) in {sent.calls} call(s). "
+                                 "The cloud accepted it; the device's own reply comes later."}
+        return render(result=result, sent={"job_id": job_id, "calls": calls},
+                      cmd={**cmd, "device_ids": ""})
+    except cota.CotaError as exc:
+        return render(result={"level": "error", "message": str(exc)})
+
+
+# ─── Intouch COTA: Configure — one device, one command, and what it said ────
+
+def _console_device(conn, device_text: str, type_text: str) -> dict:
+    """The device a console page is about, with what Web FOTA knows of it."""
+    device_id, device_type, imei = cota.resolve_device(conn, device_text)
+    if type_text.strip().isdigit():
+        device_type = int(type_text.strip())
+    fleet = cota.fleet_context(conn, imei)
+    return {"id": device_id, "type": device_type or cota.DEFAULT_DEVICE_TYPE, "imei": imei,
+            "fleet": fleet,
+            # "ID: 14906 | IMEI: 865510083360422" — the IMEI once the map, or a cloud record,
+            # has told us it.
+            "label": f"ID: {device_id}" + (f" | IMEI: {imei}" if imei else ""),
+            "seen_age": _relative_age(fleet["seen_at"]) if fleet and fleet["seen_at"] else ""}
+
+
+def _console_range(from_text: str, to_text: str) -> tuple[datetime, datetime, dict | None]:
+    """The page's time range, and a notice when it had to be refused or adjusted."""
+    try:
+        start, end, note = cota.parse_range(from_text, to_text)
+    except cota.CotaError as exc:
+        start, end = cota.day_range()
+        return start, end, {"level": "error", "message": f"{exc} Showing today instead."}
+    return start, end, {"level": "warn", "message": note} if note else None
+
+
+def _console_query(device_id, device_type, start: datetime, end: datetime, **more) -> str:
+    """The query string that reopens this exact view — device, model, range, and the command
+    type when it is not the default."""
+    if more.get("cmd") in (None, "", cota.DEFAULT_CMD_TYPE, str(cota.DEFAULT_CMD_TYPE)):
+        more.pop("cmd", None)
+    return urlencode({"device": device_id, "type": device_type,
+                      "from": f"{start:{cota.RANGE_FORMAT}}", "to": f"{end:{cota.RANGE_FORMAT}}",
+                      **more})
+
+
+def _console_thread(conn, device: dict, start: datetime, end: datetime) -> dict:
+    """The thread in the range, plus when the page should stop checking on its own."""
+    th = cota.thread(conn, device["id"], start, end)
+    watch_until = None
+    if th["last_sent"]:
+        until = th["last_sent"] + timedelta(seconds=cota.CONSOLE_WATCH_SECONDS)
+        if until > datetime.now():
+            watch_until = int(until.timestamp() * 1000)
+    th["watch_until"] = watch_until
+    th["last_sent_ms"] = int(th["last_sent"].timestamp() * 1000) if th["last_sent"] else None
+    # What the page holds of this period from the cloud — and whether it must ask on opening.
+    th["loaded"] = cota.period_loaded(conn, device["id"], start, end)
+    return th
+
+
+def _range_presets(device: dict) -> list[dict]:
+    today = cota.day_range()
+    yesterday = cota.day_range(today[0] - timedelta(days=1))
+    week = (today[0] - timedelta(days=6), today[1])
+    return [{"label": label, "query": _console_query(device["id"], device["type"], *span)}
+            for label, span in (("Today", today), ("Yesterday", yesterday),
+                                ("Last 7 days", week))]
+
+
+def _console_context(conn, request: Request, device_text: str = "", type_text: str = "",
+                     from_text: str = "", to_text: str = "", **extra) -> dict:
+    start, end, range_note = _console_range(from_text, to_text)
+    if range_note:
+        extra.setdefault("result", range_note)
+    device = th = run = None
+    cota_run.recover(conn)                 # writes only when a run was left behind by a restart
+    if device_text.strip():
+        try:
+            device = _console_device(conn, device_text, type_text)
+            th = _console_thread(conn, device, start, end)
+            run = _visible_run(conn, device["id"])
+        except cota.CotaError as exc:
+            extra.setdefault("result", {"level": "error", "message": str(exc)})
+    return _cota_context(
+        conn, request, "console", device=device, thread=th,
+        conversations=cota.conversations(conn),
+        recent=cota.recent_commands(conn, device["id"]) if device else [],
+        stages=cota.STAGES, default_type=cota.DEFAULT_DEVICE_TYPE,
+        command_names={str(k): v for k, v in cota.COMMAND_NAMES.items()},
+        default_cmd=cota.DEFAULT_CMD_TYPE,
+        range_from=f"{start:{cota.RANGE_FORMAT}}", range_to=f"{end:{cota.RANGE_FORMAT}}",
+        range_label=f"{start:%d %b %H:%M} – {end:%d %b %H:%M}",
+        range_query=_console_query(device["id"], device["type"], start, end) if device else "",
+        presets=_range_presets(device) if device else [],
+        max_range_days=cota.MAX_RANGE_DAYS,
+        auto_every=cota.CONSOLE_AUTO_EVERY, auto_tries=cota.CONSOLE_AUTO_TRIES,
+        run=run, outcomes=cota_run.OUTCOME_WORDS,
+        run_rules={"after_answer": cota_run.GAP_AFTER_ANSWER_SECONDS,
+                   "guard": cota_run.GUARD_SECONDS["get"],
+                   "tries": cota_run.MAX_ATTEMPTS, "wait": cota_run.ANSWER_WAIT_SECONDS},
+        start_device=device_text, start_type=type_text, **extra)
+
+
+def _visible_run(conn, device_id: int) -> dict | None:
+    """The run the page shows: a live one, or the last one if it ended within the hour."""
+    run = cota_run.latest_run(conn, device_id)
+    if not run:
+        return None
+    if run["state"] in ("running", "paused"):
+        return run
+    ended = cota._parse(run["finished_at"]) if run["finished_at"] else None
+    return run if ended and datetime.now() - ended < timedelta(hours=1) else None
+
+
+@app.get("/cota/console", response_class=HTMLResponse)
+def cota_console(request: Request, device: str = "", type: str = "",
+                 range_from: str = Query("", alias="from"), to: str = "", cmd: str = ""):
+    draft = {"cmd_type": cmd} if cmd.isdigit() else None
+    ctx = _console_context(get_conn(), request, device, type, range_from, to, draft=draft)
+    return templates.TemplateResponse(request, "cota_console.html", ctx)
+
+
+@app.post("/cota/console/send", response_class=HTMLResponse)
+def cota_console_send(
+    request: Request,
+    device_id: str = Form(""),
+    device_type: str = Form(""),
+    cmd_type: str = Form(""),
+    range_from: str = Form("", alias="from"),
+    val1: str = Form(""), val2: str = Form(""), val3: str = Form(""),
+    val4: str = Form(""), val5: str = Form(""), val6: str = Form(""),
+    val7: str = Form(""), val8: str = Form(""), val9: str = Form(""),
+):
+    """Send one command to one device. Answers with a redirect, so refreshing the page that
+    follows can never send the command a second time — and the view it lands on keeps its
+    start but reaches to the end of today, so the new command is always in it."""
+    conn = get_conn()
+    values = [v.strip() for v in (val1, val2, val3, val4, val5, val6, val7, val8, val9)]
+    draft = {"cmd_type": cmd_type.strip(), "values": values}
+
+    def again(message: str):
+        ctx = _console_context(conn, request, device_id, device_type, range_from, "",
+                               draft=draft, result={"level": "error", "message": message})
+        return templates.TemplateResponse(request, "cota_console.html", ctx)
+
+    if not device_id.strip().isdigit():
+        return again("Open a device first.")
+    if cota_run.active_run(conn, int(device_id)):
+        return again("A sequence is running for this device — pause it and let it finish, or "
+                     "cancel it, before sending by hand. One command at a time.")
+    if cota_campaign.busy_devices(conn, [int(device_id)]):
+        return again("This device is in a running job — it finishes, or the job is cancelled, "
+                     "before anything is sent by hand. One command at a time.")
+    if not device_type.strip().isdigit():
+        return again("The device model (deviceType) is a number (e.g. 124).")
+    if not cmd_type.strip().isdigit():
+        return again("The command type is a number (e.g. 36).")
+    # A token already known to be rejected is renewed first, when a saved password allows it.
+    if cota_connection.status()["rejected"]:
+        cota_connection.renew()
+    if not cota.load_token() and not cota_connection.renew():
+        return again("Not signed in to the cloud — use Sign in, top right, then send again.")
+    params = {f"val{n}": v for n, v in enumerate(values, start=1) if v}
+    try:
+        client = cota_connection.client()
+        try:
+            task = cota.console_send(conn, client, int(device_id), int(device_type),
+                                     int(cmd_type), params)
+        finally:
+            client.close()
+        # Rejected on the way: the cloud refused the send, so nothing reached the device. With a
+        # saved password, sign in again and send it once more — the refused attempt stays in
+        # the record, so the thread shows exactly what happened.
+        if task["state"] == "send_failed" and "rejected the token" in (task["error"] or "") \
+                and cota_connection.renew():
+            client = cota_connection.client()
+            try:
+                cota.console_send(conn, client, int(device_id), int(device_type),
+                                  int(cmd_type), params)
+            finally:
+                client.close()
+    except cota.CotaError as exc:
+        return again(str(exc))
+    try:
+        start = cota.parse_range(range_from, "")[0]
+    except cota.CotaError:
+        start = cota.day_range()[0]
+    start, end = cota.range_after_send(start)
+    return RedirectResponse(
+        f"/cota/console?{_console_query(int(device_id), int(device_type), start, end, cmd=cmd_type.strip())}#latest",
+        status_code=303)
+
+
+def _cloud_chip() -> dict:
+    """The sign-in chip's state, for the page to redraw it without a reload."""
+    st = cota_connection.status()
+    return {"level": st["level"], "label": st["label"], "title": st["title"]}
+
+
+@app.post("/cota/console/run", response_class=HTMLResponse)
+def cota_console_run(request: Request, device_id: str = Form(""), device_type: str = Form(""),
+                     cmd_type: str = Form(""), commands: str = Form(""),
+                     range_from: str = Form("", alias="from")):
+    """Start a sequence: one device, the commands in order, one at a time, in the background."""
+    conn = get_conn()
+
+    def again(message: str):
+        ctx = _console_context(conn, request, device_id, device_type, range_from, "",
+                               draft={"cmd_type": cmd_type, "commands": commands},
+                               result={"level": "error", "message": message}, mode="sequence")
+        return templates.TemplateResponse(request, "cota_console.html", ctx)
+
+    if not (device_id.isdigit() and device_type.strip().isdigit() and cmd_type.strip().isdigit()):
+        return again("Open a device first; model and type are numbers.")
+    if not cota.load_token() and not cota_connection.renew():
+        return again("Not signed in to the cloud — sign in, then start the sequence.")
+    try:
+        run_id = cota_run.create_run(conn, int(device_id), int(device_type), int(cmd_type), commands)
+    except cota_run.RunError as exc:
+        return again(str(exc))
+    cota_run.start(run_id)
+    try:
+        start = cota.parse_range(range_from, "")[0]
+    except cota.CotaError:
+        start = cota.day_range()[0]
+    start, end = cota.range_after_send(start)
+    return RedirectResponse(
+        f"/cota/console?{_console_query(int(device_id), int(device_type), start, end, cmd=cmd_type)}#run",
+        status_code=303)
+
+
+@app.post("/cota/console/run/control", response_class=HTMLResponse)
+def cota_console_run_control(request: Request, run_id: int = Form(...), action: str = Form(""),
+                             back: str = Form("/cota/console")):
+    conn = get_conn()
+    if action in ("pause", "resume", "cancel"):
+        cota_run.request(conn, run_id, action)
+    # Only ever back to the console — the field is the page's own query string, not a URL.
+    target = back if back.startswith("/cota/console") else "/cota/console"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/cota/console/run-status")
+def cota_console_run_status(device: str = "", type: str = "",
+                            range_from: str = Query("", alias="from"), to: str = ""):
+    """What a page watching a sequence redraws every few seconds. Reads only this install's
+    record — the runner is the one asking the cloud — so polling it costs the cloud nothing."""
+    conn = get_conn()
+    try:
+        info = _console_device(conn, device, type)
+        start, end, _ = cota.parse_range(range_from, to)
+    except cota.CotaError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)})
+    run = _visible_run(conn, info["id"])
+    th = _console_thread(conn, info, start, end)
+    return JSONResponse({
+        "ok": True, "state": run["state"] if run else None,
+        "run_html": templates.get_template("_cota_run.html").render(
+            run=run, outcomes=cota_run.OUTCOME_WORDS),
+        "html": templates.get_template("_cota_thread.html").render(
+            thread=th, device=info, stages=cota.STAGES),
+        "counts_html": templates.get_template("_cota_counts.html").render(thread=th),
+        "cloud": _cloud_chip()})
+
+
+@app.post("/cota/console/check")
+def cota_console_check(request: Request, device: str = Form(""), type: str = Form(""),
+                       range_from: str = Form("", alias="from"), to: str = Form("")):
+    """Ask the cloud for this device's records over the page's range, and hand back the redrawn
+    thread. Called by the page after a send and by the refresh button."""
+    conn = get_conn()
+    try:
+        info = _console_device(conn, device, type)
+        start, end, _ = cota.parse_range(range_from, to)
+    except cota.CotaError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)})
+    if not cota.load_token() and not cota_connection.renew():
+        return JSONResponse({"ok": False, "message": "Not signed in to the cloud."})
+    renewed = False
+    for attempt in (1, 2):
+        try:
+            client = cota_connection.client()
+            try:
+                outcome = cota.console_check(conn, client, info["id"], start, end)
+            finally:
+                client.close()
+            break
+        except cota.CotaError as exc:
+            # An expired token, and a saved password to get a new one with: sign in again by
+            # itself and ask once more. A check only reads, so repeating it is harmless.
+            if attempt == 1 and "rejected the token" in str(exc) and cota_connection.renew():
+                renewed = True
+                continue
+            return JSONResponse({"ok": False, "message": str(exc), "cloud": _cloud_chip()})
+    info = _console_device(conn, device, type)            # the IMEI may have just been learned
+    th = _console_thread(conn, info, start, end)
+    html = templates.get_template("_cota_thread.html").render(
+        thread=th, device=info, stages=cota.STAGES)
+    counts_html = templates.get_template("_cota_counts.html").render(thread=th)
+    if outcome["ok"]:
+        n = outcome.get("records", 0)
+        message = f"Checked {datetime.now():%H:%M:%S}"
+        if renewed:
+            message += " · the token had expired; signed in again"
+        if outcome.get("gone"):
+            message += f" · {outcome['gone']} no longer in the cloud"
+    else:
+        message = (f"The cloud answered HTTP {outcome['status']}" if outcome["status"]
+                   else "The cloud could not be reached")
+    return JSONResponse({"ok": outcome["ok"], "message": message, "html": html,
+                         "counts_html": counts_html, "cloud": _cloud_chip(),
+                         "label": info["label"], "latest_stage": th["latest_stage"],
+                         "watch_until": th["watch_until"]})
+
+
+@app.get("/cota/console/export")
+def cota_console_export(device: str = "", type: str = "",
+                        range_from: str = Query("", alias="from"), to: str = "",
+                        format: str = "xlsx"):
+    """The conversation in the range: one row per command, what was sent beside what came back.
+    Small by construction (one device, at most 15 days), so it is built inline."""
+    conn = get_conn()
+    try:
+        info = _console_device(conn, device, type)
+        start, end, _ = cota.parse_range(range_from, to)
+    except cota.CotaError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    th = cota.thread(conn, info["id"], start, end)
+    rows = cota.console_export_rows(th, info["id"], info["imei"])
+    stem = f"cota_{info['id']}_{start:%Y%m%d}-{end:%Y%m%d}"
+    if format == "csv":
+        return _download(exports.to_csv(rows, cota.CONSOLE_EXPORT_COLUMNS), "csv", stem)
+    source = [("Device", info["label"]), ("Model (deviceType)", info["type"]),
+              ("From", f"{start:{cota.RANGE_FORMAT}}"), ("To", f"{end:{cota.RANGE_FORMAT}}"),
+              ("Commands", len(rows)),
+              ("Answered by the device", th["counts"]["answered"]),
+              ("Waiting for the device", th["counts"]["waiting"]),
+              ("Exported", f"{datetime.now():{cota.RANGE_FORMAT}}"),
+              ("Produced by", f"InTouch Utility v{BUILD['version']} ({BUILD['channel']})"),
+              ("Note", "Device answers are as the cloud returned them; control bytes are shown "
+                       "as \\xNN. They can contain credentials — handle the file accordingly.")]
+    return _download(exports.to_xlsx(rows, cota.CONSOLE_EXPORT_COLUMNS, sheet_name="Commands",
+                                     source=source), "xlsx", stem)
+
+
+def _cota_signin_context(request: Request, **extra) -> dict:
+    return _cota_context(get_conn(), request, "signin", connection=cota_connection.load(),
+                         clouds=cota_connection.CLOUDS, is_local=_is_local(request),
+                         portal_url=cota_connection.PORTAL_URLS.get(
+                             cota_connection.load().cloud),
+                         credential_store=sources.credential_store_name(),
+                         token_env=cota.ENV_TOKEN, **extra)
+
+
+@app.get("/cota/signin", response_class=HTMLResponse)
+def cota_signin(request: Request):
+    return templates.TemplateResponse(request, "cota_signin.html",
+                                      _cota_signin_context(request))
+
+
+@app.post("/cota/signin", response_class=HTMLResponse)
+def cota_signin_submit(
+    request: Request,
+    cloud: str = Form(cota_connection.DEFAULT_CLOUD),
+    base_url: str = Form(""),
+    method: str = Form("token"),
+    username: str = Form(""),
+    password: str = Form(""),
+    token: str = Form(""),
+    remember: bool = Form(False),
+    login_url: str = Form(""),
+    login_encoding: str = Form("json"),
+    password_hash: str = Form("none"),
+    user_field: str = Form("username"),
+    pass_field: str = Form("password"),
+):
+    previous = cota_connection.load()
+    conn = cota_connection.apply_cloud(cota_connection.CotaConnection(
+        cloud=cloud, base_url=base_url, method=method, username=username.strip(),
+        login_url=login_url.strip(),
+        login_encoding=login_encoding if login_encoding in ("json", "multipart", "form")
+        else "json",
+        password_hash=password_hash if password_hash in ("none", "md5") else "none",
+        user_field=user_field.strip() or "username", pass_field=pass_field.strip() or "password",
+        signed_in_at=previous.signed_in_at,
+    ))
+    try:
+        if conn.method == "token":
+            cota_connection.use_token(conn, token)
+            result = {"level": "ok", "message": "Token saved. It lasts as long as the portal "
+                                                "session it was copied from."}
+        else:
+            # An empty box with a saved password means "use the saved one".
+            secret = password or (cota_connection.load_password(conn.username) or "")
+            cota_connection.sign_in(conn, secret)
+            if remember and password:
+                if not cota_connection.save_password(conn.username, password):
+                    raise cota_connection.CotaSignInError(
+                        "Signed in, but the password could not be saved to the OS credential "
+                        "store.")
+            elif not remember:
+                cota_connection.forget_password(conn.username)
+            result = {"level": "ok", "message": f"Signed in as {conn.username}."}
+    except cota_connection.CotaSignInError as exc:
+        # Keep what was chosen, so a failed attempt does not reset the form.
+        cota_connection.save(conn)
+        result = {"level": "error", "message": str(exc)}
+    return templates.TemplateResponse(request, "cota_signin.html",
+                                      _cota_signin_context(request, result=result))
+
+
+@app.post("/cota/signout", response_class=HTMLResponse)
+def cota_signout(request: Request):
+    cota_connection.sign_out(cota_connection.load())
+    return templates.TemplateResponse(request, "cota_signin.html", _cota_signin_context(
+        request, result={"level": "ok", "message": "Signed out — the token and any saved COTA "
+                                                   "password were removed."}))
 
 
 @app.get("/errors", response_class=HTMLResponse)
@@ -995,7 +1896,7 @@ def update_startup_test(request: Request):
     prove it before trusting it matters more than usual.
     """
     started = startup.run_now()
-    port = request.url.port or 8000
+    port = request.url.port or config.DEFAULT_PORT
     result = ({"level": "ok",
                "message": f"Launched the same command the startup entry uses. If it is working "
                           f"you now have a second copy running — check http://127.0.0.1:{port} "

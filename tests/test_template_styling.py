@@ -91,3 +91,17 @@ def test_the_stylesheet_is_versioned():
     keeps rendering with the old rules — indistinguishable from the new CSS being broken."""
     base = (WEB / "templates" / "base.html").read_text(encoding="utf-8")
     assert "app.css?v=" in base
+
+
+def test_no_rule_names_the_same_selector_twice():
+    """Retiring a rule by pattern once cut half of a shared one, leaving
+    `.console-list, .console-thread,` glued onto the next rule: valid CSS, silently different —
+    both panes lost their frame. That leaves a selector named twice in one rule."""
+    import re
+
+    css = (WEB / "static" / "app.css").read_text(encoding="utf-8")
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for selectors in re.findall(r"(?:^|})\s*([^{}@]+?)\s*{", css):
+        names = [s.strip() for s in selectors.split(",") if s.strip()]
+        repeated = {n for n in names if names.count(n) > 1}
+        assert not repeated, f"selector named twice in one rule: {sorted(repeated)}"

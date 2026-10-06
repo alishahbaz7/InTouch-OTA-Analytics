@@ -1,0 +1,608 @@
+{% extends "base.html" %}
+{% block title %}Configure — Intouch COTA{% endblock %}
+{% block page_class %}fit-window{% endblock %}
+
+{% block content %}
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+
+{%- set d = draft or {} -%}
+{#- A live sequence owns the device: hand-sends and the page's own checks stand aside. -#}
+{%- set run_live = run and run.state in ('running', 'paused') -%}
+{%- set dvals = d.get('values') or ([''] * 9) -%}
+{%- macro icon(name) -%}
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ nav_icons[name] | safe }}</svg>
+{%- endmacro -%}
+<div class="console {{ 'has-device' if device }}">
+
+  {# ── devices: start a configuration, or pick one up again ── #}
+  <aside class="console-list" aria-label="Devices">
+    <details class="start-config" {{ 'open' if (not device and not conversations) or (start_device and not device) }}>
+      <summary class="btn-start" title="Start configuration">{{ icon('message') }}
+        <span class="btn-start-label">Start configuration</span></summary>
+      <form method="get" action="/cota/console" class="stack-form start-form">
+        <label>Device id or IMEI
+          <input type="text" name="device" inputmode="numeric" class="mono" required
+                 value="{{ start_device if not device else '' }}" placeholder="14906">
+        </label>
+        <div class="fixed-row">
+          <span class="fixed-field">Model <input type="text" name="type" inputmode="numeric"
+            class="mono" value="{{ (start_type if not device else '') or default_type }}"
+            readonly aria-label="Device model (deviceType)"></span>
+          <button type="button" class="link-btn unlock">Edit</button>
+        </div>
+        <div class="form-actions"><button type="submit">Open</button></div>
+      </form>
+    </details>
+
+    <div class="conv-head">Devices</div>
+    {# A div, not <nav>: the old header rule `nav:not(.rail-nav) a.on` would paint the
+       selected device solid blue. #}
+    <div class="conv-list" role="list" aria-label="Configured devices">
+    {% for c in conversations %}
+      <a class="conv {{ 'on' if device and device.id == c.device_id }}" role="listitem"
+         href="/cota/console?device={{ c.device_id }}"
+         title="ID: {{ c.device_id }}{% if c.imei %} | IMEI: {{ c.imei }}{% endif %}"
+         {%- if device and device.id == c.device_id %} aria-current="page"{% endif %}>
+        <span class="conv-avatar state-{{ c.state or 'none' }}">{{ icon('cpu') }}</span>
+        <span class="conv-body">
+          <span class="conv-title"><span>ID: {{ c.device_id }}</span>
+            <span class="conv-time">{{ c.at | ago }}</span></span>
+          <span class="conv-sub">
+            {%- if c.cmd_type is not none -%}
+              {{ c.cmd_type }} · {{ c.params.values() | join(' · ') }}
+              {%- if c.state == 'send_failed' %} ✗{% elif c.in_cloud %} ✓✓{% else %} ✓{% endif %}
+            {%- else %}No commands yet{% endif -%}
+          </span>
+          {% if c.imei %}<span class="conv-imei">IMEI: {{ c.imei }}</span>{% endif %}
+        </span>
+      </a>
+    {% else %}
+      <p class="hint conv-empty">No devices yet — start a configuration above.</p>
+    {% endfor %}
+    </div>
+  </aside>
+
+  {# ── the conversation ── #}
+  <section class="console-thread">
+  {% if device %}
+    {% set f = device.fleet %}
+    <div class="thread-head">
+      <div class="thread-who">
+        <div class="thread-title-row">
+          <div class="thread-title" id="thread-title">{{ device.label }}</div>
+          {# Model and type are locked defaults; this is where they change, on purpose. The
+             inputs belong to the composer through form="composer", so they are sent with it. #}
+          <details class="dropdown send-settings" id="send-settings">
+            <summary title="Model and command type for sending">Edit</summary>
+            <div class="dropdown-panel settings-panel">
+              <label>Model — deviceType
+                <input type="text" name="device_type" form="composer" class="mono"
+                       inputmode="numeric" value="{{ device.type }}" required></label>
+              <label>Command type
+                <input type="text" name="cmd_type" form="composer" class="mono"
+                       inputmode="numeric" value="{{ d.get('cmd_type') or default_cmd }}" required>
+                <span class="hint" id="cmd-name">{{ (d.get('cmd_type') or default_cmd) | int | command_name }}</span></label>
+              <p class="footnote">Sent with every command from this page. Defaults: model
+                {{ default_type }}, type {{ default_cmd }}.</p>
+            </div>
+          </details>
+          {%- if device.type != default_type or (d.get('cmd_type') and d.get('cmd_type') | int != default_cmd) %}
+          <span class="count-pill" title="Not the defaults">model {{ device.type }} · type {{ d.get('cmd_type') or default_cmd }}</span>
+          {%- endif %}
+        </div>
+        {# The one fact worth keeping in view while the side panel is folded: can it answer? #}
+        <button type="button" class="thread-status" data-open-tab="device"
+                title="What Web FOTA knows about this device">
+          {%- if f %}<span class="dot state-{{ (f.status or 'unknown') | lower }}"></span>
+            {{ f.status | status if f.status else 'Unknown' }} · last seen {{ device.seen_age or 'never' }}
+          {%- elif device.imei %}<span class="dim">Not in Web FOTA</span>
+          {%- else %}<span class="dim">IMEI not known yet — no Web FOTA status</span>{% endif -%}
+        </button>
+      </div>
+      <div class="thread-counts" id="thread-counts">{% include "_cota_counts.html" %}</div>
+      <div class="thread-actions">
+        <span class="hint check-status" id="check-status"
+              title="When this period was last loaded from the cloud">
+          {%- if thread.loaded %}Checked {{ thread.loaded.at[11:19] }}
+          {%- else %}Not checked yet{% endif -%}</span>
+        <button type="button" class="tool-btn refresh-btn" id="check-btn"
+                title="Check the cloud for answers now"
+                {{ 'disabled' if not cota_status.token_held }}>{{ icon('refresh') }}<span>Refresh</span></button>
+        <details class="dropdown export console-export">
+          <summary class="tool-btn" title="Export this conversation">{{ icon('download') }}<span>Export</span></summary>
+          <div class="dropdown-panel">
+            <a class="dropdown-item" href="/cota/console/export?{{ range_query }}&format=xlsx">
+              <span>Excel workbook</span><em>.xlsx</em></a>
+            <a class="dropdown-item" href="/cota/console/export?{{ range_query }}&format=csv">
+              <span>CSV</span><em>.csv</em></a>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    {# The range drives both what is asked of the cloud and what is shown. Day-first, 24-hour,
+       typed or picked from the calendar; the browser's own date-time box would follow the PC's
+       locale instead. #}
+    <form method="get" action="/cota/console" class="range-bar" id="range-form">
+      <input type="hidden" name="device" value="{{ device.id }}">
+      <input type="hidden" name="type" value="{{ device.type }}">
+      {% for name, label, value in [('from', 'From', range_from), ('to', 'To', range_to)] %}
+      <label class="dt-field">{{ label }}
+        <input type="text" name="{{ name }}" class="mono dt-text" value="{{ value }}"
+               placeholder="DD-MM-YYYY HH:MM" pattern="\d{2}-\d{2}-\d{4} \d{2}:\d{2}"
+               title="DD-MM-YYYY HH:MM, 24-hour" autocomplete="off" required>
+        <button type="button" class="cal-btn" title="Pick a date" aria-label="Pick a date">{{ icon('calendar') }}</button>
+        <input type="date" class="cal-picker" tabindex="-1" aria-hidden="true">
+      </label>
+      {% endfor %}
+      <button type="submit" class="range-apply">Show</button>
+      <span class="range-presets">
+        {% for p in presets %}<a href="/cota/console?{{ p.query }}">{{ p.label }}</a>{% endfor %}
+      </span>
+      <span class="hint">up to {{ max_range_days }} days</span>
+    </form>
+
+    <div class="thread-scroll" id="thread" data-device="{{ device.id }}"
+         data-type="{{ device.type }}" data-from="{{ range_from }}" data-to="{{ range_to }}"
+         data-watch-until="{{ thread.watch_until or '' }}"
+         data-fresh="{{ 1 if thread.loaded and thread.loaded.fresh else 0 }}"
+         data-last-sent="{{ thread.last_sent_ms or '' }}"
+         data-auto-every="{{ auto_every }}" data-auto-tries="{{ auto_tries }}"
+         data-run-live="{{ 1 if run_live else 0 }}" data-mode="{{ mode or 'single' }}">
+      {% include "_cota_thread.html" %}
+    </div>
+
+    {# The sequence panel, and the form its Pause / Resume / Cancel buttons submit. #}
+    <div id="run-slot">{% include "_cota_run.html" %}</div>
+    {% if run %}
+    <form id="run-control" method="post" action="/cota/console/run/control" hidden>
+      <input type="hidden" name="run_id" value="{{ run.id }}">
+      <input type="hidden" name="back" value="/cota/console?{{ range_query }}">
+    </form>
+    {% endif %}
+
+    {# Two ways to send: one command, or a sequence of them. A live sequence owns the device. #}
+    <div class="mode-switch" role="tablist" aria-label="Send">
+      <button type="button" class="mode-btn" data-mode="single">One command</button>
+      <button type="button" class="mode-btn" data-mode="sequence">Sequence</button>
+    </div>
+
+    <form method="post" action="/cota/console/run" class="composer sequence-composer" id="sequence-form">
+      <input type="hidden" name="device_id" value="{{ device.id }}">
+      <input type="hidden" name="device_type" value="{{ device.type }}">
+      <input type="hidden" name="cmd_type" value="{{ d.get('cmd_type') or default_cmd }}">
+      <input type="hidden" name="from" value="{{ range_from }}">
+      <textarea name="commands" class="mono sequence-text" rows="5" spellcheck="false"
+                placeholder="One command per line, sent in order — e.g.&#10;DAD76F4B&#10;DAD76C0A"
+                {{ 'disabled' if run_live }}>{{ d.get('commands', '') }}</textarea>
+      <div class="sequence-foot">
+        <span class="hint">One at a time · next {{ run_rules.after_answer }} s after an answer ·
+          {{ run_rules.guard }} s guard before a retry or after a failure · up to {{ run_rules.tries }} attempts · {{ run_rules.wait // 60 }} min for
+          an answer</span>
+        <button type="submit" class="composer-send" id="sequence-btn"
+                {{ 'disabled' if run_live or not cota_status.token_held }}>
+          {{ icon('send') }}<span>Start sequence</span></button>
+      </div>
+      {% if run_live %}<div class="notice notice-warn composer-signin">A sequence is
+        {{ run.state }} for this device — it finishes, or is cancelled, before another starts.</div>{% endif %}
+    </form>
+
+    <form method="post" action="/cota/console/send" class="composer" id="composer">
+      <input type="hidden" name="device_id" value="{{ device.id }}">
+      <input type="hidden" name="from" value="{{ range_from }}">
+      {% if recent %}
+      <div class="recent">
+        <span class="recent-label">Recent</span>
+        {% for r in recent %}
+        <button type="button" class="chip" data-cmd="{{ r.cmd_type }}"
+                data-vals="{{ r.params | tojson | forceescape }}"
+                title="Fill the composer with this command">
+          {{- r.cmd_type }} · {{ r.params.values() | join(' · ') -}}
+        </button>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <div class="composer-row">
+        <input type="text" name="val1" class="mono composer-value" spellcheck="false"
+               placeholder="Command value (val1)" aria-label="Command value"
+               value="{{ dvals[0] }}" required autocomplete="off">
+        <button type="submit" class="composer-send" id="send-btn"
+                {{ 'disabled' if not cota_status.token_held or run_live }} title="Send to device {{ device.id }}">
+          {{ icon('send') }}<span>Send</span>
+        </button>
+      </div>
+      {# val2…val9 and the live "Sends {…}" preview are hidden for now, at the user's request:
+         type 36 takes one value, and the exact request is in the Raw panel once sent. The send
+         route still accepts val2…val9, so bringing them back is markup only. #}
+      {% if not cota_status.token_held %}
+      <div class="notice notice-warn composer-signin">Not signed in to the cloud —
+        <a href="/cota/signin">Sign in</a> (top right) to send and check for answers.</div>
+      {% elif cota_status.rejected %}
+      <div class="notice notice-error composer-signin">The cloud rejected the token at
+        {{ cota_status.rejected_at[11:16] }} (HTTP {{ cota_status.rejected_status }}) —
+        <a href="/cota/signin">sign in again</a> with a fresh one from the portal.</div>
+      {% endif %}
+    </form>
+
+  {% else %}
+    <div class="thread-intro">
+      <h2>Configure a device</h2>
+      <p class="lead">One device, one command at a time — and what the device said back.</p>
+      <ol class="module-steps">
+        <li><strong>Start configuration</strong> with the cloud's device id, or an IMEI from the
+          device map.</li>
+        <li><strong>Send</strong> a command. Its exact request is in the <em>Raw</em> panel once
+          it has gone.</li>
+        <li><strong>Watch the ticks.</strong> ✓ the cloud accepted the command; white ✓✓ the
+          cloud holds it for the device; green ✓✓ the device answered. This page checks
+          {{ auto_tries }} times, every {{ auto_every }} seconds, after each send — or press ⟳.</li>
+        <li><strong>Click a command or an answer</strong> for its raw request and API response.</li>
+      </ol>
+      <p class="hint">Every command and every check is recorded, and shows up under Jobs.</p>
+    </div>
+  {% endif %}
+  </section>
+
+  {# ── the side panel: raw request/response, and what Web FOTA knows. Folded by default. ── #}
+  {% if device %}
+  <aside class="console-side" id="console-side" data-tab="raw" aria-label="Details">
+    {# The strip is the panel's launcher: Raw and Device, named. Clicking the one that is open
+       folds the panel again. #}
+    <div class="side-strip">
+      <button type="button" class="strip-btn" data-strip-tab="raw"
+              title="Raw request and API response">{{ icon('code') }}<span>Raw</span></button>
+      <button type="button" class="strip-btn" data-strip-tab="device"
+              title="What Web FOTA knows about this device">{{ icon('cpu') }}<span>Device</span></button>
+    </div>
+    <div class="side-body">
+      <div class="side-tabs" role="tablist">
+        <button type="button" role="tab" class="side-tab" data-tab="raw">Raw</button>
+        <button type="button" role="tab" class="side-tab" data-tab="device">Device</button>
+        <button type="button" class="tool-btn side-fold" id="side-fold"
+                title="Fold the panel">{{ icon('chevrons-right') }}<span>Fold</span></button>
+      </div>
+      <div class="side-pane" data-pane="raw" id="raw-view">
+        <p class="hint raw-empty">Click a command or an answer to see its raw request and the
+          cloud's raw response.</p>
+      </div>
+      <div class="side-pane" data-pane="device">
+        <h3>From Web FOTA</h3>
+        {% if f %}
+        <div class="fleet-state state-{{ (f.status or 'unknown') | lower }}">
+          <span class="dot"></span><strong>{{ f.status | status if f.status else 'Unknown' }}</strong>
+        </div>
+        <div class="hint">last seen {{ device.seen_age or 'never' }}{% if f.seen_at %}
+          · {{ f.seen_at[:16] }}{% endif %}</div>
+        <p class="card-note">
+          {% if f.status == 'Online' %}It was reachable at the last fetch, so it can answer.
+          {% elif f.status == 'Offline' %}It was not reachable at the last fetch. A command waits
+            in the cloud until the device next connects — expect no answer until then.
+          {% else %}It has never connected, so it cannot answer yet.{% endif %}
+        </p>
+        <dl class="kv">
+          <dt>Model</dt><dd>{{ f.device_model or '—' }}</dd>
+          <dt>Firmware</dt><dd class="mono">{{ f.firmware or '—' }}</dd>
+          <dt>Config</dt><dd class="mono">{{ f.configuration or '—' }}</dd>
+          <dt>HW</dt><dd class="mono">{{ f.hw_ver or '—' }}</dd>
+          {% if f.vin %}<dt>VIN</dt><dd class="mono">{{ f.vin }}</dd>{% endif %}
+        </dl>
+        <p class="footnote">As of the last fetch, {{ (f.last_checked_at or '')[:16] }}.</p>
+        {% elif device.imei %}
+        <p class="card-note">Web FOTA has no record of IMEI <span class="mono">{{ device.imei }}</span>.</p>
+        {% else %}
+        <p class="card-note">This device id is not in the device map, so its IMEI — and with it
+          what Web FOTA knows — cannot be looked up yet. The first answer from the cloud usually
+          tells us.</p>
+        <p class="footnote"><a href="/cota/devices">Load the device map</a> to see it now.</p>
+        {% endif %}
+      </div>
+    </div>
+  </aside>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Locked defaults: Edit makes them editable, on purpose and visibly.
+document.querySelectorAll('.unlock').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    btn.closest('.fixed-row').querySelectorAll('input[readonly]').forEach(function (input) {
+      input.readOnly = false;
+    });
+    btn.closest('.fixed-row').classList.add('unlocked');
+    btn.hidden = true;
+  });
+});
+
+// The range fields: typed as DD-MM-YYYY HH:MM, or a date picked from the native calendar —
+// which only supplies the date, so the time already in the field is kept.
+document.querySelectorAll('.dt-field').forEach(function (field) {
+  var text = field.querySelector('.dt-text');
+  var picker = field.querySelector('.cal-picker');
+  var button = field.querySelector('.cal-btn');
+  if (!text || !picker || !button) return;
+  button.addEventListener('click', function () {
+    var m = /^(\d{2})-(\d{2})-(\d{4})/.exec(text.value);
+    if (m) picker.value = m[3] + '-' + m[2] + '-' + m[1];
+    try { picker.showPicker(); } catch (e) { picker.focus(); picker.click(); }
+  });
+  picker.addEventListener('change', function () {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(picker.value);
+    if (!m) return;
+    var time = (/\d{2}:\d{2}$/.exec(text.value) || [text.name === 'to' ? '23:59' : '00:00'])[0];
+    text.value = m[3] + '-' + m[2] + '-' + m[1] + ' ' + time;
+  });
+});
+</script>
+<script>
+// Configure page: the side panel, the exact payload as you type, one-click recent commands, and
+// watching for the answer after a send. The server holds the record; this only redraws.
+(function () {
+  var thread = document.getElementById('thread');
+  var form = document.getElementById('composer');
+  var side = document.getElementById('console-side');
+  if (!thread || !form) return;
+
+  var root = document.documentElement;
+  var device = thread.getAttribute('data-device');
+  var status = document.getElementById('check-status');
+  var checkBtn = document.getElementById('check-btn');
+  var preview = document.getElementById('payload-preview');
+  var title = document.getElementById('thread-title');
+  var rawView = document.getElementById('raw-view');
+  var rawEmpty = rawView ? rawView.innerHTML : '';
+  var watchUntil = parseInt(thread.getAttribute('data-watch-until'), 10) || 0;
+  var lastSent = parseInt(thread.getAttribute('data-last-sent'), 10) || 0;
+  var EVERY = (parseInt(thread.getAttribute('data-auto-every'), 10) || 30) * 1000;
+  var TRIES = parseInt(thread.getAttribute('data-auto-tries'), 10) || 3;
+  var selected = null, busy = false, timers = [], countdown = null, nextAt = 0, attempt = 0;
+
+  function scrollDown() { thread.scrollTop = thread.scrollHeight; }
+  function store(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* not kept */ } }
+  function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+
+  // ── side panel: folded by default, remembered; opened by a click on a bubble ──
+  function setSide(open, tab) {
+    if (open) { root.setAttribute('data-cota-side', 'open'); } else { root.removeAttribute('data-cota-side'); }
+    store('ota-cota-side', open ? 'open' : 'folded');
+    if (tab) { side.setAttribute('data-tab', tab); store('ota-cota-tab', tab); }
+  }
+  if (side) {
+    side.setAttribute('data-tab', stored('ota-cota-tab') === 'device' ? 'device' : 'raw');
+    document.getElementById('side-fold').addEventListener('click', function () { setSide(false); });
+    side.querySelectorAll('[data-strip-tab]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var tab = btn.getAttribute('data-strip-tab');
+        var isOpen = root.getAttribute('data-cota-side') === 'open';
+        if (isOpen && side.getAttribute('data-tab') === tab) { setSide(false); } else { setSide(true, tab); }
+      });
+    });
+    side.querySelectorAll('.side-tab').forEach(function (tab) {
+      tab.addEventListener('click', function () { setSide(true, tab.getAttribute('data-tab')); });
+    });
+  }
+  var start = document.querySelector('.start-config');
+  if (start) start.addEventListener('toggle', function () {
+    if (start.open && root.getAttribute('data-cota-side') === 'open') setSide(false);
+  });
+  document.querySelectorAll('[data-open-tab]').forEach(function (btn) {
+    btn.addEventListener('click', function () { setSide(true, btn.getAttribute('data-open-tab')); });
+  });
+
+  function showRaw(key) {
+    var tpl = document.getElementById('raw-' + key);
+    thread.querySelectorAll('.msg.selected').forEach(function (m) { m.classList.remove('selected'); });
+    if (!tpl || !rawView) { selected = null; if (rawView) rawView.innerHTML = rawEmpty; return; }
+    selected = key;
+    thread.querySelectorAll('.msg[data-key="' + key + '"]').forEach(function (m) { m.classList.add('selected'); });
+    rawView.innerHTML = '';
+    rawView.appendChild(tpl.content.cloneNode(true));
+  }
+
+  thread.addEventListener('click', function (event) {
+    var bubble = event.target.closest('.bubble');
+    var msg = bubble && bubble.closest('.msg[data-key]');
+    if (!msg) return;
+    showRaw(msg.getAttribute('data-key'));
+    setSide(true, 'raw');
+  });
+  if (rawView) rawView.addEventListener('click', function (event) {
+    var btn = event.target.closest('.copy-btn');
+    if (!btn) return;
+    var text = btn.closest('.pop-block').querySelector('pre').textContent;
+    var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function () {}); }
+  });
+
+  // ── composer ──
+  // The same body cota.payload_for builds, so what is shown is what goes.
+  function draw() {
+    var get = function (n) { var el = form.elements[n]; return el ? el.value.trim() : ''; };
+    var body = { deviceType: [Number(get('device_type')) || get('device_type')],
+                 deviceList: [Number(device)], type: Number(get('cmd_type')) || get('cmd_type') };
+    for (var n = 1; n <= 9; n++) { var v = get('val' + n); if (v) body['val' + n] = v; }
+    if (preview) preview.textContent = JSON.stringify(body);
+  }
+  form.addEventListener('input', draw);
+  // The model and type live in the Edit panel (form="composer"): redraw the payload and the
+  // command's name as they change.
+  var cmdField = document.querySelector('input[name="cmd_type"][form="composer"]');
+  var cmdName = document.getElementById('cmd-name');
+  var NAMES = {{ command_names | tojson }};
+  document.querySelectorAll('input[form="composer"]').forEach(function (input) {
+    input.addEventListener('input', function () {
+      draw();
+      if (input === cmdField && cmdName) {
+        var v = cmdField.value.trim();
+        cmdName.textContent = NAMES[v] || ('Command ' + v);
+      }
+    });
+  });
+  form.addEventListener('submit', function () {
+    var btn = document.getElementById('send-btn');
+    if (btn) { btn.disabled = true; btn.querySelector('span').textContent = '🕓 Sending…'; }
+  });
+  document.querySelectorAll('.chip[data-cmd]').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      var vals = {};
+      try { vals = JSON.parse(chip.getAttribute('data-vals')); } catch (e) { /* keep empty */ }
+      form.elements.cmd_type.value = chip.getAttribute('data-cmd');
+      for (var n = 1; n <= 9; n++) {
+        if (form.elements['val' + n]) form.elements['val' + n].value = vals['val' + n] || '';
+      }
+      draw();
+      form.elements.val1.focus();
+    });
+  });
+
+  // ── "Waiting for the device · 0:42" under the newest command ──
+  function tickWaiting() {
+    document.querySelectorAll('.waiting[data-since]').forEach(function (el) {
+      var who = el.getAttribute('data-for') || 'the cloud';
+      if (!watchUntil || Date.now() > watchUntil) {
+        el.textContent = 'No answer from ' + who + ' yet — ⟳ to check again';
+        el.classList.add('dim');
+        return;
+      }
+      var s = Math.max(0, Math.round((Date.now() - parseInt(el.getAttribute('data-since'), 10)) / 1000));
+      el.textContent = 'Waiting for ' + who + ' · ' + Math.floor(s / 60) + ':' + ('0' + s % 60).slice(-2);
+    });
+  }
+
+  // ── checking: the refresh button, and three automatic checks after a send ──
+  function stopAuto(message) {
+    timers.forEach(clearTimeout); timers = [];
+    if (countdown) { clearInterval(countdown); countdown = null; }
+    nextAt = 0;
+    if (message) status.textContent = message;
+  }
+
+  function check(auto) {
+    if (busy) return;
+    busy = true;
+    if (checkBtn) { checkBtn.disabled = true; checkBtn.classList.add('spinning'); }
+    status.textContent = auto ? 'Auto-check ' + attempt + '/' + TRIES + ' · checking…' : 'Checking…';
+    var data = new FormData();
+    data.append('device', device);
+    data.append('type', thread.getAttribute('data-type'));
+    data.append('from', thread.getAttribute('data-from'));
+    data.append('to', thread.getAttribute('data-to'));
+    fetch('/cota/console/check', { method: 'POST', body: data })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        status.textContent = d.message || '';
+        // The sign-in chip follows what the cloud just said about the token.
+        var chip = document.getElementById('cota-signin-chip');
+        if (d.cloud && chip) {
+          chip.className = chip.className.replace(/status-\w+/, 'status-' + d.cloud.level);
+          chip.title = d.cloud.title;
+          chip.querySelector('.status-text').textContent = d.cloud.label;
+        }
+        if (d.cloud && d.cloud.level === 'error') stopAuto(d.message);
+        if (d.html) {
+          thread.innerHTML = d.html;
+          scrollDown();
+          if (selected) showRaw(selected);              // keep the side panel on the same command
+        }
+        if (d.label && title) title.textContent = d.label;     // the IMEI, once learned
+        var counts = document.getElementById('thread-counts');
+        if (d.counts_html && counts) counts.innerHTML = d.counts_html;
+        if (d.watch_until !== undefined) watchUntil = d.watch_until || 0;
+        if (auto) {
+          if (d.latest_stage === 'device') { stopAuto('Answered · ' + d.message); }
+          else if (d.latest_stage === 'failed') { stopAuto(d.message); }
+          else if (attempt >= TRIES) { stopAuto('Auto-check done — ⟳ to check again'); }
+        }
+        tickWaiting();
+      })
+      .catch(function () { status.textContent = 'Could not reach this dashboard — try again'; })
+      .then(function () {
+        busy = false;
+        if (checkBtn) { checkBtn.disabled = false; checkBtn.classList.remove('spinning'); }
+      });
+  }
+
+  if (checkBtn) checkBtn.addEventListener('click', function () { stopAuto(); check(false); });
+
+  // Checks at +30s, +60s, +90s after the newest send — whichever of them are still ahead.
+  // Not during a sequence: its runner does the checking.
+  if (lastSent && checkBtn && !checkBtn.disabled && thread.getAttribute('data-run-live') !== '1') {
+    for (var k = 1; k <= TRIES; k++) {
+      (function (k) {
+        var at = lastSent + k * EVERY;
+        if (at <= Date.now()) return;
+        timers.push(setTimeout(function () { attempt = k; check(true); }, at - Date.now()));
+        if (!nextAt) { nextAt = at; attempt = k - 1; }
+      })(k);
+    }
+    if (timers.length) {
+      countdown = setInterval(function () {
+        if (busy) return;
+        var upcoming = lastSent + (attempt + 1) * EVERY;
+        if (attempt >= TRIES) return;
+        var s = Math.max(0, Math.round((upcoming - Date.now()) / 1000));
+        status.textContent = 'Auto-check ' + (attempt + 1) + '/' + TRIES + ' · in 0:' + ('0' + s).slice(-2);
+      }, 1000);
+    }
+  }
+
+  // ── one command, or a sequence ──
+  var seqForm = document.getElementById('sequence-form');
+  function setMode(mode) {
+    form.hidden = mode === 'sequence';
+    if (seqForm) seqForm.hidden = mode !== 'sequence';
+    document.querySelectorAll('.mode-btn').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute('data-mode') === mode);
+    });
+    store('ota-cota-mode', mode);
+  }
+  document.querySelectorAll('.mode-btn').forEach(function (b) {
+    b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); });
+  });
+  setMode(thread.getAttribute('data-mode') === 'sequence' ? 'sequence'
+          : (stored('ota-cota-mode') === 'sequence' ? 'sequence' : 'single'));
+  if (seqForm) seqForm.addEventListener('submit', function () {
+    var b = document.getElementById('sequence-btn');
+    if (b) { b.disabled = true; b.querySelector('span').textContent = 'Starting…'; }
+  });
+
+  // ── a live sequence: the runner asks the cloud; the page only redraws what it recorded ──
+  var runLive = thread.getAttribute('data-run-live') === '1';
+  function watchRun() {
+    var q = new URLSearchParams({ device: device, type: thread.getAttribute('data-type'),
+                                  from: thread.getAttribute('data-from'),
+                                  to: thread.getAttribute('data-to') });
+    fetch('/cota/console/run-status?' + q.toString(), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) return;
+        var slot = document.getElementById('run-slot');
+        if (slot && d.run_html !== undefined) slot.innerHTML = d.run_html;
+        if (d.html) { var atEnd = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 40;
+                      thread.innerHTML = d.html; if (atEnd) scrollDown(); if (selected) showRaw(selected); }
+        var counts = document.getElementById('thread-counts');
+        if (d.counts_html && counts) counts.innerHTML = d.counts_html;
+        if (d.state === 'running') { setTimeout(watchRun, 3000); }
+        else { window.location.replace(window.location.pathname + window.location.search + '#run'); }
+      })
+      .catch(function () { setTimeout(watchRun, 5000); });
+  }
+  if (runLive) { stopAuto(); setTimeout(watchRun, 2000); }
+
+  // Opening the page — or a new range — loads that period from the cloud, so the thread is the
+  // whole conversation the API holds for it, not only what this copy happened to fetch before.
+  // Skipped when the same period was loaded within the last minute.
+  if (!runLive && thread.getAttribute('data-fresh') !== '1' && checkBtn && !checkBtn.disabled) {
+    status.textContent = 'Checking…';
+    check(false);
+  }
+
+  setInterval(tickWaiting, 1000);
+  draw();
+  tickWaiting();
+  scrollDown();
+})();
+</script>
+{% endblock %}

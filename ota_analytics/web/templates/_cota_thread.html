@@ -1,0 +1,148 @@
+{# One device's commands in the range, oldest first: what was sent on the right, what the
+   device answered on the left. Rendered inside the Configure page and again by
+   /cota/console/check, so a check redraws it without reloading the page.
+
+   Ticks on each command: ✓ the cloud accepted the send · white ✓✓ the cloud holds it
+   (status 0) · green ✓✓ the device answered (status 1). Each tick explains itself on hover.
+
+   Clicking a command or its answer shows its raw request and raw API response in the side
+   panel. Those are rendered here, inside <template>, so a redraw refreshes them too. #}
+{%- macro ticks(stage, stages) -%}
+  {%- if stage == 'failed' %}<span class="tick tick-failed" title="{{ stages.failed }}">✗</span>
+  {%- elif stage == 'accepted' %}<span class="tick tick-accepted" title="{{ stages.accepted }}">✓</span>
+  {%- elif stage == 'api' %}<span class="tick tick-api" title="{{ stages.api }}">✓✓</span>
+  {%- elif stage == 'delivered' %}<span class="tick tick-api" title="{{ stages.delivered }}">✓✓</span>
+  {%- elif stage == 'device' %}<span class="tick tick-device" title="{{ stages.device }}">✓✓</span>
+  {%- endif %}
+{%- endmacro -%}
+{%- set ns = namespace(day=None) -%}
+
+{% if not thread.entries %}
+<div class="thread-empty">
+  <p><strong>No commands in this range.</strong></p>
+  <p class="hint">Send one below, widen the range above, or press ⟳ to ask the cloud what it
+    holds for this device.</p>
+</div>
+{% endif %}
+
+{% for c in thread.entries %}
+{%- set day = c.at | day_label -%}
+{% if day != ns.day %}<div class="day-sep"><span>{{ day }}</span></div>{% set ns.day = day %}{% endif %}
+{%- set value = c.params.values() | join(' · ') if c.params else '—' %}
+
+{# ── the command ── #}
+<div class="msg msg-out {{ 'from-elsewhere' if c.origin == 'elsewhere' }} {{ 'gone' if c.cloud and c.cloud.missing_since }}" data-key="{{ c.key }}">
+  <button type="button" class="bubble" title="Show the raw request and API response">
+    <span class="bubble-cmd">{{ c.cmd_type | command_name }}
+      {%- if c.cmd_type | command_name != 'Command ' ~ c.cmd_type %} · {{ c.cmd_type }}{% endif %}
+      {%- if c.origin == 'elsewhere' %} · sent elsewhere{% endif %}</span>
+    <span class="bubble-val">{{ value }}</span>
+    {%- set named = c.params.get('val1') | describe_command if c.params and c.origin != 'elsewhere' else '' %}
+    {%- if named %}<span class="bubble-name">{{ named }}</span>{% endif %}
+  </button>
+  <div class="msg-meta">
+    {{ c.at.strftime('%H:%M') }}{% if c.origin == 'job' %} · from a job{% endif %}
+    {{ ticks(c.stage, stages) }}
+    {%- if c.cloud and c.cloud.missing_since %}
+      <span class="warn-text" title="It was in the cloud's list for this period, and a later, complete
+answer no longer had it — deleted in the portal, most likely.">no longer in the cloud since
+        {{ c.cloud.missing_since.strftime('%H:%M') }}</span>
+    {%- endif %}
+    {%- if c.stage == 'failed' %}
+      <span class="bad-text" title="{{ (c.send_reply or '')[:300] }}">Not accepted —
+        {{ c.error or ('HTTP ' ~ c.http_status) }}</span>
+    {%- elif c.stage == 'delivered' and not (thread.watch_until and c.at == thread.last_sent) %}
+      <span class="warn-text" title="{{ stages.delivered }}">delivered · no answer from the device</span>
+    {%- elif c.stage in ('accepted', 'api', 'delivered') and c.at == thread.last_sent %}
+      {%- set waiting_for = 'the cloud' if c.stage == 'accepted' else 'the device' %}
+      {%- if thread.watch_until %}
+      <span class="waiting" data-since="{{ (c.at.timestamp() * 1000) | int }}"
+            data-for="{{ waiting_for }}">Waiting for {{ waiting_for }}</span>
+      {%- else %}
+      <span class="dim">no answer from {{ waiting_for }} yet</span>
+      {%- endif %}
+    {%- endif %}
+  </div>
+</div>
+
+{# ── the device's answer ── #}
+{% if c.cloud and c.cloud.device_response %}
+<div class="msg msg-in" data-key="{{ c.key }}">
+  <span class="msg-avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{{ nav_icons.cpu | safe }}</svg></span>
+  <div class="msg-in-body">
+    <button type="button" class="bubble from-device {{ 'reads-' ~ c.cloud.reading if c.cloud.reading }}"
+            title="Show the raw request and API response">
+      <span class="bubble-from">{{ device.label }}</span>
+      <span class="bubble-text mono">{{ c.cloud.device_response | printable }}</span>
+    </button>
+    <div class="msg-meta">
+      <span title="The cloud gives no answer time, so this is when this page first saw it">seen
+        {{ c.cloud.device_response_at.strftime('%H:%M') if c.cloud.device_response_at }}</span>
+      {%- if c.cloud.reading == 'failed' %} · <span class="bad-text">reads as failed</span>
+      {%- elif c.cloud.reading == 'ok' %} · <span class="ok-text">reads as OK</span>{% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── its raw request and response, for the side panel ── #}
+<template id="raw-{{ c.key }}">
+  <div class="raw-title">
+    <strong>{{ c.cmd_type | command_name }}</strong> <span class="mono">{{ value }}</span>
+    <span class="dim">{{ c.at.strftime('%d-%m-%Y %H:%M:%S') }}</span>
+  </div>
+  <ol class="stage-line">
+    <li class="{{ 'done' if c.stage in ('accepted', 'api', 'delivered', 'device') else ('bad' if c.stage == 'failed') }}">
+      <span class="stage-mark">✓</span>
+      <span><strong>Command via API</strong>
+        {% if c.origin == 'elsewhere' %}<span class="dim">sent from the portal or another install</span>
+        {% elif c.stage == 'failed' %}<span class="bad-text">{{ c.error or ('HTTP ' ~ c.http_status) }}</span>
+        {% else %}<span class="dim">{{ c.at.strftime('%H:%M:%S') }} · HTTP {{ c.http_status }}</span>{% endif %}</span>
+    </li>
+    <li class="{{ 'done' if c.stage in ('api', 'delivered', 'device') }}">
+      <span class="stage-mark">✓✓</span>
+      <span><strong>Response via API</strong>
+        {% if c.cloud %}<span class="dim">{{ c.cloud.seen_at.strftime('%H:%M:%S') }} · status
+          {{ c.cloud.status }}{% if c.cloud.delivered %} — delivered, the device has not answered
+          {%- elif c.cloud.status_text %} — {{ c.cloud.status_text }}{% endif %}</span>
+        {% else %}<span class="dim">not seen yet</span>{% endif %}</span>
+    </li>
+    <li class="{{ 'done device' if c.stage == 'device' }}">
+      <span class="stage-mark">✓✓</span>
+      <span><strong>Response via device</strong>
+        {% if c.cloud and c.cloud.device_response %}<span class="dim">seen {{
+          c.cloud.device_response_at.strftime('%H:%M:%S') if c.cloud.device_response_at }}</span>
+        {% else %}<span class="dim">not yet</span>{% endif %}</span>
+    </li>
+  </ol>
+  {% if c.payload_pretty %}
+  <div class="pop-block">
+    <div class="pop-head"><span>Raw request — saveCOTAConfig</span>
+      <button type="button" class="copy-btn">Copy</button></div>
+    <pre class="pop-json">{{ c.payload_pretty }}</pre>
+  </div>
+  {% endif %}
+  {% if c.send_reply or c.error %}
+  <div class="pop-block">
+    <div class="pop-head"><span>Send reply{% if c.http_status %} — HTTP {{ c.http_status }}{% endif %}</span>
+      <button type="button" class="copy-btn">Copy</button></div>
+    <pre class="pop-json">{{ c.send_reply or c.error }}</pre>
+  </div>
+  {% endif %}
+  <div class="pop-block">
+    <div class="pop-head"><span>Raw API response — getGPRSCommand record</span>
+      {% if c.cloud %}<button type="button" class="copy-btn">Copy</button>{% endif %}</div>
+    {% if c.cloud %}<pre class="pop-json">{{ c.cloud.pretty }}</pre>
+    {% else %}<p class="hint">The cloud has not returned a record for this command yet.</p>{% endif %}
+  </div>
+</template>
+{% endfor %}
+
+{% if thread.unparsed_body %}
+<div class="notice notice-warn">
+  The cloud answered, but not with a list of command records. Exactly what came back:
+  <pre class="bubble-raw">{{ thread.unparsed_body }}</pre>
+</div>
+{% endif %}
+<div id="latest"></div>

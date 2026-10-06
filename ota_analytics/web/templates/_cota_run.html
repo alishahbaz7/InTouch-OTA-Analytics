@@ -1,0 +1,53 @@
+{# The sequence panel: where a run is, step by step. Rendered with the page and again by
+   /cota/console/run-status while the run is live, so it moves without a reload. #}
+{%- if run %}
+{%- set icons = {'queued': '·', 'running': '…', 'done': '✓', 'failed': '✗', 'cancelled': '–'} %}
+<div class="run-panel state-{{ run.state }}" id="run-panel" data-run="{{ run.id }}"
+     data-state="{{ run.state }}">
+  <div class="run-head">
+    <strong>Sequence</strong>
+    <span class="run-state">
+      {%- if run.state == 'running' %}running · {{ run.finished_steps }} of {{ run.total }} done
+      {%- elif run.state == 'paused' %}paused · {{ run.finished_steps }} of {{ run.total }} done
+      {%- elif run.state == 'done' %}finished · {{ run.succeeded }} answered{% if run.failed %}, {{ run.failed }} failed{% endif %}
+      {%- else %}cancelled · {{ run.finished_steps }} of {{ run.total }} done{% endif -%}
+    </span>
+    {% if run.state == 'paused' and run.pause_reason %}<span class="warn-text">{{ run.pause_reason }}</span>{% endif %}
+    <span class="run-actions">
+      {% if run.state == 'running' %}
+      <button type="submit" form="run-control" name="action" value="pause" class="tool-btn">Pause</button>
+      {% elif run.state == 'paused' %}
+      <button type="submit" form="run-control" name="action" value="resume" class="tool-btn">Resume</button>
+      {% endif %}
+      {% if run.state in ('running', 'paused') %}
+      <button type="submit" form="run-control" name="action" value="cancel" class="tool-btn">Cancel</button>
+      {% endif %}
+    </span>
+  </div>
+  <ol class="run-steps">
+    {% for s in run.steps %}
+    <li class="run-step step-{{ s.state }}"
+        title="{{ s.name }} — {{ s.val1 }}{% for e in s.log %}&#10;attempt {{ e.attempt }}: {{ e.outcome or 'in progress' }}{% endfor %}">
+      <span class="step-icon">{{ icons.get(s.state, '·') }}</span>
+      <span class="step-name">{{ loop.index }} · {{ s.name }}</span>
+      <span class="step-val mono">{{ s.val1[:12] }}{% if s.val1 | length > 12 %}…{% endif %}</span>
+      {%- if s.attempts > 1 or s.state == 'failed' %}<span class="step-tries">{{ s.attempts }}/3</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% if run.current %}
+  {%- set c = run.current %}
+  <div class="run-now">
+    Now: <span class="mono">{{ c.val1[:24] }}{% if c.val1 | length > 24 %}…{% endif %}</span>
+    · attempt {{ c.attempts or 1 }} of 3
+    {%- if c.log and c.log[-1].outcome %} · last: {{ outcomes.get(c.log[-1].outcome, c.log[-1].outcome) }}{% endif %}
+  </div>
+  {% endif %}
+  {% for s in run.steps if s.state == 'failed' %}
+  <div class="run-failed bad-text">Step {{ s.seq }} ({{ s.name }}) gave up after
+    {{ s.attempts }} attempt{{ '' if s.attempts == 1 else 's' }}: {{ s.outcome_word }}
+    {%- if s.kind == 'unknown' and s.attempts < 3 %} — an unrecognised command is not resent once
+    it may have reached the device{% endif %}.</div>
+  {% endfor %}
+</div>
+{%- endif %}

@@ -70,9 +70,10 @@ def build_info() -> dict:
     """Everything needed to identify exactly what is running."""
     import sys
 
-    from . import db
+    from . import config, db
 
     return {
+        "channel": config.CHANNEL,
         "version": __version__,
         "released": RELEASED,
         "codename": CODENAME,
