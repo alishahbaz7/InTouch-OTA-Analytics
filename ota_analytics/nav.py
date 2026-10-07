@@ -55,6 +55,8 @@ MODULES: tuple[Module, ...] = (
         Item("Jobs", "/cota", "send",
              "Many devices, a sequence of commands each — and where every one of them is",
              prefixes=("/cota/jobs",)),
+        Item("Commands", "/cota/commands", "tag",
+             "Your names for parameters and commands — every page and export reads them"),
         Item("Devices", "/cota/devices", "cpu", "IMEI to cloud device id — who can be reached"),
         Item("Sign in", "/cota/signin", "key", "Which cloud, and the credentials to reach it",
              also=("/cota/signout",), in_rail=False),
@@ -135,6 +137,23 @@ ICONS = {
     "chevrons-right": '<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>',
     "menu": '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/>'
             '<line x1="3" y1="18" x2="21" y2="18"/>',
+    "tag": '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>'
+           '<line x1="7" y1="7" x2="7.01" y2="7"/>',
+    "chevron-left": '<polyline points="15 18 9 12 15 6"/>',
+    "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
+    "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
+    "plus": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "copy": '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>'
+            '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    "rotate-ccw": '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+    "pause": '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
+    "play": '<polygon points="5 3 19 12 5 21 5 3"/>',
+    "x": '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    "trash": '<polyline points="3 6 5 6 21 6"/>'
+             '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    "edit": '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+    "book": '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>'
+            '<path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
     "mark": '<rect x="3" y="3" width="18" height="18" rx="5"/>'
             '<path d="M8 12a4 4 0 0 1 8 0"/><path d="M5.5 12a6.5 6.5 0 0 1 13 0"/>'
             '<circle cx="12" cy="15" r="1.5"/>',

@@ -537,6 +537,7 @@ CREATE TABLE IF NOT EXISTS cota_campaign (
   pause_reason     TEXT,
   send_calls       INTEGER NOT NULL DEFAULT 0,
   poll_calls       INTEGER NOT NULL DEFAULT 0,
+  answer_wait_seconds REAL,                  -- v16: before a resend; NULL = cota_run's default
   created_at       TEXT NOT NULL,
   started_at       TEXT,
   finished_at      TEXT
@@ -571,6 +572,29 @@ CREATE TABLE IF NOT EXISTS cota_campaign_result (
   outcome     TEXT,
   answer      TEXT,
   finished_at TEXT,
+  answer_seconds   REAL,                     -- v16: from the step's first attempt to the answer
+  answered_attempt INTEGER,                  -- v16: which attempt's record carried the answer
   PRIMARY KEY (campaign_id, device_id, step)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ix_campaign_result_state ON cota_campaign_result(campaign_id, step, state);
+
+-- ─── COTA: the command library (v16) ───────────────────────────────────────────────────────
+-- Names the user gives. Kept across days, like groups and the device map: set-up, not the
+-- day's record. cota.describe_command reads both, so every page and export uses the names.
+-- A parameter's name: 6C0A → whatever the user calls it. Overrides a built-in name.
+CREATE TABLE IF NOT EXISTS cota_parameter (
+  code       TEXT PRIMARY KEY,                 -- four hex digits, upper case
+  name       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+-- A whole command under a name, with tags, to pick in Configure and Jobs.
+CREATE TABLE IF NOT EXISTS cota_saved_command (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  val1       TEXT NOT NULL,                    -- upper case hex, as sent
+  tags       TEXT NOT NULL DEFAULT '',         -- comma separated
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_cota_saved_command_val1 ON cota_saved_command(val1);

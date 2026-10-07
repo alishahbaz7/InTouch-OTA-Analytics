@@ -13,6 +13,20 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ nav_icons[name] | safe }}</svg>
 {%- endmacro -%}
+{%- macro library_pick(target) -%}
+  {%- if library %}
+  <details class="dropdown library-pick">
+    <summary class="tool-btn" title="Pick a saved command">{{ icon('book') }}<span>Library</span></summary>
+    <div class="dropdown-panel library-panel library-up">
+      {% for c in library %}
+      <button type="button" class="dropdown-item" data-library="{{ target }}" data-val1="{{ c.val1 }}">
+        <span>{{ c.name }}</span><em class="mono">{{ c.val1[:18] }}{% if c.val1 | length > 18 %}…{% endif %}</em>
+      </button>
+      {% endfor %}
+    </div>
+  </details>
+  {%- endif %}
+{%- endmacro -%}
 <div class="console {{ 'has-device' if device }}">
 
   {# ── devices: start a configuration, or pick one up again ── #}
@@ -177,9 +191,9 @@
                 placeholder="One command per line, sent in order — e.g.&#10;DAD76F4B&#10;DAD76C0A"
                 {{ 'disabled' if run_live }}>{{ d.get('commands', '') }}</textarea>
       <div class="sequence-foot">
-        <span class="hint">One at a time · next {{ run_rules.after_answer }} s after an answer ·
-          {{ run_rules.guard }} s guard before a retry or after a failure · up to {{ run_rules.tries }} attempts · {{ run_rules.wait // 60 }} min for
-          an answer</span>
+        <span class="hint">One at a time · {{ run_rules.wait }} s for an answer, then sent again ·
+          up to {{ run_rules.tries }} attempts, then the next command · next {{ run_rules.after_answer }} s after an answer</span>
+        {{ library_pick('sequence') }}
         <button type="submit" class="composer-send" id="sequence-btn"
                 {{ 'disabled' if run_live or not cota_status.token_held }}>
           {{ icon('send') }}<span>Start sequence</span></button>
@@ -207,6 +221,7 @@
         <input type="text" name="val1" class="mono composer-value" spellcheck="false"
                placeholder="Command value (val1)" aria-label="Command value"
                value="{{ dvals[0] }}" required autocomplete="off">
+        {{ library_pick('single') }}
         <button type="submit" class="composer-send" id="send-btn"
                 {{ 'disabled' if not cota_status.token_held or run_live }} title="Send to device {{ device.id }}">
           {{ icon('send') }}<span>Send</span>
@@ -426,6 +441,24 @@ document.querySelectorAll('.dt-field').forEach(function (field) {
     if (preview) preview.textContent = JSON.stringify(body);
   }
   form.addEventListener('input', draw);
+  // A saved command from the library: fills the one-command box, or adds a line to a sequence.
+  document.querySelectorAll('[data-library]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var value = b.getAttribute('data-val1');
+      if (b.getAttribute('data-library') === 'sequence') {
+        var box = document.querySelector('#sequence-form textarea[name="commands"]');
+        var kept = box.value.replace(/\s+$/, '');
+        box.value = (kept ? kept + '\n' : '') + value;
+        box.focus();
+      } else {
+        var input = form.elements['val1'];
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }
+      b.closest('details').removeAttribute('open');
+    });
+  });
   // The model and type live in the Edit panel (form="composer"): redraw the payload and the
   // command's name as they change.
   var cmdField = document.querySelector('input[name="cmd_type"][form="composer"]');

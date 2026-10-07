@@ -342,8 +342,8 @@ time**. `config.CHANNEL` is `release` when frozen and `dev` from source, overrid
 
 The UI is three modules in one sidebar, modelled on the CAN utility's workbench
 (`D:\shahbaz\Miscellenious\Code\CAN utlity\web`): **Web FOTA** (everything that existed
-before 2.0), **Web COTA** (listed and marked *Soon* — not built) and **Intouch COTA** (Jobs,
-Devices, Sign in).
+before 2.0), **Web COTA** (listed and marked *Soon* — not built) and **Intouch COTA** (Configure,
+Jobs, Commands, Devices, Sign in).
 
 - **`nav.MODULES` is the only definition.** The sidebar, the top bar's title and description,
   and the tests all read it. A page goes into the right module by its URL alone (`nav.state`),
@@ -387,11 +387,16 @@ Devices, Sign in).
 - **A device's answer can contain secrets** — the live one carried an FTP password. It is stored
   in `cota_command` and shown to anyone who can open the console, viewers included. Never copy
   a real one into a test, a doc or a commit; the tests use a sanitized copy.
-- **Sequences (`cota_run.py`) are one command at a time, by rules agreed with the user** —
-  the next command 2 s after an answer; the guard band (30 s, 60 s for an unrecognised command) before a
-  resend of the same command and before moving on after one that gave up; checks every 10 s
-  (one device heartbeat), 30 s to appear in the cloud, 2 min per attempt, up to 3 attempts then
-  the next command. **The never-duplicate
+- **COTA timing is the user's rule (2026-10-07), for sequences and jobs alike: 30 s per attempt,
+  3 attempts, then the next command — every command over in ~90 s, and no job past its time
+  limit (60 min by default).** No answer in 30 s is no answer, whatever the cloud says it did
+  with the command: a command the cloud *holds* for a sleeping device is resent like any other.
+  Waiting for held commands (up to 12 h) is what it replaced — a 2-device × 4-command job stayed
+  open all day for one held command the cloud never handed over. Do not reintroduce a wait that
+  is not bounded by the job's limit. The guard band is 0 (the 30 s is the gap); a *refused* call
+  is retried after `REFUSED_RETRY_SECONDS` (30), so an outage is not hammered.
+- **Sequences (`cota_run.py`) are one command at a time** — checks every 10 s (one device
+  heartbeat), the next command 2 s after an answer. **The never-duplicate
   rule**: a resend is safe when the earlier attempt provably never reached the device (refused,
   or never listed); after that `DA` GET, `DB` SET and `DD` CLR may go again — CLR by the user's
   decision, knowing a resend could clear a *new* SOS — but never an unrecognised command. A late
@@ -414,9 +419,13 @@ Devices, Sign in).
   missing column itself.
 - **Jobs (`cota_campaign.py`) are many devices × one sequence**, by the sequence rules above,
   driven by one scheduler thread per job that ticks every 10 s. Devices on the same step go in
-  one `saveCOTAConfig` call (batch size), calls are paced to the job's rate, a sleeping device
-  is waited for rather than resent (validity, then `expired`), a canary goes first above 20
-  devices, and the job pauses itself on three failed calls or more than 10% failed. A refused
+  one `saveCOTAConfig` call (batch size), calls are paced to the job's rate, an attempt that runs
+  out is resent in the same tick (with a second of slack for call pacing — without it every
+  attempt slipped to the next tick, 40 s apart), the job's time limit (stored in
+  `validity_hours`, the column the old 12 h window used) stops whatever is left, a canary goes
+  first above 20 devices, and the job pauses itself on three failed calls or more than 10%
+  failed. A late answer flips a failed command to `answered_late` while the device is still in
+  the job. A refused
   call is never an attempt. One job at a time; a device in a live job or sequence is refused
   everywhere else. Never call `cota_campaign.start` from a test — patch it, as `no_job_threads`
   does.
@@ -433,6 +442,29 @@ Devices, Sign in).
 - **Scale is a test, not a guess:** `OTA_SCALE_DEVICES=30000` runs the full-fleet simulation
   in `tests/test_cota_campaign.py` (~4 min; 1,000 by default). Run it after touching the
   scheduler's queries — an unindexed lookup made 5,000 devices take 303 s instead of 48.
+- **Time to answer is measured from a step's first attempt** (2.0.1, `answer_seconds`,
+  `answered_attempt`). On 07-10-2026 the desk device 786 answered ~5¾ min after attempt 1 every
+  time, on whichever record was newest. Measuring from the attempt that carried the answer would
+  have read "20 s" and hidden it. The answer wait is a job setting (`answer_wait_seconds`, NULL
+  means `cota_run.ANSWER_WAIT_SECONDS`, 30 s).
+- **The command library names commands everywhere** (`cota_library.py`): a parameter name
+  covers every GET/SET/CLR of it, a saved command names that exact value. `describe_command`
+  cannot reach the database, so the names sit in `cota.LIBRARY`, loaded once per database by
+  `api.get_conn()` and refreshed by every save. A test fixture resets both — a new reader of
+  command names needs nothing else.
+- **`cota_campaign.next_action` restates the scheduler's rules for the page** (the job's *Next*
+  column: what happens to a device, and when). Change `Scheduler._judge` or `_after_attempt`
+  and change it too — its parametrized test is the list of cases to keep in step. The check
+  that ends an answer wait is scheduled onto that moment, which is what makes the time it shows
+  true to the tick.
+- **A job's outcome counts come from `cota_campaign.outcome_segments`, and nowhere else.** A
+  sent command stays `queued` as a result until it is judged, so "waiting" and "not sent
+  yet" must be split there, once — the tiles, the split bar and the jobs list all read it. A
+  second count would double-count in-flight commands, which the first version did.
+- **`/cota/jobs/new` is declared before `/cota/jobs/{job_id}`**, which would otherwise claim
+  "new" and refuse it as not an integer.
+- **New COTA controls draw icons through `_icons.html`'s `icon('name')`** — the icon test
+  finds names by that exact call shape, so keep it single-argument.
 - **A user-supplied string never goes inside an inline script.** HTML-escaping does not protect
   it there: the attribute is decoded before the script runs. Put it in a `data-` attribute and
   read `this.dataset` (the group delete confirm does).
@@ -952,6 +984,7 @@ ota_analytics/
   cota_connection.py  COTA sign-in: cloud presets, token/password (keyring / env), renewal
   cota_run.py    sequences: one device, commands one at a time
   cota_campaign.py    jobs: many devices × a sequence, the scheduler, groups, day retention
+  cota_library.py     the command library: parameter names, saved commands, names as typed
   scheduler.py   periodic fetch and rollup
   errors.py      failure log shown at /errors
   exports.py     XLSX report generation

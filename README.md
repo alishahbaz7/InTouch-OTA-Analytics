@@ -58,7 +58,7 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 805 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 879 tests
 ```
 
 **Running the release and a development copy together.** The packaged release serves on
@@ -211,11 +211,15 @@ password.
 
 - **Configure**: a conversation with one device. Send a command, see it accepted (✓), listed by
   the cloud (white ✓✓) and answered by the device (green ✓✓). Or run a **sequence**, several
-  commands one at a time, with guard bands and up to 3 attempts each.
-- **Jobs**: the same sequence for many devices, up to the whole fleet. Choose the devices by
-  group, by typed ids, or from a CSV of `id,trackingCode` (*Download template* gives the format).
-  Preview the plan, then start. The job page shows progress, a command × outcome grid and every
-  device's state, with pause, resume, cancel and export.
+  commands one at a time — 30 s for an answer, up to 3 attempts, then the next command.
+- **Jobs**: the same sequence for many devices, up to the whole fleet. The page opens on today's
+  dashboard — tiles, outcomes per job, answers per hour — and today's jobs; *New job* chooses the devices by group, by typed ids, or from a CSV of `id,trackingCode`
+  (*Download template* gives the format), names each command as it is typed, and previews the
+  plan before anything is sent. The job page shows progress as tiles and graphs (outcome split, time to
+  answer, answered on which attempt), a command summary, and every device — each unfolds to its own conversation — with pause, resume,
+  cancel, duplicate, rerun of the unanswered devices, and export.
+- **Commands**: your names for parameters (`6C0A` → a name) and for whole commands, with tags —
+  every page and export reads them, and Configure and Jobs pick saved commands from a list.
 - **Devices**: send one command to a list, load the device map, save groups.
 
 The COTA record lives for the day: the first COTA page opened on a later day clears the earlier

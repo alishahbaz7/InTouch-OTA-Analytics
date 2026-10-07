@@ -1294,7 +1294,7 @@ button.bubble:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .job-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .inline-form { display: inline-flex; gap: 6px; margin: 0; }
 .job-progress-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.job-progress-head strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.job-pct { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .job-calls { margin-left: auto; }
 .job-counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .job-grid td.n, .group-table td.n { font-variant-numeric: tabular-nums; }
@@ -1304,6 +1304,144 @@ button.bubble:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .job-filters a:hover { color: var(--text); }
 .job-filters a.on { color: var(--text); border-color: var(--accent); background: rgba(77,157,255,.12); }
 .group-table { margin-top: 14px; }
+/* 2.0.1 — Jobs list, new job, job page, Commands. Sizes are the house ones: 21px for the one big
+   number (as a tile), 13px headings, 12.5px buttons and mono, 11.5px hints. Icons come from
+   nav.ICONS through _icons.html and are sized here by the control they sit in. */
+.btn-icon { display: inline-flex; align-items: center; gap: 6px; }
+.btn-icon svg { width: 15px; height: 15px; flex: none; }
+a.btn-primary, a.tool-btn { text-decoration: none; }
+.back-link { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 10px;
+             color: var(--dim); font-size: 12.5px; font-weight: 600; text-decoration: none; }
+.back-link svg { width: 16px; height: 16px; }
+.back-link:hover { color: var(--accent); }
+.list-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.list-head h2 { margin: 0 auto 0 0; }
+.empty-state { display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+               padding: 6px 0 4px; color: var(--dim); }
+.empty-state p { margin: 0; }
+.step-chain { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 4px; }
+.step-chain > span { font-size: 12px; white-space: nowrap; }
+.step-chain svg { width: 12px; height: 12px; color: var(--muted); flex: none; }
+.mini-progress { display: inline-flex; align-items: center; gap: 8px; min-width: 130px; }
+.mini-progress .job-track { flex: 1; margin: 0; display: block; }
+.mini-progress .job-fill { display: block; }
+.mini-pct { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dim); min-width: 42px;
+            text-align: right; }
+.job-list td { vertical-align: middle; }
+.job-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.toolbar-title { margin: 0; }
+.field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.library-pick .tool-btn { height: 28px; padding: 0 10px; }
+.library-pick > summary::after { content: none; }
+.library-panel { right: 0; left: auto; min-width: 300px; max-height: 280px; overflow: auto; }
+/* The console's composer is at the foot of the window: its picker opens upwards. */
+.library-up { top: auto; bottom: calc(100% + 6px); }
+.library-panel .dropdown-item { width: 100%; background: none; border: none; color: var(--text);
+                                font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.library-panel .dropdown-item em { font-style: normal; color: var(--muted); font-size: 11.5px; }
+.line-names { list-style: none; margin: -4px 0 4px; padding: 0; display: grid; gap: 2px;
+              font-size: 12px; }
+.line-names:empty { display: none; }
+.line-names li { display: flex; gap: 8px; align-items: baseline; }
+.line-no { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 18px; text-align: right; }
+.line-ok { color: var(--text); }
+.line-bad { color: var(--bad); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
+           white-space: nowrap; }
+.unfold-col { width: 28px; padding-left: 4px; padding-right: 0; }
+.unfold-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px;
+              height: 24px; padding: 0; border-radius: 6px; background: none; color: var(--dim);
+              border: 1px solid transparent; cursor: pointer; }
+.unfold-btn svg { width: 16px; height: 16px; }
+.unfold-btn:hover { color: var(--accent); border-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+.job-devices tr.is-open td { background: var(--panel-2); border-bottom-color: transparent; }
+.job-devices tr.device-detail td { background: var(--panel-2); white-space: normal; padding: 6px 10px 12px 36px; }
+.last-answer { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+/* What happens next to a device, and when: the action, a live countdown, the clock time. */
+.next-cell { white-space: nowrap; line-height: 1.3; }
+.next-what { display: block; }
+.countdown { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; margin-right: 6px; }
+.reading { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px;
+           margin-right: 4px; }
+.reading-ok { color: var(--ok); }
+.reading-failed { color: var(--bad); }
+.conv-steps { display: grid; gap: 10px; margin-bottom: 10px; }
+.conv-step { border-left: 2px solid color-mix(in srgb, var(--muted) 50%, transparent); padding-left: 10px; }
+.conv-step-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.conv-attempts { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+.conv-attempts li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 12.5px; }
+.conv-answer { display: inline-flex; align-items: baseline; gap: 8px; padding: 2px 8px;
+               border-radius: 8px; background: var(--panel); border: 1px solid var(--line);
+               max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.conv-open { height: 28px; padding: 0 10px; }
+.pill-result-done { background: rgba(53,196,138,.15); color: var(--ok); }
+.pill-result-failed { background: rgba(229,84,75,.12); color: var(--bad); }
+.pill-result-queued { background: rgba(224,168,58,.15); color: var(--warn); }
+.pill-result-expired, .pill-result-skipped, .pill-result-cancelled { background: rgba(100,112,127,.2); color: var(--muted); }
+.pager a svg { width: 14px; height: 14px; vertical-align: -2px; }
+.param-row { grid-template-columns: 110px 1fr; }
+.library-table { margin-top: 12px; }
+.library-table td { vertical-align: middle; }
+.library-table td.reads-cell { white-space: normal; }
+.row-actions { text-align: right; white-space: nowrap; }
+.row-actions .link-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.row-actions .link-btn svg { width: 14px; height: 14px; }
+.pill-kind-get { background: rgba(77,157,255,.15); color: var(--accent); }
+.pill-kind-set { background: rgba(224,168,58,.15); color: var(--warn); }
+.pill-kind-clear { background: rgba(100,112,127,.2); color: var(--text); }
+.tag-chip { display: inline-block; padding: 1px 8px; margin: 0 4px 2px 0; border-radius: 12px;
+            font-size: 11.5px; color: var(--dim); border: 1px solid var(--line); }
+/* 2.0.1 — job pictures: the outcome bar, tiles and two small charts on a job; today's tiles and
+   charts above the jobs list. One colour per outcome, the same in the bar, the tile and the
+   legend: answered green, waiting amber, failed red, expired/skipped/cancelled grey, not sent the
+   bare track. */
+.tile.tone-warn { border-left: 3px solid var(--warn); }
+.tile.tone-warn .tile-value { color: var(--warn); }
+.tile.tone-red { border-left: 3px solid var(--bad); }
+.tile.tone-red .tile-value { color: var(--bad); }
+.stack-seg.bad { background: var(--bad); }
+.stack.stack-big { height: 12px; border-radius: 6px; margin: 8px 0 12px; }
+.job-tiles { margin: 0 0 12px; }
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.chart-card { margin: 0; min-width: 0; }
+.chart-grid > .chart-card:not(.card) { background: var(--panel-2); border: 1px solid var(--line);
+                                       border-radius: 8px; padding: 10px 12px; }
+.chart-card figcaption { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.chart-card figcaption span { color: var(--muted); font-weight: 400; font-size: 11.5px; margin-left: 6px; }
+.chart-note { margin: 6px 0 0; color: var(--muted); font-size: 11.5px; }
+.chart-empty { margin: 18px 0; color: var(--muted); font-size: 12.5px; }
+.svg-chart .bar-num { fill: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart-legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.chart-legend li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.chart-legend span { color: var(--dim); flex: 1; }
+.chart-legend b { font-variant-numeric: tabular-nums; }
+.chart-legend em { color: var(--muted); font-style: normal; font-size: 11.5px; min-width: 38px;
+                   text-align: right; font-variant-numeric: tabular-nums; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.swatch-ok { background: var(--ok); }
+.swatch-warn { background: var(--warn); }
+.swatch-bad { background: var(--bad); }
+.swatch-neutral { background: var(--muted); }
+.swatch-orange { background: #e8893c; }
+.swatch-empty { border: 1px solid var(--muted); }
+.outcome-col { min-width: 140px; }
+.outcome-col .stack { margin: 0; }
+.dash-charts { margin-bottom: 12px; }
+.job-bars { display: grid; gap: 2px; }
+.job-bar-row { display: grid; grid-template-columns: minmax(120px, 1.2fr) 2fr auto; align-items: center;
+               gap: 10px; padding: 5px 6px; border-radius: 6px; color: inherit; text-decoration: none;
+               font-size: 12.5px; }
+.job-bar-row:hover { background: var(--panel-2); }
+.job-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-bar-value { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; }
+/* Wide tables scroll sideways inside their card on a narrow window. Only there: a scrolling
+   box is what a sticky header sticks to, so on a wide screen the header keeps the page. */
+@media (max-width: 1100px) {
+  .table-wrap { overflow-x: auto; }
+  .table-wrap th { position: static; }
+}
 @media (max-width: 720px) {
   .job-actions, .job-calls { margin-left: 0; }
+  .list-head { flex-wrap: wrap; }
 }

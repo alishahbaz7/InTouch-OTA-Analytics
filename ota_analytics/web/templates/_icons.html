@@ -1,0 +1,6 @@
+{#- One way to draw an icon: a line icon from nav.ICONS, sized by the control it sits in.
+    {% from "_icons.html" import icon %} — then icon('plus'). -#}
+{%- macro icon(name) -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+     stroke-linejoin="round" aria-hidden="true">{{ nav_icons[name] | safe }}</svg>
+{%- endmacro -%}

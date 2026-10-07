@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}New job — Intouch COTA{% endblock %}
+
+{% block content %}
+<a class="back-link" href="/cota">{{ icon('chevron-left') }}<span>All jobs</span></a>
+
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+{% if live %}
+<div class="notice notice-warn">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }} —
+  <a href="/cota/jobs/{{ live.id }}">open it</a>. One job runs at a time: you can plan this one,
+  and start it once that one has finished.</div>
+{% endif %}
+{%- set d = draft or {} -%}
+{% if d.get('from_job') and not preview %}
+<div class="notice notice-ok">Filled from job #{{ d.from_job }} —
+  {{ 'devices that did not answer every command' if d.from_which == 'unfinished' else 'all its devices' }}
+  ({{ d.from_count | comma }}). Check it, then preview.</div>
+{% endif %}
+
+<div class="module-grid">
+  {# ── a new job: devices, commands, settings — then the plan, then Start ── #}
+  <section class="card">
+    <h2>New job</h2>
+    <form method="post" action="/cota/jobs/preview" enctype="multipart/form-data" class="stack-form" id="job-form">
+      <label>Name
+        <input type="text" name="name" value="{{ d.get('name', '') }}" placeholder="e.g. FTP settings — Delhi fleet">
+      </label>
+      <label>Devices — a saved group
+        <select name="group_id">
+          <option value="">— or type / upload them below —</option>
+          {% for g in groups %}
+          <option value="{{ g.id }}" {{ 'selected' if d.get('group_id') == g.id | string }}>{{ g.name }} · {{ g.devices | comma }} devices</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>…or device ids
+        <textarea name="devices" rows="3" class="mono" spellcheck="false"
+                  placeholder="786, 14906">{{ d.get('devices', '') if not d.get('group_id') }}</textarea>
+      </label>
+      <label>…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
+          <a href="/cota/groups/template.csv">Download template</a></span>
+        <input type="file" name="file" accept=".csv">
+      </label>
+      <div class="field-label-row">
+        <span class="field-label">Commands — one per line, sent in order</span>
+        {% if library %}
+        <details class="dropdown library-pick">
+          <summary class="tool-btn">{{ icon('book') }}<span>From library</span></summary>
+          <div class="dropdown-panel library-panel">
+            {% for c in library %}
+            <button type="button" class="dropdown-item" data-val1="{{ c.val1 }}">
+              <span>{{ c.name }}</span><em class="mono">{{ c.val1[:18] }}{% if c.val1 | length > 18 %}…{% endif %}</em>
+            </button>
+            {% endfor %}
+          </div>
+        </details>
+        {% else %}
+        <a class="field-hint" href="/cota/commands">Save commands to pick them here</a>
+        {% endif %}
+      </div>
+      <textarea name="commands" id="job-commands" rows="5" class="mono" spellcheck="false" required
+                aria-label="Commands" placeholder="DAD76F4B&#10;DAD76C0A">{{ d.get('commands', '') }}</textarea>
+      <ol class="line-names" id="line-names" aria-live="polite"></ol>
+      <details class="advanced">
+        <summary>Settings <span class="opt">— batch {{ d.get('batch_size') or defaults.batch }} ·
+          {{ d.get('rate_per_sec') or defaults.rate }} calls/s ·
+          answer wait {{ d.get('answer_wait_seconds') or defaults.answer_wait }} s ·
+          time limit {{ d.get('time_limit_minutes') or defaults.time_limit }} min</span></summary>
+        <div class="field-row">
+          <label>Devices per send call
+            <input type="number" name="batch_size" min="1" max="5000"
+                   value="{{ d.get('batch_size') or defaults.batch }}"></label>
+          <label>Calls per second
+            <input type="number" name="rate_per_sec" min="0.1" max="100" step="0.1"
+                   value="{{ d.get('rate_per_sec') or defaults.rate }}"></label>
+        </div>
+        <div class="field-row">
+          <label>Wait for an answer, per attempt (seconds)
+            <input type="number" name="answer_wait_seconds" min="10" max="3600" step="5"
+                   value="{{ d.get('answer_wait_seconds', '') }}" placeholder="{{ defaults.answer_wait }}"></label>
+          <label>Time limit for the whole job (minutes)
+            <input type="number" name="time_limit_minutes" min="5" max="1440" step="5"
+                   value="{{ d.get('time_limit_minutes') or defaults.time_limit }}"></label>
+        </div>
+        <div class="field-row">
+          <label>Model · type
+            <span class="inline-pair">
+              <input type="number" name="device_type" value="{{ d.get('device_type') or defaults.type }}" aria-label="Model">
+              <input type="number" name="cmd_type" value="{{ d.get('cmd_type') or defaults.cmd }}" aria-label="Type">
+            </span></label>
+        </div>
+        <p class="field-hint">Each command: 3 attempts, the answer wait apart, then the next command.
+          At the time limit, every device still in progress stops and the job ends. A device that
+          answers after the job has moved on is still recorded — as answered late.</p>
+      </details>
+      <div class="form-actions"><button type="submit">Preview</button>
+        <span class="hint">Nothing is sent until you press Start.</span></div>
+    </form>
+  </section>
+
+  {# ── the plan ── #}
+  <section class="card" id="plan">
+    {% if preview %}
+    {%- set p = preview %}
+    <h2>Plan <span class="hint">nothing sent yet</span></h2>
+    {% if p.problems %}<div class="notice notice-error">{{ p.problems[:5] | join('; ') }}{% if p.problems | length > 5 %} …{% endif %}</div>{% endif %}
+    {% if p.bad %}<div class="notice notice-error">Fix these commands first:
+      {% for s in p.bad %}line {{ s.line }} ({{ s.val1[:16] or 'blank' }}): {{ s.problem }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
+    {% if p.busy %}<div class="notice notice-error">{{ p.busy | length }} device(s) are in a live
+      sequence or job ({{ p.busy[:10] | join(', ') }}) — one thing at a time per device.</div>{% endif %}
+    <dl class="kv plan-kv">
+      <dt>Devices</dt><dd>{{ p.devices | comma }}</dd>
+      <dt>Commands</dt><dd><ol class="plan-steps">{% for name in p.names %}<li><strong>{{ name }}</strong> <span class="mono dim">{{ p.steps[loop.index0].val1[:20] }}{% if p.steps[loop.index0].val1 | length > 20 %}…{% endif %}</span></li>{% endfor %}</ol></dd>
+      <dt>Canary</dt><dd>{% if p.canary %}the first {{ p.canary }} device{{ '' if p.canary == 1 else 's' }}, then the rest if no more than 10% fail{% else %}none — {{ p.devices }} devices go together{% endif %}</dd>
+      <dt>Each command</dt><dd>{{ p.answer_wait | int }} s for an answer, up to 3 attempts, then the next command</dd>
+      <dt>Calls</dt><dd>{{ p.send_calls | comma }} send · about {{ p.check_calls | comma }} checks while devices answer
+        <div class="field-hint">A check reads one device per call — the cloud refuses a list — so for a
+          large job the calls-per-second setting decides how long it takes.</div></dd>
+      <dt>Time</dt><dd>about {% if p.estimate_minutes >= 90 %}{{ '%.1f' | format(p.estimate_minutes / 60) }} h{% else %}{{ p.estimate_minutes }} min{% endif %}
+        if devices answer · at most {% if p.worst_minutes >= 90 %}{{ '%.1f' | format(p.worst_minutes / 60) }} h{% else %}{{ p.worst_minutes }} min{% endif %} if none does ·
+        stops at {{ p.limit_minutes | int }} min whatever happens</dd>
+    </dl>
+    {% if p.over_limit and p.devices %}<div class="notice notice-warn">If devices do not answer, this
+      job needs about {{ p.worst_minutes }} min — longer than its {{ p.limit_minutes | int }}-minute limit, so some
+      would be stopped unfinished. Raise the calls per second, split the group, or raise the limit.</div>{% endif %}
+    {% if p.devices and p.steps and not p.bad and not p.busy and not p.problems %}
+    <form method="post" action="/cota/jobs/start" class="stack-form">
+      {#- What was previewed is exactly what starts: the plan's own ids, the form's own values. -#}
+      {%- set fallback = {'batch_size': defaults.batch, 'rate_per_sec': defaults.rate,
+                          'time_limit_minutes': defaults.time_limit, 'device_type': defaults.type,
+                          'cmd_type': defaults.cmd} %}
+      {% for k in ('name', 'batch_size', 'rate_per_sec', 'time_limit_minutes', 'answer_wait_seconds', 'device_type', 'cmd_type') %}
+      <input type="hidden" name="{{ k }}" value="{{ d.get(k) or fallback.get(k, '') }}">
+      {% endfor %}
+      {#- A textarea, not a hidden input: the line breaks between commands must survive. -#}
+      <textarea name="commands" hidden>{{ d.get('commands', '') }}</textarea>
+      <input type="hidden" name="device_ids" value="{{ p.device_ids }}">
+      {% if live %}
+      <div class="notice notice-warn">Job #{{ live.id }} is still {{ live.state }} — start this one when it has finished.</div>
+      {% elif cota_status.token_held %}
+      <div class="form-actions"><button type="submit" class="btn-send btn-icon">{{ icon('send') }}<span>Start job — {{ p.devices | comma }} device{{ '' if p.devices == 1 else 's' }}</span></button></div>
+      {% else %}
+      <div class="notice notice-warn">Not signed in to the cloud — sign in (top right), then preview again.</div>
+      {% endif %}
+    </form>
+    {% endif %}
+    {% else %}
+    <h2>How a job runs</h2>
+    <ol class="module-steps">
+      <li><strong>Each device moves through the commands on its own</strong>, one at a time —
+        the next 2 s after an answer.</li>
+      <li><strong>An attempt waits 30 s for the answer</strong>, then the command is sent again —
+        up to 3 attempts, then the next command. At most about 2 minutes per command.</li>
+      <li><strong>No job runs past its time limit</strong> — 60 minutes unless you set it. A late
+        answer is still recorded, as answered late.</li>
+      <li><strong>Devices ready for the same command go in one call</strong>, paced to the rate
+        you set. For more than 20 devices a canary goes first, and the job pauses itself if more
+        than 10% of commands fail.</li>
+    </ol>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Each command line's name as it is typed — asked of this install, which knows the library, so
+// the page and the plan cannot disagree. And the library picker adds a line.
+(function () {
+  var box = document.getElementById('job-commands'), list = document.getElementById('line-names');
+  if (!box || !list) return;
+  var timer = null;
+  function draw(lines) {
+    list.innerHTML = '';
+    lines.forEach(function (l) {
+      var li = document.createElement('li');
+      li.className = l.problem ? 'line-bad' : 'line-ok';
+      var at = document.createElement('span'); at.className = 'line-no'; at.textContent = l.line;
+      var name = document.createElement('span');
+      name.textContent = l.problem ? l.problem : (l.name || l.val1);
+      li.appendChild(at); li.appendChild(name); list.appendChild(li);
+    });
+  }
+  function ask() {
+    var body = new URLSearchParams(); body.set('text', box.value);
+    fetch('/cota/commands/describe', { method: 'POST', body: body })
+      .then(function (r) { return r.json(); }).then(function (d) { draw(d.lines || []); })
+      .catch(function () {});
+  }
+  box.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(ask, 300); });
+  if (box.value.trim()) ask();
+  document.querySelectorAll('.library-pick [data-val1]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = box.value.replace(/\s+$/, '');
+      box.value = (v ? v + '\n' : '') + b.getAttribute('data-val1');
+      b.closest('details').removeAttribute('open');
+      box.focus(); ask();
+    });
+  });
+})();
+</script>
+{% endblock %}

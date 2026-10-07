@@ -25,8 +25,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, bundle, config, cota, cota_campaign, cota_connection, cota_run, db, errors,
-               exports, identity,
+from . import (auth, bundle, config, cota, cota_campaign, cota_connection, cota_library,
+               cota_run, db, errors, exports, identity,
                ingest, metrics, nav, normalize, progress, registry, rollup, scheduler, sources,
                startup)
 
@@ -42,7 +42,11 @@ templates = Jinja2Templates(directory=str(WEB / "templates"))
 
 
 def get_conn() -> sqlite3.Connection:
-    return db.connect()
+    conn = db.connect()
+    # The command library's names, loaded once per database so that every page — and an export,
+    # and the first page after a restart — names commands the user's way. Saving refreshes it.
+    cota_library.ensure_loaded(conn)
+    return conn
 
 
 @app.middleware("http")
@@ -575,15 +579,26 @@ def _cota_context(conn: sqlite3.Connection, request: Request, tab: str, **extra)
 # ─── Intouch COTA: jobs — many devices, a sequence each ─────────────────────
 
 def _jobs_context(conn, request: Request, **extra) -> dict:
-    # One-off sends from the Devices page are listed too — that page says "see Jobs". A job's
-    # own calls and a console's are not: they have their own pages.
+    """The jobs list. One-off sends from the Devices page are listed too — that page says "see
+    Jobs". A job's own calls and a console's are not: they have their own pages."""
     sends = [j for j in cota.jobs(conn) if j["source_file"] != "campaign"
              and not (j["source_file"] or "").startswith("console:")]
     return _cota_context(conn, request, "jobs", jobs=cota_campaign.campaigns(conn), sends=sends,
-                         groups=cota_campaign.groups(conn), live=cota_campaign.active(conn),
+                         live=cota_campaign.active(conn), today=cota_campaign.today(conn), **extra)
+
+
+JOB_FORM_FIELDS = ("name", "group_id", "devices", "commands", "batch_size", "rate_per_sec",
+                   "time_limit_minutes", "answer_wait_seconds", "device_type", "cmd_type")
+
+
+def _new_job_context(conn, request: Request, **extra) -> dict:
+    """The new-job page: the form, the plan once previewed, and the library to pick from."""
+    return _cota_context(conn, request, "jobs", groups=cota_campaign.groups(conn),
+                         live=cota_campaign.active(conn), library=cota_library.commands(conn),
                          defaults={"batch": cota_campaign.DEFAULT_BATCH,
                                    "rate": cota_campaign.DEFAULT_RATE,
-                                   "validity": cota_campaign.DEFAULT_VALIDITY_HOURS,
+                                   "time_limit": cota_campaign.DEFAULT_TIME_LIMIT_MINUTES,
+                                   "answer_wait": cota_campaign.DEFAULT_ANSWER_WAIT_SECONDS,
                                    "type": cota.DEFAULT_DEVICE_TYPE, "cmd": cota.DEFAULT_CMD_TYPE},
                          **extra)
 
@@ -591,6 +606,17 @@ def _jobs_context(conn, request: Request, **extra) -> dict:
 @app.get("/cota", response_class=HTMLResponse)
 def cota_jobs(request: Request):
     return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(get_conn(), request))
+
+
+@app.get("/cota/jobs/new", response_class=HTMLResponse)
+def cota_job_new(request: Request, source: int = Query(0, alias="from"), which: str = "all"):
+    """A new job — blank, or filled from an earlier one (Duplicate, Rerun). Declared before
+    /cota/jobs/{job_id}, which would otherwise claim "new" and refuse it as not a number."""
+    conn = get_conn()
+    draft = cota_campaign.draft_from(conn, source, which if which == "unfinished" else "all") \
+        if source else None
+    return templates.TemplateResponse(request, "cota_job_new.html",
+                                      _new_job_context(conn, request, draft=draft))
 
 
 def _job_form_devices(conn, group_id: str, device_text: str) -> tuple[list[int], list[str]]:
@@ -609,9 +635,7 @@ async def cota_jobs_preview(request: Request):
 
     def build():
         conn = get_conn()
-        draft = {k: str(form.get(k, "")) for k in ("name", "group_id", "devices", "commands",
-                                                    "batch_size", "rate_per_sec", "validity_hours",
-                                                    "device_type", "cmd_type")}
+        draft = {k: str(form.get(k, "")) for k in JOB_FORM_FIELDS}
         if content:
             rows, _ = cota_campaign.read_csv_devices(content)
             draft["devices"] = "\n".join(d for d, _ in rows)
@@ -623,37 +647,56 @@ async def cota_jobs_preview(request: Request):
             rate = max(0.1, float(draft["rate_per_sec"] or cota_campaign.DEFAULT_RATE))
         except ValueError:
             batch, rate = cota_campaign.DEFAULT_BATCH, cota_campaign.DEFAULT_RATE
-        the_plan = cota_campaign.plan(conn, ids, draft["commands"], batch_size=batch,
-                                      rate_per_sec=rate)
+        the_plan = cota_campaign.plan(
+            conn, ids, draft["commands"], batch_size=batch, rate_per_sec=rate,
+            answer_wait_seconds=_number(draft["answer_wait_seconds"], float, None),
+            time_limit_minutes=_number(draft["time_limit_minutes"], float, None))
         the_plan["problems"] = problems
         the_plan["device_ids"] = ",".join(map(str, ids))
-        return _jobs_context(conn, request, draft=draft, preview=the_plan)
+        return _new_job_context(conn, request, draft=draft, preview=the_plan)
 
     ctx = await run_in_threadpool(build)
-    return templates.TemplateResponse(request, "cota_jobs.html", ctx)
+    return templates.TemplateResponse(request, "cota_job_new.html", ctx)
+
+
+def _number(text: str, cast, default):
+    try:
+        return cast(text) if str(text).strip() else default
+    except ValueError:
+        return default
 
 
 @app.post("/cota/jobs/start", response_class=HTMLResponse)
 def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Form(""),
-                    commands: str = Form(""), batch_size: int = Form(cota_campaign.DEFAULT_BATCH),
-                    rate_per_sec: float = Form(cota_campaign.DEFAULT_RATE),
-                    validity_hours: float = Form(cota_campaign.DEFAULT_VALIDITY_HOURS),
-                    device_type: int = Form(cota.DEFAULT_DEVICE_TYPE),
-                    cmd_type: int = Form(cota.DEFAULT_CMD_TYPE)):
+                    commands: str = Form(""), batch_size: str = Form(""),
+                    rate_per_sec: str = Form(""), time_limit_minutes: str = Form(""),
+                    answer_wait_seconds: str = Form(""), device_type: str = Form(""),
+                    cmd_type: str = Form("")):
     conn = get_conn()
     ids, _, _ = cota_campaign.parse_device_ids(device_ids)
+    # Refused, the page goes back to the form as it was — not to a list that has lost it.
+    draft = {"name": name, "group_id": "", "devices": ", ".join(map(str, ids)),
+             "commands": commands, "batch_size": batch_size, "rate_per_sec": rate_per_sec,
+             "time_limit_minutes": time_limit_minutes, "answer_wait_seconds": answer_wait_seconds,
+             "device_type": device_type, "cmd_type": cmd_type}
+
+    def refused(message: str):
+        return templates.TemplateResponse(request, "cota_job_new.html", _new_job_context(
+            conn, request, draft=draft, result={"level": "error", "message": message}))
+
     if not cota.load_token() and not cota_connection.renew():
-        return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(
-            conn, request, result={"level": "error",
-                                   "message": "Not signed in to the cloud — sign in, then start."}))
+        return refused("Not signed in to the cloud — sign in, then start.")
     try:
-        cid = cota_campaign.create(conn, name=name, device_ids=ids, commands_text=commands,
-                                   device_type=device_type, cmd_type=cmd_type,
-                                   batch_size=batch_size, rate_per_sec=rate_per_sec,
-                                   validity_hours=validity_hours)
+        cid = cota_campaign.create(
+            conn, name=name, device_ids=ids, commands_text=commands,
+            device_type=_number(device_type, int, cota.DEFAULT_DEVICE_TYPE),
+            cmd_type=_number(cmd_type, int, cota.DEFAULT_CMD_TYPE),
+            batch_size=_number(batch_size, int, cota_campaign.DEFAULT_BATCH),
+            rate_per_sec=_number(rate_per_sec, float, cota_campaign.DEFAULT_RATE),
+            time_limit_minutes=_number(time_limit_minutes, float, None),
+            answer_wait_seconds=_number(answer_wait_seconds, float, None))
     except cota_campaign.CampaignError as exc:
-        return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(
-            conn, request, result={"level": "error", "message": str(exc)}))
+        return refused(str(exc))
     cota_campaign.start(cid)
     return RedirectResponse(f"/cota/jobs/{cid}", status_code=303)
 
@@ -661,36 +704,49 @@ def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Fo
 JOB_DEVICE_FILTERS = ("", "waiting", "ready", "done", "failed", "expired", "cancelled")
 
 
+def _open_devices(text: str) -> list[int]:
+    """Devices whose conversation is unfolded on the page — kept by the page, at most a page."""
+    return [int(x) for x in (text or "").split(",") if x.strip().isdigit()][:50]
+
+
 def _job_context(conn, request: Request, job_id: int, state: str = "", q: str = "",
-                 page: int = 1, **extra) -> dict | None:
+                 page: int = 1, open_: str = "", **extra) -> dict | None:
     job = cota_campaign.summary(conn, job_id)
     if not job:
         return None
     state = state if state in JOB_DEVICE_FILTERS else ""
     rows, total = cota_campaign.device_rows(conn, job_id, state=state, search=q, page=page)
+    shown = {r["device_id"] for r in rows}
+    opened = {d: cota_campaign.device_conversation(conn, job_id, d)
+              for d in _open_devices(open_) if d in shown}
     return _cota_context(conn, request, "jobs", job=job, grid=cota_campaign.grid(conn, job_id),
+                         charts=cota_campaign.job_charts(conn, job_id, job),
                          devices=rows, devices_total=total, state=state, q=q,
-                         page=max(1, page), pages=max(1, -(-total // 50)),
-                         words=cota_campaign.RESULT_WORDS, **extra)
+                         page=max(1, page), pages=max(1, -(-total // 50)), opened=opened,
+                         now_epoch=round(cota._parse(cota._now()).timestamp()),
+                         stages=cota.STAGES, words=cota_campaign.RESULT_WORDS, **extra)
 
 
 @app.get("/cota/jobs/{job_id}", response_class=HTMLResponse)
-def cota_job(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1):
+def cota_job(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1,
+             open_: str = Query("", alias="open")):
     conn = get_conn()
-    ctx = _job_context(conn, request, job_id, state, q, page)
+    ctx = _job_context(conn, request, job_id, state, q, page, open_)
     if ctx is None:
         return RedirectResponse("/cota", status_code=303)
     return templates.TemplateResponse(request, "cota_job.html", ctx)
 
 
 @app.get("/cota/jobs/{job_id}/status")
-def cota_job_status(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1):
+def cota_job_status(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1,
+                    open_: str = Query("", alias="open")):
     """What the job page redraws every few seconds — this install's record only, no cloud call."""
     conn = get_conn()
-    ctx = _job_context(conn, request, job_id, state, q, page)
+    ctx = _job_context(conn, request, job_id, state, q, page, open_)
     if ctx is None:
         return JSONResponse({"ok": False})
-    return JSONResponse({"ok": True, "state": ctx["job"]["state"],
+    job = ctx["job"]
+    return JSONResponse({"ok": True, "state": job["state"], "percent": job["percent"],
                          "html": templates.get_template("_cota_job_live.html").render(ctx)})
 
 
@@ -700,6 +756,13 @@ def cota_job_control(job_id: int, action: str = Form("")):
     if action in ("pause", "resume", "cancel"):
         cota_campaign.request(conn, job_id, action)
     return RedirectResponse(f"/cota/jobs/{job_id}", status_code=303)
+
+
+@app.post("/cota/commands/describe")
+def cota_commands_describe(text: str = Form("")):
+    """Each typed line's name, as the page shows it under the box. Local only."""
+    cota_library.refresh(get_conn())
+    return JSONResponse({"lines": cota_library.describe_lines(text[:200_000])})
 
 
 @app.get("/cota/jobs/{job_id}/export")
@@ -793,6 +856,63 @@ def cota_groups_delete(request: Request, group_id: int):
     conn = get_conn()
     cota_campaign.delete_group(conn, group_id)
     return RedirectResponse("/cota/devices#groups", status_code=303)
+
+
+# ─── Intouch COTA: the command library ──────────────────────────────────────
+
+def _commands_context(conn, request: Request, q: str = "", tag: str = "", edit: int = 0,
+                      **extra) -> dict:
+    editing = next((c for c in cota_library.commands(conn) if c["id"] == edit), None) if edit else None
+    return _cota_context(conn, request, "commands", parameters=cota_library.parameters(conn),
+                         saved=cota_library.commands(conn, q=q, tag=tag),
+                         saved_total=conn.execute("SELECT COUNT(*) FROM cota_saved_command").fetchone()[0],
+                         tags=cota_library.all_tags(conn), q=q, tag=tag, editing=editing, **extra)
+
+
+@app.get("/cota/commands", response_class=HTMLResponse)
+def cota_commands(request: Request, q: str = "", tag: str = "", edit: int = 0):
+    return templates.TemplateResponse(request, "cota_commands.html",
+                                      _commands_context(get_conn(), request, q, tag, edit))
+
+
+@app.post("/cota/commands/parameters", response_class=HTMLResponse)
+def cota_commands_parameter(request: Request, code: str = Form(""), name: str = Form("")):
+    conn = get_conn()
+    try:
+        saved = cota_library.save_parameter(conn, code, name)
+        result = {"level": "ok", "message": f"{saved} is now “{name.strip()}” — every GET, SET "
+                                            "and CLR of it reads by that name."}
+    except cota_library.LibraryError as exc:
+        result = {"level": "error", "message": str(exc)}
+    return templates.TemplateResponse(request, "cota_commands.html",
+                                      _commands_context(conn, request, result=result))
+
+
+@app.post("/cota/commands/parameters/{code}/delete")
+def cota_commands_parameter_delete(code: str):
+    cota_library.delete_parameter(get_conn(), code)
+    return RedirectResponse("/cota/commands#parameters", status_code=303)
+
+
+@app.post("/cota/commands/saved", response_class=HTMLResponse)
+def cota_commands_save(request: Request, command_id: str = Form(""), name: str = Form(""),
+                       val1: str = Form(""), tags: str = Form(""), note: str = Form("")):
+    conn = get_conn()
+    editing = int(command_id) if command_id.isdigit() else None
+    try:
+        cota_library.save_command(conn, name=name, val1=val1, tags=tags, note=note,
+                                  command_id=editing)
+        return RedirectResponse("/cota/commands#saved", status_code=303)
+    except cota_library.LibraryError as exc:
+        draft = {"id": editing, "name": name, "val1": val1, "tags": tags, "note": note}
+        return templates.TemplateResponse(request, "cota_commands.html", _commands_context(
+            conn, request, result={"level": "error", "message": str(exc)}, draft=draft))
+
+
+@app.post("/cota/commands/saved/{command_id}/delete")
+def cota_commands_delete(command_id: int):
+    cota_library.delete_command(get_conn(), command_id)
+    return RedirectResponse("/cota/commands#saved", status_code=303)
 
 
 COTA_DEVICE_PAGE_SIZES = (25, 50, 100)
@@ -1063,6 +1183,7 @@ def _console_context(conn, request: Request, device_text: str = "", type_text: s
         conn, request, "console", device=device, thread=th,
         conversations=cota.conversations(conn),
         recent=cota.recent_commands(conn, device["id"]) if device else [],
+        library=cota_library.commands(conn),
         stages=cota.STAGES, default_type=cota.DEFAULT_DEVICE_TYPE,
         command_names={str(k): v for k, v in cota.COMMAND_NAMES.items()},
         default_cmd=cota.DEFAULT_CMD_TYPE,

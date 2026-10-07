@@ -247,9 +247,9 @@ def test_a_failed_unknown_command_is_not_repeated(sim):
 
 
 def test_a_late_answer_to_an_earlier_attempt_still_counts(sim):
-    # The first attempt answers at 150 s — after its 120 s wait. The resend is out by then; the
+    # The first attempt answers at 45 s — after its 30 s wait. The resend is out by then; the
     # late answer arrives while it is being watched, and the step is done without a third send.
-    view, device = sim(GET_FTP, {GET_FTP: ["answer:150", "pending"]})
+    view, device = sim(GET_FTP, {GET_FTP: ["answer:45", "pending"]})
     step = view["steps"][0]
     assert step["state"] == "done" and step["attempts"] == 2
     assert device.sent_values() == [GET_FTP, GET_FTP]
@@ -283,8 +283,10 @@ def test_an_expired_session_without_a_saved_password_pauses_and_resumes(sim):
 
 
 def test_a_cloud_that_stops_answering_checks_pauses_and_resumes_on_the_same_attempt(sim):
-    device = Device(sim.clock, {GET_FTP: ["answer:60"]})
-    sim.clock.hooks.append((15, lambda: setattr(device, "fail_checks", 3)))
+    # The checks at 10, 20 and 30 s all fail: the third pauses the run before the 30 s answer
+    # wait can end the attempt. The answer, at 25 s, is found on resume.
+    device = Device(sim.clock, {GET_FTP: ["answer:25"]})
+    sim.clock.hooks.append((5, lambda: setattr(device, "fail_checks", 3)))
     view, _ = sim(GET_FTP, device=device)
     assert view["state"] == "paused" and "did not answer 3 checks" in view["pause_reason"]
     assert view["steps"][0]["pending_task_id"]           # sent; its outcome not yet decided
@@ -337,28 +339,28 @@ def test_a_runner_that_hits_an_unexpected_error_pauses_its_run_and_logs_it(sim):
     assert any(e["source"] == "cota-run" for e in errors.recent(sim.conn))
 
 
-def test_the_guard_band_comes_before_a_resend_and_after_a_command_that_gave_up(sim):
+def test_each_attempt_is_30_s_apart_and_a_command_gives_up_within_two_minutes(sim):
+    """The user's rule (2026-10-07): send, check for 30 s, no answer — send again; three
+    attempts, then the next command. Every command at most about two minutes."""
     view, device = sim(f"{GET_FTP}\n{GET_6C0A}", {GET_FTP: ["pending", "pending", "pending"]})
     times = [t for t, _ in device.sends]
-    # Three attempts of GET_FTP, each waiting its 2 minutes (checked every 10 s), then the guard.
-    first_to_second = times[1] - times[0]
-    assert first_to_second == cota_run.ANSWER_WAIT_SECONDS + cota_run.GUARD_SECONDS["get"]
-    assert times[2] - times[1] == first_to_second
-    # It gave up: the guard band again before the next command, not the 2 s after an answer.
-    assert times[3] - times[2] == cota_run.ANSWER_WAIT_SECONDS + cota_run.GUARD_SECONDS["get"]
+    assert cota_run.ANSWER_WAIT_SECONDS == 30 and cota_run.MAX_ATTEMPTS == 3
+    assert times[1] - times[0] == times[2] - times[1] == 30          # nothing added to the 30 s
+    assert times[3] - times[2] == 30                                 # then straight to the next
+    assert times[3] - times[0] <= 120                                # the whole command: ≤ 2 min
 
 
-def test_a_refused_send_waits_the_guard_band_before_trying_again(sim):
+def test_a_refused_send_is_tried_again_after_30_s_not_at_once(sim):
     view, device = sim(GET_FTP, {GET_FTP: ["api_down", "answer:20"]})
     times = [t for t, _ in device.sends]
-    assert times[1] - times[0] == cota_run.GUARD_SECONDS["get"]
+    assert times[1] - times[0] == cota_run.REFUSED_RETRY_SECONDS == 30
 
 
-@pytest.mark.parametrize("value, guard", [(ACTION, 30), (UNKNOWN, 60)])
-def test_clr_has_the_normal_guard_band_and_an_unknown_command_the_longer_one(sim, value, guard):
+@pytest.mark.parametrize("value", [ACTION, UNKNOWN])
+def test_a_command_never_listed_goes_again_after_30_s_whatever_it_is(sim, value):
     view, device = sim(value, {value: ["lost", "answer:20"]})       # never listed: safe to resend
     times = [t for t, _ in device.sends]
-    assert times[1] - times[0] == cota_run.NOT_IN_CLOUD_SECONDS + guard
+    assert times[1] - times[0] == cota_run.NOT_IN_CLOUD_SECONDS == 30
 
 
 def test_an_outage_does_not_use_up_a_commands_attempts(sim):

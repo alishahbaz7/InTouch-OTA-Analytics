@@ -1,18 +1,21 @@
 """Sequences: one device, several commands, sent one at a time until each has an outcome.
 
-Agreed with the user (2026-10-06) and enforced here:
+Agreed with the user (2026-10-06), retimed by the user (2026-10-07), and enforced here:
 
   * **One command at a time.** The next is sent only once the current one has an outcome, so
     every answer belongs to exactly one command — the cloud's records cannot untangle overlap.
   * **Each command has stages** — accepted ✓, in the cloud ✓✓, delivered, answered — read from
     the same records the console shows.
-  * **2 s after an answer, the guard band after anything else.** Once the device has answered,
-    the next command goes 2 s later. A resend of the same command, and the next command after
-    one that gave up, wait the guard band — 30 s, 60 s for an unrecognised command: the device talks to the
-    cloud every 10 s, so anything shorter would not mean anything; 30 s is three heartbeats.
-    Between a send and its answer, up to 2 minutes, checked every 10 s.
-  * **Up to 3 attempts, then move to the next command.** An attempt is a send the cloud
-    accepted: a refused call is recorded but not counted — three in a row pause the run.
+  * **30 s per attempt, 3 attempts, then the next command** — the user's rule (2026-10-07):
+    "send command, check after 30 s, no response then send again, 3 attempts, if no answer jump
+    to the next command — every command at most about 2 minutes". An attempt is checked every
+    10 s (one device heartbeat) and, unanswered at 30 s, is sent again straight away: the 30 s
+    is the gap. Whatever the cloud says about it — sent, held for a sleeping device, not listed —
+    no answer is no answer. Holding a command for a sleeping device and waiting for it is what
+    kept a 2-device job open for 12 hours (07-10-2026): the cloud never handed it over.
+  * **2 s after an answer**, the next command.
+  * A refused call is recorded but not counted as an attempt, and is retried after 30 s; three
+    in a row pause the run.
   * **Never duplicate.** A resend is always safe when there is proof the earlier attempt never
     reached the device — the send was refused, or the command never appeared in the cloud. Once
     it was delivered, resending a GET (`DA…`) or a SET (`DB…`) is harmless: re-reading or setting
@@ -41,12 +44,15 @@ from . import cota, cota_connection, db
 # ── the rules ──────────────────────────────────────────────────────────────────────────────
 POLL_SECONDS = 10                   # one device heartbeat: checking faster finds nothing new
 NOT_IN_CLOUD_SECONDS = 30           # the cloud lists a command within seconds of accepting it
-ANSWER_WAIT_SECONDS = 120           # per attempt: twelve heartbeats
+ANSWER_WAIT_SECONDS = 30            # per attempt — the user's rule (2026-10-07); was 120
 # After the device answered: the next command goes this soon (the user's rule, 2026-10-06).
 GAP_AFTER_ANSWER_SECONDS = 2
-# The guard band: before resending the same command, and before the next command after one
-# that gave up — any outcome that was not an answer.
-GUARD_SECONDS = {"get": 30, "set": 30, "clear": 30, "unknown": 60}
+# Before resending, and before the next command after one that gave up. The 30 s answer wait is
+# already the gap (2026-10-07), so nothing is added; kept per kind so it can be put back.
+GUARD_SECONDS = {"get": 0, "set": 0, "clear": 0, "unknown": 0}
+# A call the cloud refused never reached a device: try again after this, not at once — an
+# outage would otherwise be hammered. Three refusals in a row pause.
+REFUSED_RETRY_SECONDS = 30
 MAX_ATTEMPTS = 3
 API_ERRORS_TO_PAUSE = 3             # consecutive failed calls before a run pauses itself
 
@@ -63,6 +69,8 @@ OUTCOME_WORDS = {
     "not_in_cloud": "never appeared in the cloud",
     "not_delivered": "not picked up by the device",
     "delivered_no_answer": "delivered, no answer",
+    "answered_late": "answered after the job had moved on",
+    "time_limit": "stopped at the job's time limit",
 }
 
 
@@ -250,7 +258,7 @@ class Runner:
                                     (self.run_id,)).fetchone()
                 if more:
                     self._wait(GAP_AFTER_ANSWER_SECONDS if answered
-                               else GUARD_SECONDS.get(step["kind"], 30))
+                               else GUARD_SECONDS.get(step["kind"], 0))
             self._finish("done")
         except _Paused as why:
             with conn:
@@ -301,7 +309,7 @@ class Runner:
                     return self._end(step, "failed", log[-1]["outcome"])
                 if attempts and log and log[-1]["outcome"] != "not_accepted":
                     # The guard band before the same command goes again.
-                    self._wait(GUARD_SECONDS.get(step["kind"], 30))
+                    self._wait(GUARD_SECONDS.get(step["kind"], 0))
                 task = self._send(step["val1"])
                 if task["state"] == "send_failed":
                     # Recorded, but not an attempt: the command never left. Three refusals in a
@@ -439,7 +447,8 @@ class Runner:
 
 
 def cota_run_guard(kind: str) -> float:
-    return GUARD_SECONDS.get(kind, 30)
+    """The wait before trying a refused call again."""
+    return REFUSED_RETRY_SECONDS
 
 
 def _now() -> str:

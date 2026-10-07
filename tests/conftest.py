@@ -170,6 +170,16 @@ def never_the_live_database(isolated_data, monkeypatch):
     monkeypatch.setattr(db, "connect", guarded)
 
 
+@pytest.fixture(autouse=True)
+def empty_command_library(monkeypatch):
+    """The command library's names live in memory (cota.LIBRARY); one test's names must not
+    rename another test's commands."""
+    from ota_analytics import cota, cota_library
+
+    monkeypatch.setattr(cota, "LIBRARY", {"parameters": {}, "commands": {}})
+    monkeypatch.setattr(cota_library, "_loaded_from", None)
+
+
 @pytest.fixture
 def conn(tmp_path: Path):
     connection = db.connect(tmp_path / "test.db")

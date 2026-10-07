@@ -5,7 +5,134 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
-## 2.0.0 — in development
+## 2.0.1 — in development
+
+Built on 2.0.0 after the first live jobs (06–07 Oct 2026).
+
+### Why a device answers "on the third attempt", made visible
+
+On 07-10-2026 the desk device 786 answered about 5¾ minutes after the **first** attempt of every
+command, three times out of three. A job waits 2 minutes before resending, so attempts 1 and 2
+looked unanswered, and the answer landed on whichever record was newest by then. It was not a
+multi-device problem: single-device sends in the same job behaved the same way. The cause is not
+settled yet (a device that takes minutes to wake is the leading reading), so the retry rule is
+unchanged. What changed is that the next batch will show what is happening:
+
+- **Each answer records which attempt carried it and how long after the first attempt it came**
+  (schema **v16**: `cota_campaign_result.answered_attempt`, `answer_seconds`). The job page shows
+  time to answer per command (the middle device) and per device, and how many answered on the
+  first try. The export has both columns.
+- **The wait for an answer is a job setting** (Settings → *Wait for an answer, per attempt*,
+  10–3,600 s; 30 s by default — see "Fast and bounded" above). In the simulator, a device that
+  answers at 5¾ minutes gets one send with a 7-minute wait instead of three.
+
+### Jobs: a list first, a page to create one
+
+- **Jobs opens on the list.** Each row shows the sequence, a progress bar, answered, failed and
+  expired counts, when it started and how long it has run. **New job** (top right of the list)
+  opens its own page with the form and the plan. *All jobs* leads back from every job page.
+- **The device table uses the user's headers:** S.No. (the device's position in the job, under
+  any filter), Device ID, IMEI, State, **Command**, **Now at/Total** (e.g. 3/4), **Attempt**,
+  **Answered**, **Failed**, then time to answer and the last answer with its OK / Failed reading.
+- **A device unfolds in place** to its conversation in that job: every attempt with its time,
+  its tick and what the cloud said ("sent by the cloud, no answer"), and the answer on the
+  attempt that carried it. *Open in Configure* is still there for the full thread. Unfolded rows
+  stay open while the page redraws.
+- **Duplicate** and **Rerun unanswered** fill a new job from an earlier one: all its devices,
+  or only those that did not answer every command. Nothing starts until the plan is previewed.
+- **Names as you type:** each command line is named under the box before you preview, by this
+  install, so the page and the plan cannot disagree.
+- While a job runs, the browser tab shows its progress, e.g. "(25%) #3 Test 2".
+- On a narrow window the wide tables scroll sideways inside their card.
+
+### Fast and bounded: 30 s per attempt, and no job past an hour
+
+On 07-10-2026 a job of 2 devices × 4 commands — 8 commands in all — was still open after 12
+hours. One device's second attempt had been *held* by the cloud for a sleeping device, and the
+rule then was never to resend a held command but to wait for it, up to 12 hours. The cloud never
+handed it over; the device had talked to the OTA platform three hours later. The user's call:
+"not justified — design it so that even in the worst case no job lasts more than an hour."
+
+- **Each command: 30 s per attempt, up to 3 attempts, then the next command** — the user's own
+  model, now the rule for jobs and for sequences in Configure alike. No answer in 30 s is no
+  answer, whatever the cloud says it did with the command — sent, held, or not listed — so a held
+  command is resent like any other. Nothing is added between attempts (the 30 s is the gap);
+  the next command goes 2 s after an answer. **Every command is over in about 90 s.**
+- **Every job has a time limit**, 60 minutes unless set in its Settings. At the limit, each device
+  still in progress stops — its current command *expired*, the rest *skipped* — and the job ends.
+  It replaces *Wait for sleeping devices* (12 h). The job page says when the job ends at the
+  latest, and the plan states the worst case — how long the job takes if nothing answers — and
+  warns when that would not fit the limit (a large group at a low call rate).
+- **A late answer is kept.** One that arrives after the device has moved on to its next command
+  turns the earlier command from failed into *answered late*. (One that arrives after the device
+  has finished the whole job is not waited for — that is the price of a fast job — and still
+  shows in the device's conversation on Configure.)
+- **Attempts are exactly 30 s apart.** An attempt that runs out is resent in the same 10 s tick
+  that notices it, not the next one, with a second of slack for call pacing; without both,
+  attempts slipped to 40 s apart.
+- A send the cloud *refuses* is retried after 30 s, not at once, so an outage is not hammered;
+  three refusals in a row still pause the job.
+- 2 devices × 4 commands, with nothing answering at all, now ends in about 6 minutes (tested).
+
+### What happens next to each device, and when
+
+Asked after a live test: 14906 sat at "waiting · attempt 2" with no way to tell when anything
+would happen. (Its attempt was held by the cloud, and the rule then waited 12 hours for it — the
+rule "Fast and bounded" above replaced.) Nothing on the page said so.
+
+- **A Next column** in the job's device table says what the scheduler will do for that device
+  and when, with a countdown that ticks every second and the clock time: *Sends*, *Resends ·
+  attempt 3*, *Gives up — next command*, *Gives up — finishes*, *Answered — moves on*, or *Stops —
+  time limit* when the job's limit comes first. A paused job says *paused*. The countdown
+  runs on the server's clock (the page reads it on every redraw), not the browser's.
+- `cota_campaign.next_action` reads the device's own timers by the same rules the scheduler
+  runs on, and is tested case by case against them.
+- **The resend now comes when the page says it will.** Past the first two minutes a waiting
+  device is checked every 60 s, so a 7-minute answer wait could run up to a minute over before
+  the resend. The check that ends the wait is now moved onto the moment it ends: the resend is
+  the answer wait plus the 30 s guard band, to the scheduler's 10 s tick (tested).
+
+### Jobs at a glance: tiles and graphs
+
+- **A job's progress is tiles and pictures**, replacing the row of small counts. One split bar
+  shows the whole job by outcome (answered green, waiting amber, failed red, expired grey; the
+  bare track is what is not sent yet). Five tiles give each count with what it means: "81% · 195
+  on the first attempt", "no answer after 3 attempts". **Time to answer** is a column chart over
+  < 30 s, 30 s – 2 min, 2 – 5 min, 5 – 10 min and 10 min +, with the typical and slowest times
+  and the job's resend wait beside them. **Answered on attempt** splits answers into 1st, 2nd
+  and 3rd attempt, which says directly when the answer wait is too short.
+- **"By command" is now "Command summary"**, with an outcome bar on each row.
+- **The Jobs page opens with today's dashboard**: jobs (running, paused), devices reached,
+  commands answered (share of finished, first-attempt count), typical and slowest time to
+  answer, failed, and cloud calls (sends · checks — the checks are what grow on a big job). Below
+  them, **outcomes per job** as one split bar each, and **answers per hour** today.
+- Every number comes from this install's record in a few grouped queries — no cloud calls — and
+  each command is counted once (`cota_campaign.outcome_segments`): a sent command still waiting
+  for its result is *Waiting*, never also *Not sent yet*. The pictures are server-drawn SVG and
+  CSS, like the rest of the dashboard, and redraw with the job page every 5 s.
+
+### Commands: a library of names
+
+A new **Commands** page in the Intouch COTA rail:
+
+- **Parameter names:** `6C0A` → a name of yours. Every GET, SET and CLR of that parameter then
+  reads by it everywhere — Configure, Jobs, the plan, exports. A built-in name (FTP_SETTINGS,
+  SOS) can be renamed and reset.
+- **Saved commands:** a whole command under a name, with tags and a note. A saved command's name
+  is shown wherever that exact command appears. **From library** adds it to a new job;
+  **Library** in Configure fills the command box, or adds a line to a sequence.
+- Kept across days, like groups and the device map (schema v16: `cota_parameter`,
+  `cota_saved_command`). `cota.describe_command` reads the names from memory, loaded once per
+  database and refreshed on every change.
+
+### Icons
+
+Every new control draws its icon from the app's own line-icon set through one macro
+(`_icons.html`), sized by the control it sits in, at the existing type sizes. No new font sizes.
+
+---
+
+## 2.0.0 — 2026-10-06
 
 ### IntouchCOTA, a separate module
 

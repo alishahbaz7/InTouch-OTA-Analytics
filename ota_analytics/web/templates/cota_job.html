@@ -1,28 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Job #{{ job.id }} — Intouch COTA{% endblock %}
+{% from "_icons.html" import icon %}
+{% block title %}{% if job.state == 'running' %}({{ job.percent }}%) {% endif %}#{{ job.id }} {{ job.name }} — Jobs{% endblock %}
 
 {% block content %}
+<a class="back-link" href="/cota">{{ icon('chevron-left') }}<span>All jobs</span></a>
+
 <section class="card job-head-card">
   <div class="job-title-row">
     <h2>#{{ job.id }} · {{ job.name }}</h2>
     <span class="pill pill-job-{{ job.state }}" id="job-state">{{ job.state }}</span>
-    <span class="hint">{{ job.devices | comma }} devices · {{ job.names | join(' → ') }}</span>
     <span class="job-actions">
       <form method="post" action="/cota/jobs/{{ job.id }}/control" class="inline-form">
-        {% if job.state == 'running' %}<button type="submit" name="action" value="pause" class="tool-btn">Pause</button>
-        {% elif job.state == 'paused' %}<button type="submit" name="action" value="resume" class="tool-btn">Resume</button>{% endif %}
-        {% if job.state in ('running', 'paused') %}<button type="submit" name="action" value="cancel" class="tool-btn">Cancel</button>{% endif %}
+        {% if job.state == 'running' %}<button type="submit" name="action" value="pause" class="tool-btn">{{ icon('pause') }}<span>Pause</span></button>
+        {% elif job.state == 'paused' %}<button type="submit" name="action" value="resume" class="tool-btn">{{ icon('play') }}<span>Resume</span></button>{% endif %}
+        {% if job.live %}<button type="submit" name="action" value="cancel" class="tool-btn">{{ icon('x') }}<span>Cancel</span></button>{% endif %}
       </form>
+      <a class="tool-btn" href="/cota/jobs/new?from={{ job.id }}" title="A new job with the same devices, commands and settings">{{ icon('copy') }}<span>Duplicate</span></a>
+      {% if not job.live and job.results.get('done', 0) < job.total %}
+      <a class="tool-btn" href="/cota/jobs/new?from={{ job.id }}&which=unfinished"
+         title="A new job for the devices that did not answer every command">{{ icon('rotate-ccw') }}<span>Rerun unanswered</span></a>
+      {% endif %}
       <details class="dropdown export">
-        <summary class="tool-btn" title="Every device × command"><svg viewBox="0 0 24 24" fill="none"
-          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-          aria-hidden="true">{{ nav_icons['download'] | safe }}</svg><span>Export</span></summary>
+        <summary class="tool-btn" title="Every device × command">{{ icon('download') }}<span>Export</span></summary>
         <div class="dropdown-panel">
           <a class="dropdown-item" href="/cota/jobs/{{ job.id }}/export?format=csv"><span>CSV</span><em>.csv</em></a>
           {% if job.total <= 200000 %}<a class="dropdown-item" href="/cota/jobs/{{ job.id }}/export?format=xlsx"><span>Excel workbook</span><em>.xlsx</em></a>{% endif %}
         </div>
       </details>
     </span>
+  </div>
+  <div class="job-meta">
+    <span class="step-chain">
+      {%- for name in job.names %}{% if not loop.first %}{{ icon('chevron-right') }}{% endif %}<span>{{ name }}</span>{% endfor -%}
+    </span>
+    <span class="hint">{{ job.devices | comma }} device{{ '' if job.devices == 1 else 's' }} ·
+      batch {{ job.batch_size }} · {{ job.rate_per_sec }} calls/s ·
+      answer wait {{ job.answer_wait | int }} s · time limit {{ job.time_limit | int }} min{% if job.live and job.deadline_clock %} — ends by {{ job.deadline_clock }} at the latest{% endif %}</span>
   </div>
 </section>
 
@@ -34,20 +47,64 @@
 
 {% block scripts %}
 <script>
-// A running job redraws itself from this install's record every few seconds — the scheduler is
-// the one asking the cloud, so watching costs the cloud nothing.
+// The job's live part redraws from this install's record — the scheduler is the one asking the
+// cloud, so watching costs the cloud nothing. Unfolded devices are kept open across redraws.
 (function () {
   var live = document.getElementById('job-live');
-  if (!live || live.getAttribute('data-state') !== 'running') return;
-  var url = '/cota/jobs/' + live.getAttribute('data-job') + '/status?' + live.getAttribute('data-query');
-  function tick() {
-    fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+  if (!live) return;
+  var open = new Set();
+  var base = '/cota/jobs/' + live.getAttribute('data-job') + '/status?' + live.getAttribute('data-query');
+  // "(25%) " goes after the DEV badge, where the server put it, so the copy stays recognisable.
+  var bare = document.title.replace(/\(\d+(\.\d+)?%\)\s*/, '');
+  var dev = bare.indexOf('DEV · ') === 0 ? 'DEV · ' : '';
+  var title = bare.slice(dev.length);
+  var timer = null;
+  function url() { return base + '&open=' + Array.from(open).join(','); }
+  function redraw(then) {
+    fetch(url(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok) return;
       live.innerHTML = d.html;
-      if (d.state === 'running') { setTimeout(tick, 5000); } else { window.location.reload(); }
-    }).catch(function () { setTimeout(tick, 10000); });
+      document.title = dev + (d.state === 'running' ? '(' + d.percent + '%) ' : '') + title;
+      if (then) then(d);
+    }).catch(function () {});
   }
-  setTimeout(tick, 5000);
+  function tick() {
+    redraw(function (d) {
+      if (d.state === 'running') { timer = setTimeout(tick, 5000); }
+      else { window.location.reload(); }
+    });
+  }
+  live.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-unfold]');
+    if (!btn) return;
+    var id = btn.getAttribute('data-unfold');
+    if (open.has(id)) { open.delete(id); } else { open.add(id); }
+    btn.setAttribute('aria-expanded', open.has(id) ? 'true' : 'false');
+    redraw();
+  });
+  if (live.getAttribute('data-state') === 'running') { timer = setTimeout(tick, 5000); }
+
+  // Count each device's next action down every second, between the 5 s redraws. The offset
+  // is the server's clock against this browser's, read again after every redraw.
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function words(left) {
+    if (left <= 0) return 'due now';
+    if (left < 3600) return 'in ' + Math.floor(left / 60) + ':' + pad(left % 60);
+    return 'in ' + Math.floor(left / 3600) + ':' + pad(Math.floor(left % 3600 / 60)) + ':' + pad(left % 60);
+  }
+  function count() {
+    var clock = document.getElementById('job-clock');
+    if (!clock) return;
+    if (clock.getAttribute('data-read') !== '1') {
+      clock.setAttribute('data-read', '1');
+      clock.offset = Number(clock.getAttribute('data-now')) - Date.now() / 1000;
+    }
+    var now = Date.now() / 1000 + clock.offset;
+    live.querySelectorAll('.countdown[data-at]').forEach(function (el) {
+      el.textContent = words(Math.max(0, Math.round(Number(el.getAttribute('data-at')) - now)));
+    });
+  }
+  setInterval(count, 1000);
 })();
 </script>
 {% endblock %}

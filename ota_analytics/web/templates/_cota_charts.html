@@ -1,0 +1,62 @@
+{#- Pictures for Intouch COTA jobs. Server-drawn — CSS widths and inline SVG, no script — so they
+    work offline and redraw with the page. Segments: [{label, value, tone}], tone one of ok, warn,
+    bad, neutral, orange, empty ("empty" is left as the track, so the bar's unfilled part is what
+    is still to come). -#}
+
+{%- macro took(seconds) -%}
+  {%- if seconds is none -%}—
+  {%- else -%}
+    {%- set whole = seconds | round | int -%}
+    {%- if whole < 60 -%}{{ whole }} s
+    {%- elif whole < 3600 -%}{{ whole // 60 }} min{% if whole % 60 %} {{ whole % 60 }} s{% endif %}
+    {%- else -%}{{ whole // 3600 }} h{% if whole % 3600 // 60 %} {{ whole % 3600 // 60 }} min{% endif %}
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro outcome_bar(segments, total, big=false) -%}
+<div class="stack {{ 'stack-big' if big }}" role="img"
+     aria-label="{% for s in segments %}{{ s.label }} {{ s.value }}{{ ', ' if not loop.last }}{% endfor %}">
+  {%- for s in segments if s.value and s.tone != 'empty' and total %}
+  <div class="stack-seg {{ s.tone }}" style="width: {{ '%.3f' % (s.value / total * 100) }}%"
+       title="{{ s.label }}: {{ '{:,}'.format(s.value) }} ({{ '%.0f' % (s.value / total * 100) }}%)"></div>
+  {%- endfor %}
+</div>
+{%- endmacro -%}
+
+{%- macro legend(segments, total) -%}
+<ul class="chart-legend">
+  {%- for s in segments %}
+  <li><i class="swatch swatch-{{ s.tone }}"></i><span>{{ s.label }}</span>
+    <b>{{ '{:,}'.format(s.value) }}</b>{% if total %}<em>{{ '%.0f' % (s.value / total * 100) }}%</em>{% endif %}</li>
+  {%- endfor %}
+</ul>
+{%- endmacro -%}
+
+{#- Columns with their count on top. series: [{label, value, current?}]. `every` thins the axis
+    labels on a long series (24 hours) without dropping a bar. -#}
+{%- macro column_chart(series, aria, width=460, height=170, every=1) -%}
+{%- set peak = (series | map(attribute='value') | max) if series else 0 -%}
+{%- set top = peak if peak > 0 else 1 -%}
+{%- set pad_l = 8 %}{% set pad_r = 8 %}{% set pad_t = 18 %}{% set pad_b = 26 -%}
+{%- set plot_w = width - pad_l - pad_r %}{% set plot_h = height - pad_t - pad_b -%}
+{%- set n = series | length %}{% set slot = plot_w / (n if n else 1) -%}
+<svg viewBox="0 0 {{ width }} {{ height }}" class="svg-chart" role="img" aria-label="{{ aria }}">
+  {%- for p in series %}
+    {%- set bar_w = slot * 0.64 -%}
+    {%- set x = pad_l + loop.index0 * slot + (slot - bar_w) / 2 -%}
+    {%- set h = (p.value / top) * plot_h -%}
+    <rect class="hbar {{ 'current' if p.current }}" x="{{ '%.1f' % x }}" y="{{ '%.1f' % (pad_t + plot_h - h) }}"
+          width="{{ '%.1f' % bar_w }}" height="{{ '%.1f' % h }}" rx="2">
+      <title>{{ p.label }} — {{ '{:,}'.format(p.value) }}</title></rect>
+    {%- if p.value %}
+    <text class="bar-num" x="{{ '%.1f' % (x + bar_w / 2) }}" y="{{ '%.1f' % (pad_t + plot_h - h - 5) }}"
+          text-anchor="middle">{{ '{:,}'.format(p.value) }}</text>
+    {%- endif %}
+    {%- if loop.index0 % every == 0 or p.current %}
+    <text class="axis" x="{{ '%.1f' % (x + bar_w / 2) }}" y="{{ height - 8 }}" text-anchor="middle">{{ p.label }}</text>
+    {%- endif %}
+  {%- endfor %}
+  <line class="axis-line" x1="{{ pad_l }}" y1="{{ pad_t + plot_h }}" x2="{{ width - pad_r }}" y2="{{ pad_t + plot_h }}"></line>
+</svg>
+{%- endmacro -%}

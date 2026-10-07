@@ -330,7 +330,8 @@ on `/cota/devices`.
 |---|---|---|
 | Devices per send call | 50 | raise during live runs as the cloud allows (open question 8) |
 | Calls per second | 5 | sends and checks together; checks dominate (below) |
-| Wait for sleeping devices | 12 h | the cloud holds the command; it is not resent |
+| Wait for an answer, per attempt | 30 s | the user's rule (2026-10-07); then sent again, 3 attempts, then the next command |
+| Time limit for the whole job | 60 min | at the limit every device still in progress stops; replaced waiting 12 h for held commands |
 | Canary | 1% of jobs over 20 devices, 1–20 | the rest go only if the canary stays within the stop |
 | Automatic stop | >10% of finished commands failed, or 3 failed calls in a row | judged after 20 |
 
@@ -361,6 +362,21 @@ cloud hold commands for a switched-off device and deliver them when it wakes (th
 `status` 0), or drop them (then resend once the device is back — FOTA's last ping per IMEI could
 tell when)? To find out, switch 14906 on and read its records from 06-10-2026 20:00. Late
 answers mean the cloud holds commands.
+
+**Second live test, 07-10-2026 (jobs #1–#3, 14906 and 786):** 786 answered about **5¾ min after
+the first attempt** of every command — 5 min 50 s, 5 min 39 s, 5 min 50 s — each time on attempt
+3's record, 10–20 s after attempt 3 was sent. Attempt 1 of GET 6C0A went 12 s after 786 had just
+answered and was still not answered. Not specific to several devices per call: single-device
+sends in the same job behaved the same. Readings still open: the device takes ~5 min to wake for
+each command (the leading one), or the cloud holds the newest command and hands it over when the
+device connects. 2.0.1 records which attempt carried each answer and the time from the first
+attempt (job page, export), and makes the answer wait a job setting. The same evening the user
+set the rule in the table above: 30 s per attempt, 3 attempts, held = no answer, and a time
+limit per job.
+
+**The command library (2.0.1):** the Commands page names parameters (`6C0A` → your name, for
+every GET/SET/CLR of it) and saves whole commands under a name with tags, picked in Configure and
+Jobs. Kept across days, like groups and the device map.
 
 **Retention:** the COTA record lives for the day. The first COTA page opened on a later day
 clears the earlier days' jobs, sequences, sends and cloud records. Groups and the device map are

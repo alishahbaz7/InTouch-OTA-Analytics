@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_cota_charts.html" import took, outcome_bar, column_chart %}
 {% block title %}Jobs — Intouch COTA{% endblock %}
 
 {% block content %}
@@ -7,140 +9,112 @@
 <div class="notice notice-warn">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }} —
   <a href="/cota/jobs/{{ live.id }}">open it</a>. One job runs at a time.</div>
 {% endif %}
-{%- set d = draft or {} -%}
 
-<div class="module-grid">
-  {# ── a new job: devices, commands, settings — then the plan, then Start ── #}
-  <section class="card">
-    <h2>New job</h2>
-    <form method="post" action="/cota/jobs/preview" enctype="multipart/form-data" class="stack-form">
-      <label>Name
-        <input type="text" name="name" value="{{ d.get('name', '') }}" placeholder="e.g. FTP settings — Delhi fleet">
-      </label>
-      <label>Devices — a saved group
-        <select name="group_id">
-          <option value="">— or type / upload them below —</option>
-          {% for g in groups %}
-          <option value="{{ g.id }}" {{ 'selected' if d.get('group_id') == g.id | string }}>{{ g.name }} · {{ g.devices | comma }} devices</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>…or device ids
-        <textarea name="devices" rows="3" class="mono" spellcheck="false"
-                  placeholder="786, 14906">{{ d.get('devices', '') if not d.get('group_id') }}</textarea>
-      </label>
-      <label>…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
-          <a href="/cota/groups/template.csv">Download template</a></span>
-        <input type="file" name="file" accept=".csv">
-      </label>
-      <label>Commands — one per line, sent in order
-        <textarea name="commands" rows="5" class="mono" spellcheck="false" required
-                  placeholder="DAD76F4B&#10;DAD76C0A">{{ d.get('commands', '') }}</textarea>
-      </label>
-      <details class="advanced">
-        <summary>Settings <span class="opt">— batch {{ d.get('batch_size') or defaults.batch }} ·
-          {{ d.get('rate_per_sec') or defaults.rate }} calls/s · {{ d.get('validity_hours') or defaults.validity }} h</span></summary>
-        <div class="field-row">
-          <label>Devices per send call
-            <input type="number" name="batch_size" min="1" max="5000"
-                   value="{{ d.get('batch_size') or defaults.batch }}"></label>
-          <label>Calls per second
-            <input type="number" name="rate_per_sec" min="0.1" max="100" step="0.1"
-                   value="{{ d.get('rate_per_sec') or defaults.rate }}"></label>
-        </div>
-        <div class="field-row">
-          <label>Wait for sleeping devices (hours)
-            <input type="number" name="validity_hours" min="0.1" max="24" step="0.1"
-                   value="{{ d.get('validity_hours') or defaults.validity }}"></label>
-          <label>Model · type
-            <span class="inline-pair">
-              <input type="number" name="device_type" value="{{ d.get('device_type') or defaults.type }}">
-              <input type="number" name="cmd_type" value="{{ d.get('cmd_type') or defaults.cmd }}">
-            </span></label>
-        </div>
-      </details>
-      <div class="form-actions"><button type="submit">Preview</button>
-        <span class="hint">Nothing is sent until you press Start.</span></div>
-    </form>
-  </section>
-
-  {# ── the plan ── #}
-  <section class="card" id="plan">
-    {% if preview %}
-    {%- set p = preview %}
-    <h2>Plan <span class="hint">nothing sent yet</span></h2>
-    {% if p.problems %}<div class="notice notice-error">{{ p.problems[:5] | join('; ') }}{% if p.problems | length > 5 %} …{% endif %}</div>{% endif %}
-    {% if p.bad %}<div class="notice notice-error">Fix these commands first:
-      {% for s in p.bad %}line {{ s.line }} ({{ s.val1[:16] or 'blank' }}): {{ s.problem }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
-    {% if p.busy %}<div class="notice notice-error">{{ p.busy | length }} device(s) are in a live
-      sequence or job ({{ p.busy[:10] | join(', ') }}) — one thing at a time per device.</div>{% endif %}
-    <dl class="kv plan-kv">
-      <dt>Devices</dt><dd>{{ p.devices | comma }}</dd>
-      <dt>Commands</dt><dd><ol class="plan-steps">{% for name in p.names %}<li><strong>{{ name }}</strong> <span class="mono dim">{{ p.steps[loop.index0].val1[:20] }}{% if p.steps[loop.index0].val1 | length > 20 %}…{% endif %}</span></li>{% endfor %}</ol></dd>
-      <dt>Canary</dt><dd>{% if p.canary %}the first {{ p.canary }} device{{ '' if p.canary == 1 else 's' }}, then the rest if no more than 10% fail{% else %}none — {{ p.devices }} devices go together{% endif %}</dd>
-      <dt>Calls</dt><dd>{{ p.send_calls | comma }} send · about {{ p.check_calls | comma }} checks while devices answer
-        <div class="field-hint">A check reads one device per call — the cloud refuses a list — so for a
-          large job the calls-per-second setting decides how long it takes.</div></dd>
-      <dt>Time</dt><dd>about {% if p.estimate_minutes >= 90 %}{{ '%.1f' | format(p.estimate_minutes / 60) }} h{% else %}{{ p.estimate_minutes }} min{% endif %}
-        for devices that are awake; sleeping ones are waited for</dd>
-    </dl>
-    {% if p.devices and p.steps and not p.bad and not p.busy and not p.problems %}
-    <form method="post" action="/cota/jobs/start" class="stack-form">
-      {#- What was previewed is exactly what starts: the plan's own ids, the form's own values. -#}
-      {%- set fallback = {'batch_size': defaults.batch, 'rate_per_sec': defaults.rate,
-                          'validity_hours': defaults.validity, 'device_type': defaults.type,
-                          'cmd_type': defaults.cmd} %}
-      {% for k in ('name', 'batch_size', 'rate_per_sec', 'validity_hours', 'device_type', 'cmd_type') %}
-      <input type="hidden" name="{{ k }}" value="{{ d.get(k) or fallback.get(k, '') }}">
-      {% endfor %}
-      {#- A textarea, not a hidden input: the line breaks between commands must survive. -#}
-      <textarea name="commands" hidden>{{ d.get('commands', '') }}</textarea>
-      <input type="hidden" name="device_ids" value="{{ p.device_ids }}">
-      {% if cota_status.token_held %}
-      <div class="form-actions"><button type="submit" class="btn-send">Start job — {{ p.devices | comma }} device{{ '' if p.devices == 1 else 's' }}</button></div>
-      {% else %}
-      <div class="notice notice-warn">Not signed in to the cloud — sign in (top right), then preview again.</div>
-      {% endif %}
-    </form>
-    {% endif %}
-    {% else %}
-    <h2>How a job runs</h2>
-    <ol class="module-steps">
-      <li><strong>Each device moves through the commands on its own</strong>, one at a time — the
-        next at least 2 s after an answer, a 30 s guard band before a retry, up to 3 attempts.</li>
-      <li><strong>Devices ready for the same command go in one call</strong>, as many per call as
-        the batch size allows. Calls are paced to the rate you set.</li>
-      <li><strong>A sleeping device is not sent the command again</strong> — the cloud holds it
-        until it wakes. It is waited for, checked less and less often, until the wait runs out.</li>
-      <li><strong>It starts small:</strong> for more than 20 devices a canary goes first, and the
-        job pauses itself if more than 10% of commands fail.</li>
-    </ol>
-    {% endif %}
-  </section>
+{% if today %}
+{%- set t = today -%}
+{# Today at a glance — the COTA record holds only today, so this is every job there is. #}
+<div class="tiles">
+  <div class="tile tone-white">
+    <div class="tile-label">Jobs today</div>
+    <div class="tile-value">{{ t.jobs | comma }}</div>
+    <div class="tile-sub">{% if t.running or t.paused %}{{ t.running }} running · {{ t.paused }} paused{% else %}all finished{% endif %}</div>
+  </div>
+  <div class="tile tone-white">
+    <div class="tile-label">Devices reached</div>
+    <div class="tile-value">{{ t.reached | comma }}</div>
+    <div class="tile-sub">sent at least one command</div>
+  </div>
+  <div class="tile tone-green">
+    <div class="tile-label">Commands answered</div>
+    <div class="tile-value">{{ t.answered | comma }}</div>
+    <div class="tile-sub">{% if t.answered_share is not none %}{{ t.answered_share }}% of finished · {% endif %}{{ t.first_try | comma }} on the first attempt</div>
+  </div>
+  <div class="tile tone-white">
+    <div class="tile-label">Time to answer</div>
+    <div class="tile-value">{{ took(t.median_answer) }}</div>
+    <div class="tile-sub">typical · slowest {{ took(t.slowest_answer) }}</div>
+  </div>
+  <div class="tile {{ 'tone-red' if t.failed else 'tone-grey' }}">
+    <div class="tile-label">Failed</div>
+    <div class="tile-value">{{ t.failed | comma }}</div>
+    <div class="tile-sub">{% if t.failed_share is not none %}{{ t.failed_share }}% of finished{% else %}none finished yet{% endif %}</div>
+  </div>
+  <div class="tile tone-grey">
+    <div class="tile-label">Cloud calls</div>
+    <div class="tile-value">{{ (t.send_calls + t.poll_calls) | comma }}</div>
+    <div class="tile-sub">{{ t.send_calls | comma }} sends · {{ t.poll_calls | comma }} checks</div>
+  </div>
 </div>
 
+<div class="chart-grid dash-charts">
+  <figure class="chart-card card">
+    <figcaption>Outcomes per job <span>answered · waiting · failed · expired — the rest not sent yet</span></figcaption>
+    <div class="job-bars">
+      {% for j in t.per_job %}
+      <a class="job-bar-row" href="/cota/jobs/{{ j.id }}">
+        <span class="job-bar-label"><span class="dim">#{{ j.id }}</span> {{ j.name }}</span>
+        {{ outcome_bar(j.segments, j.total) }}
+        <span class="job-bar-value">{{ (j.segments | selectattr('key', 'equalto', 'done') | map(attribute='value') | first) | comma }}/{{ j.total | comma }}</span>
+      </a>
+      {% endfor %}
+    </div>
+  </figure>
+  <figure class="chart-card card">
+    <figcaption>Answers per hour <span>today · the current hour in green</span></figcaption>
+    {% if t.answered %}
+    {{ column_chart(t.per_hour, 'Answers per hour today', every=(1 if t.per_hour | length <= 12 else 2)) }}
+    {% else %}
+    <p class="chart-empty">No answers yet today.</p>
+    {% endif %}
+  </figure>
+</div>
+{% endif %}
+
 <section class="card">
-  <h2>Jobs <span class="hint">today's — the record clears when the app starts on a new day</span></h2>
+  <div class="list-head">
+    <h2>Jobs <span class="hint">today's — the record clears when the app starts on a new day</span></h2>
+    <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
+  </div>
   {% if jobs %}
-  <table>
+  <div class="table-wrap">
+  <table class="job-list">
     <thead><tr><th>#</th><th>Name</th><th class="n">Devices</th><th>Commands</th><th>State</th>
-      <th class="n">Done</th><th>Started</th></tr></thead>
+      <th>Progress</th><th class="n">Answered</th><th class="n">Failed</th><th class="n">Expired</th>
+      <th>Started</th><th class="n">Duration</th></tr></thead>
     <tbody>
       {% for j in jobs %}
       <tr>
         <td class="dim">{{ j.id }}</td>
         <td><a href="/cota/jobs/{{ j.id }}">{{ j.name }}</a></td>
         <td class="n">{{ j.devices | comma }}</td>
-        <td class="dim small">{{ j.names | join(' → ') }}</td>
+        <td>
+          <span class="step-chain">
+            {%- for name in j.names %}{% if not loop.first %}{{ icon('chevron-right') }}{% endif %}<span>{{ name }}</span>{% endfor -%}
+          </span>
+        </td>
         <td><span class="pill pill-job-{{ j.state }}">{{ j.state }}</span></td>
-        <td class="n">{{ j.percent }}%</td>
+        <td>
+          <span class="mini-progress" title="{{ j.finished | comma }} of {{ j.total | comma }} device commands finished">
+            <span class="job-track"><span class="job-fill" style="width: {{ j.percent }}%"></span></span>
+            <span class="mini-pct">{{ j.percent }}%</span>
+          </span>
+        </td>
+        <td class="n ok-text">{{ j.results.get('done', 0) | comma }}</td>
+        <td class="n {{ 'bad-text' if j.results.get('failed') }}">{{ j.results.get('failed', 0) | comma }}</td>
+        <td class="n dim">{{ j.results.get('expired', 0) | comma }}</td>
         <td class="dim small">{{ j.started_at[11:16] if j.started_at }}</td>
+        <td class="n dim small">{{ took(j.duration_seconds) }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
-  <p class="hint">No jobs today.</p>
+  <div class="empty-state">
+    <p>No jobs today. A job sends the same commands, in order, to many devices — each one moves
+      through them on its own.</p>
+    <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
+  </div>
   {% endif %}
 </section>
 

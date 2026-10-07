@@ -681,13 +681,27 @@ COMMAND_OPERATIONS = {"DA": "GET", "DB": "SET", "DD": "CLR"}
 COMMAND_PARAMETERS = {"6F4B": "FTP_SETTINGS", "6D66": "SOS"}
 
 
+# The user's own names, from the command library (cota_library.refresh fills it): a saved
+# command's name for that exact command, a parameter's name for every command on it.
+LIBRARY: dict[str, dict[str, str]] = {"parameters": {}, "commands": {}}
+
+
+def parameter_name(code: str) -> str:
+    """The user's name for a parameter, else the built-in one, else its code."""
+    code = code.upper()
+    return LIBRARY["parameters"].get(code) or COMMAND_PARAMETERS.get(code, code)
+
+
 def describe_command(val1) -> str | None:
-    """'GET FTP_SETTINGS', 'CLR SOS', 'SET 6C0A' — or None when it is not shaped like one."""
-    value = str(val1 or "").strip().upper()
+    """A saved command's name; else 'GET FTP_SETTINGS', 'CLR SOS', 'SET 6C0A' — or None when it
+    is not shaped like a command."""
+    value = "".join(str(val1 or "").split()).upper()
+    saved = LIBRARY["commands"].get(value)
+    if saved:
+        return saved
     if len(value) < 8 or value[2:4] != "D7" or value[:2] not in COMMAND_OPERATIONS:
         return None
-    parameter = value[4:8]
-    return f"{COMMAND_OPERATIONS[value[:2]]} {COMMAND_PARAMETERS.get(parameter, parameter)}"
+    return f"{COMMAND_OPERATIONS[value[:2]]} {parameter_name(value[4:8])}"
 
 
 def command_name(cmd_type) -> str:
