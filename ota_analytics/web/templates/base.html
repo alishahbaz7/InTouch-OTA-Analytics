@@ -381,6 +381,82 @@ document.addEventListener('click', function (event) {
   });
 });
 </script>
+{# Help is never printed beside a title (the user's rule: it reads as filler). It sits in a
+   data-tip and appears only when the pointer rests on the title or control for a while. #}
+<div class="hold-tip" id="hold-tip" role="tooltip" hidden></div>
+<script>
+(function () {
+  var HOLD_MS = 5000;                       // the user's choice: help for those who linger
+  var tip = document.getElementById('hold-tip'), timer = null, over = null;
+  function hide() { clearTimeout(timer); timer = null; over = null; tip.hidden = true; }
+  document.addEventListener('mouseover', function (event) {
+    var el = event.target.closest ? event.target.closest('[data-tip]') : null;
+    if (el === over) return;
+    hide();
+    if (!el) return;
+    over = el;
+    timer = setTimeout(function () {
+      tip.textContent = el.getAttribute('data-tip');
+      tip.hidden = false;
+      var r = el.getBoundingClientRect();
+      var left = Math.max(8, Math.min(r.left, window.innerWidth - tip.offsetWidth - 8));
+      var top = r.bottom + 6 + tip.offsetHeight > window.innerHeight ? r.top - tip.offsetHeight - 6 : r.bottom + 6;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }, HOLD_MS);
+  });
+  document.addEventListener('mousedown', hide);
+  window.addEventListener('scroll', hide, true);
+  window.addEventListener('blur', hide);
+})();
+</script>
+{# One confirmation for every delete, remove and cancel: a form or a submit button carrying
+   data-confirm opens this before it is sent. The item's name comes from data-name and is set as
+   text, never as markup, so a name cannot become part of the page. #}
+<dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h3 id="confirm-title">Delete?</h3>
+    <p id="confirm-text"></p>
+    <div class="confirm-actions">
+      <button value="cancel" class="tool-btn" id="confirm-cancel">Cancel</button>
+      <button value="ok" class="btn-danger" id="confirm-ok">Delete</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  var dialog = document.getElementById('confirm-dialog');
+  document.addEventListener('submit', function (event) {
+    var form = event.target, button = event.submitter;
+    var source = button && button.hasAttribute('data-confirm') ? button
+               : form.hasAttribute('data-confirm') ? form : null;
+    if (!source || form.getAttribute('data-confirmed') === '1') return;
+    event.preventDefault();
+    var name = source.getAttribute('data-name') || form.getAttribute('data-name') || '';
+    var message = source.getAttribute('data-confirm').split('{name}').join(name);
+    var action = source.getAttribute('data-confirm-action') || 'Delete';
+    function go() {
+      form.setAttribute('data-confirmed', '1');
+      if (form.requestSubmit) { form.requestSubmit(button || undefined); } else { form.submit(); }
+      form.removeAttribute('data-confirmed');
+    }
+    if (!dialog || !dialog.showModal) {          // no <dialog>: the browser's own box, never none
+      if (window.confirm(message)) go();
+      return;
+    }
+    document.getElementById('confirm-title').textContent = action + '?';
+    document.getElementById('confirm-text').textContent = message;
+    document.getElementById('confirm-ok').textContent = action;
+    dialog.returnValue = '';
+    dialog.addEventListener('close', function once() {
+      dialog.removeEventListener('close', once);
+      if (dialog.returnValue === 'ok') go();
+    });
+    dialog.showModal();
+    document.getElementById('confirm-cancel').focus();     // the safe choice has the focus
+  }, true);
+})();
+</script>
 {# Pages add their own scripts here — the progress poller on /update, for one. #}
 {% block scripts %}{% endblock %}
 </body>

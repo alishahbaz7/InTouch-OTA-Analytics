@@ -425,16 +425,40 @@ Jobs, Commands, Devices, Sign in).
   out is resent in the same tick (with a second of slack for call pacing — without it every
   attempt slipped to the next tick, 40 s apart), the job's time limit (stored in
   `validity_hours`, the column the old 12 h window used) stops whatever is left, a canary goes
-  first above 20 devices, and the job pauses itself on three failed calls or more than 10%
-  failed. A late answer flips a failed command to `answered_late` while the device is still in
-  the job. A refused
+  first above 20 devices *when the automatic stop is on*, and the job pauses itself on three
+  failed calls in a row. **The automatic stop is off** (`AUTOMATIC_STOP = False`, the user's
+  call 08-10-2026): no pause on devices failing, no canary. Counting failed commands paused
+  7-device field tests on sleeping devices; counting devices that answered then failed paused a
+  69-device job three times on devices dropping out mid-job. Do not switch it back on as a
+  default — if it returns, it is a job setting. Its machinery (`device_standing`,
+  `fail_acknowledged`, the canary) is kept and tested with the `automatic_stop` fixture. A
+  device that answered nothing is shown *Not reachable*. **A scheduler thread must never die
+  silently**: `_run` records anything that escapes it, and `recover` says "stopped
+  unexpectedly" for a thread this process started — job #12's died twice with nothing recorded
+  and the page claimed a restart that never happened. An answer first seen
+  after a resume to a command sent before it has no time (`resumed_at`): a paused job does not
+  check, so timing it reports the pause. A late answer flips a failed command to `answered_late`
+  while the device is still in the job. A refused
   call is never an attempt. One job at a time; a device in a live job or sequence is refused
   everywhere else. Never call `cota_campaign.start` from a test — patch it, as `no_job_threads`
   does.
-- **`getGPRSCommand` reads one device per call** — a comma list got HTTP 400 on the live cloud
-  (2026-10-06). So a big job is bounded by *checks*: 30,000 × 5 is 162 sends and ~152,000
-  checks, ~8½ h at the default 5 calls/s. Do not "optimize" sends; the rate is the lever, and
-  what the cloud tolerates is still unknown.
+- **No call carries more than 200 devices, and a job keeps 200 in progress** (the user's
+  design, 2026-10-08): `MAX_PER_CALL` holds sends and checks to 200, and `in_progress` (a job
+  setting, default 200, NULL on older jobs = all at once) lets the rest wait `queued` in job
+  order; `Scheduler._admit` tops the set up before each send, so a device that finished its
+  sequence is replaced in the same tick. Every query that means "still to do" must include
+  `queued` — the job's end, `busy_devices`, cancel, the time limit (which marks those
+  `not_started`, results `skipped`). 200 at a time is ~2,000 devices an hour on a fleet like
+  job #12's; the plan states the rounds and warns when a job will not fit its limit.
+- **Jobs check up to 200 devices a call with `getGPRSCommandList`** (2026-10-08);
+  `getGPRSCommand` takes one device (a comma list gets HTTP 400). At one device a call,
+  30,000 × 5 was ~152,000 checks, ~8½ h at 5 calls/s. **Never trust the bulk call blind:** the
+  app's own session got `{"data": []}` from it the day it arrived while the one-device call
+  answered, and trusted, an empty list makes every command look unsent and resends it.
+  `Scheduler._verify` holds each run's first bulk answer against the one-device call and falls
+  back to one device per call if they differ; a reply with a record it cannot place by
+  `deviceId` is not used at all (`cota.records_by_device`). A client without `responses_many`
+  — every test fake but `Fleet` — checks one device per call.
 - **The COTA record lives for a day** (the user's rule). `purge_previous_days` runs once per
   process, on the first COTA page: earlier days' jobs, sequences, sends and cloud records go;
   groups and the device map stay. A session that runs past midnight keeps its day.
@@ -470,6 +494,14 @@ Jobs, Commands, Devices, Sign in).
 - **A user-supplied string never goes inside an inline script.** HTML-escaping does not protect
   it there: the attribute is decoded before the script runs. Put it in a `data-` attribute and
   read `this.dataset` (the group delete confirm does).
+- **No help text on the page — the user's rule (2026-10-08).** A heading is its title and at
+  most a count; a tile sub-line carries data or nothing. Explanations go in `data-tip`, which
+  `base.html` shows only after the pointer rests on it for 5 s (`HOLD_MS`). The user's words:
+  inline help "gives an AI-generated look". `test_cota_headings_carry_a_count_at_most_never_a_sentence`
+  holds the COTA headings; tile captions and `opt` asides are not covered by it, so check them by eye.
+- **Delete, Remove and Cancel are red and confirm first** — the form carries `data-confirm`
+  (with `{name}` from `data-name`) and optionally `data-confirm-action`; one listener in
+  `base.html` opens the shared `<dialog>`. Do not write a confirm per page.
 
 ## Two upload routes, and the one thing they must not do
 

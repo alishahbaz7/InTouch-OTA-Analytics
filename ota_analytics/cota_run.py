@@ -71,6 +71,7 @@ OUTCOME_WORDS = {
     "delivered_no_answer": "delivered, no answer",
     "answered_late": "answered after the job had moved on",
     "time_limit": "stopped at the job's time limit",
+    "not_started": "not started — the job's time limit came first",
 }
 
 

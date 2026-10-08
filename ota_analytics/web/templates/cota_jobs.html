@@ -19,15 +19,14 @@
     <div class="tile-value">{{ t.jobs | comma }}</div>
     <div class="tile-sub">{% if t.running or t.paused %}{{ t.running }} running · {{ t.paused }} paused{% else %}all finished{% endif %}</div>
   </div>
-  <div class="tile tone-white">
+  <div class="tile tone-white" data-tip="Devices sent at least one command today.">
     <div class="tile-label">Devices reached</div>
     <div class="tile-value">{{ t.reached | comma }}</div>
-    <div class="tile-sub">sent at least one command</div>
   </div>
   <div class="tile tone-green">
     <div class="tile-label">Commands answered</div>
-    <div class="tile-value">{{ t.answered | comma }}</div>
-    <div class="tile-sub">{% if t.answered_share is not none %}{{ t.answered_share }}% of finished · {% endif %}{{ t.first_try | comma }} on the first attempt</div>
+    {% if t.answered_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.answered_share }}%<span class="tile-count">{{ t.answered | comma }}</span></div>
+    {% else %}<div class="tile-value">{{ t.answered | comma }}</div>{% endif %}
   </div>
   <div class="tile tone-white">
     <div class="tile-label">Time to answer</div>
@@ -36,8 +35,8 @@
   </div>
   <div class="tile {{ 'tone-red' if t.failed else 'tone-grey' }}">
     <div class="tile-label">Failed</div>
-    <div class="tile-value">{{ t.failed | comma }}</div>
-    <div class="tile-sub">{% if t.failed_share is not none %}{{ t.failed_share }}% of finished{% else %}none finished yet{% endif %}</div>
+    {% if t.failed_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.failed_share }}%<span class="tile-count">{{ t.failed | comma }}</span></div>
+    {% else %}<div class="tile-value">{{ t.failed | comma }}</div>{% endif %}
   </div>
   <div class="tile tone-grey">
     <div class="tile-label">Cloud calls</div>
@@ -48,7 +47,7 @@
 
 <div class="chart-grid dash-charts">
   <figure class="chart-card card">
-    <figcaption>Outcomes per job <span>answered · waiting · failed · expired — the rest not sent yet</span></figcaption>
+    <figcaption><span data-tip="Green answered, amber waiting, red failed, grey expired; the empty part is not sent yet.">Outcomes per job</span></figcaption>
     <div class="job-bars">
       {% for j in t.per_job %}
       <a class="job-bar-row" href="/cota/jobs/{{ j.id }}">
@@ -60,7 +59,7 @@
     </div>
   </figure>
   <figure class="chart-card card">
-    <figcaption>Answers per hour <span>today · the current hour in green</span></figcaption>
+    <figcaption><span data-tip="Today, by the hour the answer came in. The current hour is green.">Answers per hour</span></figcaption>
     {% if t.answered %}
     {{ column_chart(t.per_hour, 'Answers per hour today', every=(1 if t.per_hour | length <= 12 else 2)) }}
     {% else %}
@@ -72,7 +71,7 @@
 
 <section class="card">
   <div class="list-head">
-    <h2>Jobs <span class="hint">today's — the record clears when the app starts on a new day</span></h2>
+    <h2><span data-tip="Today's jobs. The record clears when the app starts on a new day; groups and saved commands stay.">Jobs</span></h2>
     <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
   </div>
   {% if jobs %}
@@ -111,8 +110,7 @@
   </div>
   {% else %}
   <div class="empty-state">
-    <p>No jobs today. A job sends the same commands, in order, to many devices — each one moves
-      through them on its own.</p>
+    <p>No jobs today.</p>
     <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
   </div>
   {% endif %}
@@ -120,7 +118,7 @@
 
 {% if sends %}
 <section class="card">
-  <h2>Single sends <span class="hint">one command, sent once — from Devices</span></h2>
+  <h2><span data-tip="One command sent once, from the Devices page.">Single sends</span></h2>
   <table>
     <thead><tr><th>#</th><th>Name</th><th class="n">Devices</th><th class="n">Accepted</th>
       <th class="n">Refused</th><th>Sent</th></tr></thead>

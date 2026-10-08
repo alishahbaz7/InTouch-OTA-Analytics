@@ -529,9 +529,15 @@ CREATE TABLE IF NOT EXISTS cota_campaign (
   validity_hours   REAL NOT NULL,            -- how long a sleeping device is waited for
   canary_size      INTEGER NOT NULL,         -- devices in the first wave (0: none)
   active_wave      INTEGER NOT NULL DEFAULT 0,
-  max_fail_share   REAL NOT NULL,            -- the automatic stop
-  fail_base_failed   INTEGER NOT NULL DEFAULT 0,   -- the stop counts from here after a resume
-  fail_base_finished INTEGER NOT NULL DEFAULT 0,
+  max_fail_share   REAL NOT NULL,            -- the automatic stop: share of answering devices
+  fail_base_failed   INTEGER NOT NULL DEFAULT 0,   -- retired in v17: counted commands, and a
+  fail_base_finished INTEGER NOT NULL DEFAULT 0,   -- late answer netted against new failures
+  fail_acknowledged TEXT,                    -- v17: JSON device ids already failing at the last
+                                             --      resume — seen by a person, not counted again
+  resumed_at       REAL,                     -- v17: epoch s; an answer first seen after it, to a
+                                             --      command sent before it, has no known time
+  in_progress      INTEGER,                  -- v18: devices in progress at once; the rest wait
+                                             --      'queued' in job order. NULL = all at once
   state            TEXT NOT NULL,            -- running | paused | done | cancelled
   control          TEXT,                     -- pause | cancel, asked by the page
   pause_reason     TEXT,
@@ -560,6 +566,8 @@ CREATE TABLE IF NOT EXISTS cota_campaign_device (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ix_campaign_due  ON cota_campaign_device(campaign_id, state, due_at);
 CREATE INDEX IF NOT EXISTS ix_campaign_poll ON cota_campaign_device(campaign_id, state, next_poll_at);
+-- v18: the next devices in line, in job order, every tick of a 30,000-device job.
+CREATE INDEX IF NOT EXISTS ix_campaign_line ON cota_campaign_device(campaign_id, state, seq);
 
 -- One row per device per command: what happened to it. The status grid and the export read this.
 CREATE TABLE IF NOT EXISTS cota_campaign_result (

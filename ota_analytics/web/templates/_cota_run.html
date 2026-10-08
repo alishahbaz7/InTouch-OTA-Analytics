@@ -20,7 +20,9 @@
       <button type="submit" form="run-control" name="action" value="resume" class="tool-btn">Resume</button>
       {% endif %}
       {% if run.state in ('running', 'paused') %}
-      <button type="submit" form="run-control" name="action" value="cancel" class="tool-btn">Cancel</button>
+      <button type="submit" form="run-control" name="action" value="cancel" class="tool-btn danger"
+              data-confirm-action="Cancel sequence"
+              data-confirm="Cancel this sequence? Commands not sent yet are cancelled, and it cannot be resumed.">Cancel</button>
       {% endif %}
     </span>
   </div>

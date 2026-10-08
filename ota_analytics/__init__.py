@@ -10,10 +10,12 @@ RELEASED = "2026-10-08"
 CODENAME = "relay"
 
 VERSION_HISTORY = [
-    ("2.0.2", "2026-10-08", "Intouch COTA Commands page laid out for a growing library — "
-                            "search, paging, folded forms, import and export to share it; "
-                            "a job takes devices from one source at a time; new styles "
-                            "reach the browser without a stale cache"),
+    ("2.0.2", "2026-10-08", "Intouch COTA jobs check 200 devices a call and keep 200 in "
+                            "progress at a time; no automatic pause on devices going quiet; "
+                            "a scheduler that stops leaves a record; Commands page laid out "
+                            "for a growing library and shared by file; no help text on the "
+                            "pages, red deletes that ask first; a job page whose top stays "
+                            "put and leads with percentages"),
     ("2.0.1", "2026-10-07", "Intouch COTA jobs: a list first and a page to create one, each "
                             "device's conversation inside the job, time to answer, rerun and "
                             "duplicate, "

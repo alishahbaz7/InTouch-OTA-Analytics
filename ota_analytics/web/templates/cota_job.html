@@ -5,15 +5,29 @@
 {% block content %}
 <a class="back-link" href="/cota">{{ icon('chevron-left') }}<span>All jobs</span></a>
 
+{#- The title, actions and progress stay at the top while the devices scroll under them, and
+    condense to a strip once they are stuck there (the user, 08-10-2026). -#}
+<div class="job-top-mark" id="job-top-mark" aria-hidden="true"></div>
+<div class="job-top" id="job-top">
 <section class="card job-head-card">
   <div class="job-title-row">
-    <h2>#{{ job.id }} · {{ job.name }}</h2>
+    {#- The settings are not page content (the user, 08-10-2026) — they sit in the title's
+        tooltip, and the commands are the Command summary's rows. -#}
+    {%- set settings -%}
+      {{ job.devices | comma }} device{{ '' if job.devices == 1 else 's' }} ·
+      {% if job.in_progress and job.in_progress < job.devices %}{{ job.in_progress | comma }} at a time · {% endif -%}
+      batch {{ job.batch_size }} · {{ job.rate_per_sec }} calls/s · answer wait {{ job.answer_wait | int }} s ·
+      time limit {{ job.time_limit | int }} min{% if job.live and job.deadline_clock %}, ends by {{ job.deadline_clock }} at the latest{% endif %}
+    {%- endset %}
+    <h2 data-tip="{{ settings | trim }}">#{{ job.id }} · {{ job.name }}</h2>
     <span class="pill pill-job-{{ job.state }}" id="job-state">{{ job.state }}</span>
     <span class="job-actions">
       <form method="post" action="/cota/jobs/{{ job.id }}/control" class="inline-form">
         {% if job.state == 'running' %}<button type="submit" name="action" value="pause" class="tool-btn">{{ icon('pause') }}<span>Pause</span></button>
         {% elif job.state == 'paused' %}<button type="submit" name="action" value="resume" class="tool-btn">{{ icon('play') }}<span>Resume</span></button>{% endif %}
-        {% if job.live %}<button type="submit" name="action" value="cancel" class="tool-btn">{{ icon('x') }}<span>Cancel</span></button>{% endif %}
+        {% if job.live %}<button type="submit" name="action" value="cancel" class="tool-btn danger"
+                data-confirm-action="Cancel job" data-name="#{{ job.id }} {{ job.name }}"
+                data-confirm="Cancel job {name}? Commands not sent yet are cancelled, and the job cannot be resumed.">{{ icon('x') }}<span>Cancel</span></button>{% endif %}
       </form>
       <a class="tool-btn" href="/cota/jobs/new?from={{ job.id }}" title="A new job with the same devices, commands and settings">{{ icon('copy') }}<span>Duplicate</span></a>
       {% if not job.live and job.results.get('done', 0) < job.total %}
@@ -29,15 +43,9 @@
       </details>
     </span>
   </div>
-  <div class="job-meta">
-    <span class="step-chain">
-      {%- for name in job.names %}{% if not loop.first %}{{ icon('chevron-right') }}{% endif %}<span>{{ name }}</span>{% endfor -%}
-    </span>
-    <span class="hint">{{ job.devices | comma }} device{{ '' if job.devices == 1 else 's' }} ·
-      batch {{ job.batch_size }} · {{ job.rate_per_sec }} calls/s ·
-      answer wait {{ job.answer_wait | int }} s · time limit {{ job.time_limit | int }} min{% if job.live and job.deadline_clock %} — ends by {{ job.deadline_clock }} at the latest{% endif %}</span>
-  </div>
 </section>
+<div id="job-progress">{% include "_cota_job_progress.html" %}</div>
+</div>
 
 <div id="job-live" data-job="{{ job.id }}" data-state="{{ job.state }}"
      data-query="state={{ state }}&q={{ q | urlencode }}&page={{ page }}">
@@ -64,6 +72,7 @@
     fetch(url(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok) return;
       live.innerHTML = d.html;
+      if (d.progress) document.getElementById('job-progress').innerHTML = d.progress;
       document.title = dev + (d.state === 'running' ? '(' + d.percent + '%) ' : '') + title;
       if (then) then(d);
     }).catch(function () {});
@@ -105,6 +114,24 @@
     });
   }
   setInterval(count, 1000);
+})();
+
+// The top sticks under the top bar; once it is stuck it condenses to a strip. The mark sits just
+// above it: once the mark has passed under the top bar, the top is stuck. Read at most once a frame.
+(function () {
+  var top = document.getElementById('job-top'), mark = document.getElementById('job-top-mark');
+  var bar = document.querySelector('header.topbar');
+  if (!top || !mark) return;
+  var under = 0, queued = false;
+  function measure() { under = bar ? bar.offsetHeight : 0; top.style.setProperty('--stick-at', under + 'px'); }
+  function check() {
+    queued = false;
+    top.classList.toggle('is-stuck', mark.getBoundingClientRect().top < under);
+  }
+  function soon() { if (!queued) { queued = true; requestAnimationFrame(check); } }
+  measure(); check();
+  window.addEventListener('scroll', soon, { passive: true });
+  window.addEventListener('resize', function () { measure(); soon(); });
 })();
 </script>
 {% endblock %}

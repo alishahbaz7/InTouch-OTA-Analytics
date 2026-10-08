@@ -19,14 +19,19 @@ Agreed with the user (2026-10-06), retimed by the user (2026-10-07) to be fast a
     it in **one call per batch** — a batch size set per job (default 50) — and checks only the
     devices with an attempt outstanding. An attempt that runs out is resent in the same tick.
   * **Calls are rate limited** per job (default 5 a second), and a job pauses itself after three
-    failed calls in a row, or when more than 10% of finished commands fail (judged after 20).
+    failed calls in a row, or when more than 10% of the devices that answered then fail a command
+    (jobs over 20 devices, judged once 20 have answered). A device that has answered nothing is
+    *not reachable* — asleep or out of coverage — and never stops a job: two 7-device field
+    tests paused for exactly that while every command was being answered by the rest.
   * **A canary first** for jobs over 20 devices: 1% (1–20 devices), the rest only once it has
     finished within the failure limit.
   * **The day's COTA record lives for the day.** When the app starts on a later day, the earlier
     days' jobs, conversations and replies are cleared; groups and the device map are kept.
-  * **A check reads one device per call.** `getGPRSCommand` refuses a list (HTTP 400, tried on the
-    live cloud 2026-10-06), so for a large job checks, not sends, decide how long it takes —
-    and the plan says when a job would not fit its time limit.
+  * **A check reads up to 200 devices per call** through `getGPRSCommandList` (08-10-2026).
+    `getGPRSCommand` refuses a list (HTTP 400, 2026-10-06), and at one device per call a
+    30,000-device job spent ~8½ h on checks alone. Each run holds the bulk answer against the
+    one-device call before trusting it, and checks one device per call if the two disagree.
+    The plan says when a job would not fit its time limit.
 
 Time is injected (clock, sleep), and the cloud is a client object, so the whole thing runs against
 a simulated fleet in tests — 30,000 devices included — with every wait its real length.
@@ -47,7 +52,17 @@ from . import cota, cota_connection, cota_run, db
 
 TICK_SECONDS = 10
 TICK_SLACK_SECONDS = 1.0
-DEFAULT_BATCH = 50
+# Never more than 200 devices in one call to the cloud, sends and checks alike — the user's rule
+# (08-10-2026), and getGPRSCommandList's own cap. A larger batch typed in is held to it.
+MAX_PER_CALL = cota.LIST_MAX_DEVICES
+DEFAULT_BATCH = MAX_PER_CALL
+# How many devices a job keeps in progress at once (the user's design, 08-10-2026): the rest wait
+# in job order, and a device that finishes its whole sequence makes room for the next. 200 keeps
+# the cloud's load small and steady; it also bounds how fast a big job goes — about 2,000
+# devices an hour on a fleet like job #12's (57% never answered) — so it is a job setting, and the
+# plan says when a job will not fit its time limit.
+DEFAULT_IN_PROGRESS = 200
+IN_PROGRESS_RANGE = (1, 100_000)
 DEFAULT_RATE = 5.0
 # The user's rule (2026-10-07): "worst case, no job lasts more than an hour". At the limit, every
 # device still in progress stops — its command expired, the rest skipped — and the job ends. It
@@ -59,9 +74,22 @@ TIME_LIMIT_MINUTES_RANGE = (5, 1440)
 # job setting because devices differ — 786 answered ~5¾ min after the first attempt that day.
 DEFAULT_ANSWER_WAIT_SECONDS = cota_run.ANSWER_WAIT_SECONDS
 ANSWER_WAIT_SECONDS_RANGE = (10, 3600)
+# No automatic pause on devices failing — the user's call (2026-10-08), after field-test jobs #8,
+# #9 and #12. Devices in the field switch off and lose coverage mid-job, and both rules tried —
+# 10% of commands failed, then 10% of the devices that answered going quiet — paused GET/CLR jobs
+# that were working. A job now runs to the end or to its time limit, and a person pauses it. The
+# canary went with it: with no judgement after it, it was only a wait. A session that expired and
+# three failed calls in a row still pause — those are the cloud, not the devices. The mechanism is
+# kept and tested with this switched on, as auto-start was withdrawn, so it can come back as a job
+# setting (guarding SET commands, say).
+AUTOMATIC_STOP = False
 MAX_FAIL_SHARE = 0.10
-FAIL_SAMPLE = 20                 # finished commands before the automatic stop judges
+FAIL_SAMPLE = 20                 # devices that have answered before the automatic stop judges
 CANARY_FROM = 21                 # jobs this size and up get a canary
+JUDGED_FROM = CANARY_FROM        # ...and the automatic stop; a smaller job has a person watching
+# A failure with no answer at all. Counted against a device only after it has answered something
+# in the job: before that, silence says the device is asleep, not that the command harmed it.
+SILENT_OUTCOMES = ("delivered_no_answer", "not_delivered", "not_in_cloud")
 CANARY_SHARE, CANARY_MIN, CANARY_MAX = 0.01, 1, 20
 API_ERRORS_TO_PAUSE = 3
 
@@ -215,6 +243,25 @@ def _answer_wait_seconds(seconds: float | None) -> float | None:
     return float(round(min(high, max(low, float(seconds)))))
 
 
+def _batch(size) -> int:
+    """Devices per send call, held to 1–200."""
+    try:
+        return min(MAX_PER_CALL, max(1, int(size)))
+    except (TypeError, ValueError):
+        return DEFAULT_BATCH
+
+
+def _in_progress(count) -> int:
+    """Devices in progress at once; blank → the default."""
+    if count in (None, ""):
+        return DEFAULT_IN_PROGRESS
+    low, high = IN_PROGRESS_RANGE
+    try:
+        return min(high, max(low, int(count)))
+    except (TypeError, ValueError):
+        return DEFAULT_IN_PROGRESS
+
+
 def _time_limit_minutes(minutes: float | None) -> float:
     if minutes in (None, ""):
         return float(DEFAULT_TIME_LIMIT_MINUTES)
@@ -238,23 +285,35 @@ def deadline(c: dict) -> float | None:
     return cota._parse(c["started_at"]).timestamp() + time_limit_minutes(c) * 60
 
 
+def rounds(devices: int, in_progress: int | None) -> int:
+    """How many times the devices in progress turn over: 1,000 devices at 200 at a time is 5."""
+    if not devices:
+        return 0
+    return math.ceil(devices / in_progress) if in_progress else 1
+
+
 def worst_case_minutes(devices: int, steps: int, *, batch_size: int, rate_per_sec: float,
-                       answer_wait_seconds: float) -> float:
+                       answer_wait_seconds: float, in_progress: int | None = None) -> float:
     """The longest a job can take when no device answers anything: every command, three
-    attempts each. Per device it is three waits per command; across many devices it is the
-    calls — a check reads one device — at the job's rate. The larger of the two."""
+    attempts each. Per device it is three waits per command, once per round of devices in
+    progress; across many devices it is the calls — up to 200 devices each — at the job's rate.
+    The larger of the two. A run whose bulk check was not trusted checks one device per call,
+    and takes longer than this."""
     if not devices or not steps:
         return 0.0
+    turns = rounds(devices, in_progress)
+    at_once = min(devices, in_progress or devices)
     attempt = answer_wait_seconds + TICK_SECONDS
-    per_device = steps * cota_run.MAX_ATTEMPTS * attempt
-    checks = devices * steps * cota_run.MAX_ATTEMPTS * math.ceil(answer_wait_seconds / cota_run.POLL_SECONDS)
-    sends = math.ceil(devices / max(1, batch_size)) * steps * cota_run.MAX_ATTEMPTS
+    per_device = turns * steps * cota_run.MAX_ATTEMPTS * attempt
+    checks = (turns * math.ceil(at_once / cota.LIST_MAX_DEVICES) * steps * cota_run.MAX_ATTEMPTS
+              * math.ceil(answer_wait_seconds / cota_run.POLL_SECONDS))
+    sends = turns * math.ceil(at_once / _batch(batch_size)) * steps * cota_run.MAX_ATTEMPTS
     by_calls = (checks + sends) / max(rate_per_sec, 0.1)
     return max(per_device, by_calls) / 60
 
 
 def canary_size(devices: int) -> int:
-    if devices < CANARY_FROM:
+    if not AUTOMATIC_STOP or devices < CANARY_FROM:
         return 0
     return max(CANARY_MIN, min(CANARY_MAX, math.ceil(devices * CANARY_SHARE)))
 
@@ -264,7 +323,7 @@ def busy_devices(conn, device_ids: list[int]) -> list[int]:
     wanted = set(device_ids)
     busy = {r[0] for r in conn.execute("""
         SELECT d.device_id FROM cota_campaign_device d JOIN cota_campaign c ON c.id = d.campaign_id
-        WHERE c.state IN ('running', 'paused') AND d.state IN ('ready', 'waiting')
+        WHERE c.state IN ('running', 'paused') AND d.state IN ('queued', 'ready', 'waiting')
     """)}
     busy |= {r[0] for r in conn.execute(
         "SELECT device_id FROM cota_run WHERE state IN ('running', 'paused')")}
@@ -273,23 +332,29 @@ def busy_devices(conn, device_ids: list[int]) -> list[int]:
 
 def plan(conn, device_ids: list[int], commands_text: str, *, batch_size: int = DEFAULT_BATCH,
          rate_per_sec: float = DEFAULT_RATE, answer_wait_seconds: float | None = None,
-         time_limit_minutes: float | None = None) -> dict:
+         time_limit_minutes: float | None = None, in_progress: int | None = None) -> dict:
     """What a job would do, before anything is sent: the preview."""
     steps = cota_run.parse_lines(commands_text)
     bad = [s for s in steps if s["problem"]]
-    batch_size = max(1, int(batch_size))
+    batch_size = _batch(batch_size)
+    window = _in_progress(in_progress)
     wait = _answer_wait_seconds(answer_wait_seconds) or cota_run.ANSWER_WAIT_SECONDS
     limit = _time_limit_minutes(time_limit_minutes)
-    sends = math.ceil(len(device_ids) / batch_size) * len(steps) if device_ids else 0
-    # Awake devices: one send per batch per command, and a few checks each while they answer.
-    checks = len(device_ids) * len(steps) * 2
-    seconds = (sends + checks) / max(rate_per_sec, 0.1) + len(steps) * (20 + 2)
+    turns = rounds(len(device_ids), window)
+    at_once = min(len(device_ids), window)
+    # Awake devices: one send per batch per command, and two checks of up to 200 devices each
+    # while they answer — for each round of devices in progress.
+    sends = turns * math.ceil(at_once / batch_size) * len(steps)
+    checks = turns * math.ceil(at_once / cota.LIST_MAX_DEVICES) * len(steps) * 2
+    seconds = (sends + checks) / max(rate_per_sec, 0.1) + turns * len(steps) * (20 + 2)
     worst = worst_case_minutes(len(device_ids), len(steps), batch_size=batch_size,
-                               rate_per_sec=rate_per_sec, answer_wait_seconds=wait)
+                               rate_per_sec=rate_per_sec, answer_wait_seconds=wait,
+                               in_progress=window)
     return {
         "devices": len(device_ids), "steps": steps, "bad": bad,
         "names": [cota.describe_command(s["val1"]) or s["val1"][:16] for s in steps],
         "canary": canary_size(len(device_ids)),
+        "batch": batch_size, "in_progress": window, "rounds": turns,
         "send_calls": sends, "check_calls": checks,
         "estimate_minutes": max(1, round(seconds / 60)),
         "worst_minutes": max(1, math.ceil(worst)), "limit_minutes": limit,
@@ -303,9 +368,10 @@ def create(conn, *, name: str, device_ids: list[int], commands_text: str,
            batch_size: int = DEFAULT_BATCH, rate_per_sec: float = DEFAULT_RATE,
            answer_wait_seconds: float | None = None,
            time_limit_minutes: float | None = None,
+           in_progress: int | None = None,
            max_fail_share: float = MAX_FAIL_SHARE) -> int:
     the_plan = plan(conn, device_ids, commands_text, batch_size=batch_size,
-                    rate_per_sec=rate_per_sec)
+                    rate_per_sec=rate_per_sec, in_progress=in_progress)
     if not device_ids:
         raise CampaignError("Add at least one device id.")
     if not the_plan["steps"]:
@@ -321,6 +387,7 @@ def create(conn, *, name: str, device_ids: list[int], commands_text: str,
                             f"({shown}) — one thing at a time per device.")
     commands = [s["val1"] for s in the_plan["steps"]]
     canary = the_plan["canary"]
+    window = the_plan["in_progress"]
     now = cota._now()
     with conn:
         job_id = conn.execute("INSERT INTO cota_job (name, source_file, created_at) VALUES (?, ?, ?)",
@@ -328,16 +395,19 @@ def create(conn, *, name: str, device_ids: list[int], commands_text: str,
         campaign_id = conn.execute("""
             INSERT INTO cota_campaign (name, job_id, device_type, cmd_type, commands, batch_size,
                 rate_per_sec, validity_hours, canary_size, active_wave, max_fail_share, state,
-                answer_wait_seconds, created_at, started_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                answer_wait_seconds, in_progress, created_at, started_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
         """, (name or f"Job · {len(device_ids)} devices", job_id, device_type, cmd_type,
-              json.dumps(commands), max(1, int(batch_size)), max(0.1, float(rate_per_sec)),
+              json.dumps(commands), the_plan["batch"], max(0.1, float(rate_per_sec)),
               _time_limit_minutes(time_limit_minutes) / 60, canary, 0 if canary else 1,
-              float(max_fail_share), _answer_wait_seconds(answer_wait_seconds), now, now)).lastrowid
+              float(max_fail_share), _answer_wait_seconds(answer_wait_seconds), window,
+              now, now)).lastrowid
+        # The first devices in job order start; the rest wait in line for a device to finish.
         conn.executemany("""
             INSERT INTO cota_campaign_device (campaign_id, device_id, seq, wave, state, due_at)
-            VALUES (?, ?, ?, ?, 'ready', 0)
-        """, [(campaign_id, d, i, 0 if i < canary else 1) for i, d in enumerate(device_ids)])
+            VALUES (?, ?, ?, ?, ?, 0)
+        """, [(campaign_id, d, i, 0 if i < canary else 1, "ready" if i < window else "queued")
+              for i, d in enumerate(device_ids)])
         conn.executemany("""
             INSERT INTO cota_campaign_result (campaign_id, device_id, step, state)
             VALUES (?, ?, ?, 'queued')
@@ -542,12 +612,18 @@ def device_rows(conn, campaign_id: int, *, state: str = "", search: str = "", pa
                 size: int = 50) -> tuple[list[dict], int]:
     """The job's devices, for the group-SMS view: where each one is, newest outcome first."""
     where, params = ["d.campaign_id = ?"], [campaign_id]
-    if state in ("ready", "waiting", "done", "expired", "cancelled"):
+    if state in ("queued", "ready", "waiting", "done", "expired", "not_started", "cancelled"):
         where.append("d.state = ?")
         params.append(state)
     elif state == "failed":
         where.append("EXISTS (SELECT 1 FROM cota_campaign_result r WHERE r.campaign_id = d.campaign_id "
                      "AND r.device_id = d.device_id AND r.state = 'failed')")
+    elif state == "unreachable":
+        # device_standing's "unreachable": failed something, answered nothing.
+        where.append("EXISTS (SELECT 1 FROM cota_campaign_result r WHERE r.campaign_id = d.campaign_id "
+                     "AND r.device_id = d.device_id AND r.state = 'failed') "
+                     "AND NOT EXISTS (SELECT 1 FROM cota_campaign_result r WHERE r.campaign_id = d.campaign_id "
+                     "AND r.device_id = d.device_id AND (r.state = 'done' OR r.outcome = 'answered_failure'))")
     if search.strip().isdigit():
         where.append("CAST(d.device_id AS TEXT) LIKE ?")
         params.append(f"%{search.strip()}%")
@@ -556,11 +632,14 @@ def device_rows(conn, campaign_id: int, *, state: str = "", search: str = "", pa
     rows = []
     for r in conn.execute(f"""
         SELECT d.device_id, d.state, d.step, d.attempt, d.seq, d.due_at, d.next_poll_at,
-               d.wait_started_at, d.step_started_at, d.pending_task_id,
+               d.wait_started_at, d.step_started_at, d.pending_task_id, d.wave,
                (SELECT COUNT(*) FROM cota_campaign_result x WHERE x.campaign_id = d.campaign_id
                   AND x.device_id = d.device_id AND x.state = 'done') AS answered,
                (SELECT COUNT(*) FROM cota_campaign_result x WHERE x.campaign_id = d.campaign_id
                   AND x.device_id = d.device_id AND x.state = 'failed') AS failed,
+               (SELECT COUNT(*) FROM cota_campaign_result x WHERE x.campaign_id = d.campaign_id
+                  AND x.device_id = d.device_id
+                  AND (x.state = 'done' OR x.outcome = 'answered_failure')) AS heard,
                (SELECT imei FROM cota_device m WHERE m.device_id = d.device_id LIMIT 1) AS imei,
                (SELECT answer FROM cota_campaign_result x WHERE x.campaign_id = d.campaign_id
                   AND x.device_id = d.device_id AND x.state = 'done'
@@ -573,6 +652,7 @@ def device_rows(conn, campaign_id: int, *, state: str = "", search: str = "", pa
     """, (*params, size, (max(1, page) - 1) * size)):
         row = dict(r)
         row["serial"] = row.pop("seq") + 1                 # position in the job, filter or not
+        row["unreachable"] = bool(row["failed"]) and not row.pop("heard")
         row["median_answer"] = _median(float(t) for t in (row.pop("times") or "").split(",") if t)
         row["last_reading"] = cota.reading(row["last_answer"])
         row["last_answer"] = cota.visible(row["last_answer"])
@@ -596,12 +676,12 @@ def _add_next_actions(conn, campaign_id: int, rows: list[dict]) -> None:
     now = cota._parse(cota._now()).timestamp()
     for r in rows:
         nxt = next_action(c, kinds, r, clouds.get(r.pop("pending_task_id")), now)
-        if nxt:
+        if nxt and nxt["at"] is not None:
             nxt["at"] = round(nxt["at"])
             nxt["left"] = max(0, nxt["at"] - round(now))
             nxt["clock"] = datetime.fromtimestamp(nxt["at"]).strftime("%H:%M:%S")
         r["next"] = nxt
-        for key in ("due_at", "next_poll_at", "wait_started_at", "step_started_at"):
+        for key in ("due_at", "next_poll_at", "wait_started_at", "step_started_at", "wave"):
             r.pop(key, None)
 
 
@@ -610,8 +690,16 @@ def next_action(c: dict, kinds: list[str], d: dict, cloud: dict | None, now: flo
     page counts down to it. Mirrors Scheduler._judge and _after_attempt: an attempt waits the
     job's answer wait (30 s), then goes again — whatever the cloud says about it — up to three
     times, then the next command; nothing is later than the job's time limit."""
-    if c["state"] != "running" or d["state"] not in ("ready", "waiting"):
+    if c["state"] != "running":
         return None
+    if d["state"] == "queued":
+        return {"what": "In line", "at": None, "note": "starts when a device in progress finishes"}
+    if d["state"] not in ("ready", "waiting"):
+        return None
+    if d.get("wave", 0) > c.get("active_wave", 1):
+        # Not "sends now": the rest wait until the canary has run the whole sequence — job #12's
+        # 68 devices read "Sends · due now" for minutes while one device went first.
+        return {"what": "After the canary", "at": None, "note": "the canary runs the sequence first"}
     stop = deadline(c) or float("inf")
     last_step = d["step"] + 1 >= len(kinds)
     kind = kinds[d["step"]]
@@ -701,6 +789,7 @@ def draft_from(conn, campaign_id: int, which: str = "all") -> dict | None:
             "batch_size": str(c["batch_size"]), "rate_per_sec": f"{c['rate_per_sec']:g}",
             "time_limit_minutes": f"{time_limit_minutes(dict(c)):g}",
             "answer_wait_seconds": f"{wait:g}" if wait else "",
+            "in_progress": str(c["in_progress"]) if c["in_progress"] else "",   # blank: default
             "device_type": str(c["device_type"]), "cmd_type": str(c["cmd_type"]),
             "from_job": campaign_id, "from_which": which, "from_count": len(devices)}
 
@@ -732,19 +821,73 @@ def export_rows(conn, campaign_id: int):
                "answer": cota.visible(r["answer"]), "finished_at": r["finished_at"]}
 
 
+# ── the automatic stop: devices, not commands ─────────────────────────────────────────────
+
+def device_standing(conn, campaign_id: int, *, wave: int | None = None) -> dict[str, set[int]]:
+    """Each device by what it has done in the job so far — what the automatic stop judges on.
+
+      heard        answered something: late, or with a failure, counts. The device is reachable.
+      failing      heard from, then a command failed on it — or it answered one with a failure.
+                   What a harmful command leaves behind; the automatic stop counts these.
+      unreachable  failed and has answered nothing: asleep or out of coverage. Never counted.
+
+    Counting failed *commands* instead paused two 7-device field tests (08-10-2026): a sleeping
+    device fails every command it is sent, so three of them were "14%" while every command was
+    being answered by the rest.
+    """
+    silent = ",".join(f"'{o}'" for o in SILENT_OUTCOMES)
+    in_wave = "AND d.wave = ?" if wave is not None else ""
+    rows = conn.execute(f"""
+        SELECT r.device_id,
+               MIN(CASE WHEN r.state = 'done' OR r.outcome = 'answered_failure'
+                        THEN r.step END) AS first_heard,
+               MAX(CASE WHEN r.state = 'failed' AND r.outcome IN ({silent})
+                        THEN r.step END) AS last_silent,
+               MAX(r.state = 'failed' AND r.outcome = 'answered_failure') AS answered_failed,
+               MAX(r.state = 'failed') AS any_failed
+        FROM cota_campaign_result r JOIN cota_campaign_device d
+          ON d.campaign_id = r.campaign_id AND d.device_id = r.device_id
+        WHERE r.campaign_id = ? {in_wave}
+        GROUP BY r.device_id
+    """, (campaign_id, *([wave] if wave is not None else []))).fetchall()
+    out = {"heard": set(), "failing": set(), "unreachable": set()}
+    for r in rows:
+        if r["first_heard"] is None:
+            if r["any_failed"]:
+                out["unreachable"].add(r["device_id"])
+            continue
+        out["heard"].add(r["device_id"])
+        if r["answered_failed"] or (r["last_silent"] is not None and r["last_silent"] > r["first_heard"]):
+            out["failing"].add(r["device_id"])
+    return out
+
+
+def stop_reason(failing: int, heard: int, limit: float, *, canary: bool = False) -> str | None:
+    """Why the automatic stop fires, or None when it does not."""
+    if canary and not heard:
+        return ("No device in the canary answered anything — check the commands and the cloud, "
+                "then resume to send to the rest.")
+    if not heard or failing / heard <= limit:
+        return None
+    who = "canary devices" if canary else "devices"
+    then = "resume to send to the rest" if canary else "resume"
+    return (f"{failing} of {heard} {who} that answered then failed a command "
+            f"({failing / heard:.0%}) — above the {limit:.0%} limit. Check them, then {then}.")
+
+
 def request(conn, campaign_id: int, control: str) -> None:
     """Pause, resume or cancel from the page; the scheduler acts on it within a second."""
     if control == "resume":
-        done = conn.execute("SELECT COALESCE(SUM(state = 'failed'), 0), "
-                            "COALESCE(SUM(state IN ('done', 'failed')), 0) "
-                            "FROM cota_campaign_result WHERE campaign_id = ?", (campaign_id,)).fetchone()
+        # The devices failing now have been seen by whoever resumes: the automatic stop counts
+        # only devices that start failing after this. Kept as ids, not as a count — a late answer
+        # can turn an earlier failure round, and a count netted that against new failures.
+        seen = sorted(device_standing(conn, campaign_id)["failing"])
         with conn:
-            # The automatic stop judges what happens after the resume, not what made it stop.
             conn.execute("""
                 UPDATE cota_campaign SET control = NULL, state = 'running', pause_reason = NULL,
-                       fail_base_failed = ?, fail_base_finished = ?
+                       fail_acknowledged = ?, resumed_at = ?
                 WHERE id = ? AND state = 'paused'
-            """, (done[0], done[1], campaign_id))
+            """, (json.dumps(seen), cota._parse(cota._now()).timestamp(), campaign_id))
             # Resuming after a canary stop is the review: the rest may now go.
             conn.execute("""
                 UPDATE cota_campaign SET active_wave = 1 WHERE id = ? AND active_wave = 0
@@ -765,7 +908,7 @@ def request(conn, campaign_id: int, control: str) -> None:
 
 def _cancel_rows(conn, campaign_id: int) -> None:
     conn.execute("UPDATE cota_campaign_device SET state = 'cancelled' WHERE campaign_id = ? "
-                 "AND state IN ('ready', 'waiting')", (campaign_id,))
+                 "AND state IN ('queued', 'ready', 'waiting')", (campaign_id,))
     conn.execute("UPDATE cota_campaign_result SET state = 'cancelled' WHERE campaign_id = ? "
                  "AND state = 'queued'", (campaign_id,))
     conn.execute("UPDATE cota_campaign SET state = 'cancelled', control = NULL, finished_at = ? "
@@ -804,6 +947,25 @@ def purge_previous_days(conn, today: datetime | None = None) -> int:
 
 _threads: dict[int, threading.Thread] = {}
 _lock = threading.Lock()
+# Which scheduler threads this process started: a job whose thread is gone was either left by an
+# earlier process (a restart) or lost here — and the two must not be reported as the same thing.
+_started_here: set[int] = set()
+
+RESTARTED = "The app was restarted — resume to carry on"
+STOPPED = ("The job stopped unexpectedly at {at} — the Errors page has the details. "
+           "Resume to carry on.")
+
+
+def _run(campaign_id: int) -> None:
+    """The scheduler thread. Whatever escapes it is recorded — on job #12 (08-10-2026) the thread
+    died twice with nothing in the Errors page or errors.log, the traceback only in a terminal,
+    and the page then said the app had restarted when it had not."""
+    try:
+        Scheduler(campaign_id).run()
+    except BaseException as exc:                                    # noqa: BLE001
+        from . import errors
+        errors.record("cota-job", exc, path=f"job {campaign_id} — scheduler thread")
+        raise
 
 
 def start(campaign_id: int) -> None:
@@ -811,25 +973,32 @@ def start(campaign_id: int) -> None:
         alive = _threads.get(campaign_id)
         if alive and alive.is_alive():
             return
-        thread = threading.Thread(target=lambda: Scheduler(campaign_id).run(), daemon=True,
+        thread = threading.Thread(target=_run, args=(campaign_id,), daemon=True,
                                   name=f"cota-job-{campaign_id}")
         _threads[campaign_id] = thread
+        _started_here.add(campaign_id)
         thread.start()
 
 
 def recover(conn) -> int:
-    """A job left running with no scheduler behind it was interrupted by a restart: paused."""
+    """A job left running with no scheduler behind it is paused, with the true reason: a restart
+    when this process never ran it, an unexpected stop when it did."""
     stale = [r["id"] for r in conn.execute("SELECT id FROM cota_campaign WHERE state = 'running'")
              if not (_threads.get(r["id"]) and _threads[r["id"]].is_alive())]
     with conn:
         for campaign_id in stale:
-            conn.execute("UPDATE cota_campaign SET state = 'paused', control = NULL, pause_reason = "
-                         "'The app was restarted — resume to carry on' WHERE id = ?", (campaign_id,))
+            why = (STOPPED.format(at=cota._now()[11:16]) if campaign_id in _started_here
+                   else RESTARTED)
+            conn.execute("UPDATE cota_campaign SET state = 'paused', control = NULL, pause_reason = ? "
+                         "WHERE id = ?", (why, campaign_id))
     return len(stale)
 
 
 class _Paused(Exception):
     pass
+
+
+RECHECK = object()               # a bulk check's answer was not used: ask those devices again
 
 
 class _Cancelled(Exception):
@@ -845,7 +1014,8 @@ class Scheduler:
         self.sleep = sleep
         self.conn = connect()
         self.api_errors = 0
-        self.last_reply: dict[int, str] = {}      # device → its last raw answer: skip if unchanged
+        self.last_reply: dict[int, str] = {}      # device → its last records: skip if unchanged
+        self.bulk: bool | None = None             # getGPRSCommandList trusted this run? (_verify)
         c = self.conn.execute("SELECT * FROM cota_campaign WHERE id = ?", (campaign_id,)).fetchone()
         self.c = dict(c) if c else None
         if self.c:
@@ -854,6 +1024,21 @@ class Scheduler:
             self.window_from = cota._parse(self.c["created_at"]) - timedelta(minutes=15)
             self.answer_wait = answer_wait(self.c)
             self.deadline = deadline(self.c)
+            self.size = self.conn.execute("SELECT COUNT(*) FROM cota_campaign_device WHERE "
+                                          "campaign_id = ?", (campaign_id,)).fetchone()[0]
+            self.acknowledged = set(json.loads(self.c.get("fail_acknowledged") or "[]"))
+            self.resumed_at = self.c.get("resumed_at")
+            self.window = self.c.get("in_progress")               # None: every device at once
+
+    def _timed(self, started: float | None, seen: float) -> float | None:
+        """Seconds from a step's first attempt to its answer — or None when a pause lies between.
+        A paused job does not check, so an answer that came during the pause is first seen on
+        resuming, and timing it would report the pause as the device's (job #9: "34 min")."""
+        if started is None:
+            return None
+        if self.resumed_at and started < self.resumed_at <= seen:
+            return None
+        return max(0.0, seen - started)
 
     @staticmethod
     def now() -> float:
@@ -869,16 +1054,19 @@ class Scheduler:
                 tick_started = self.now()
                 self.budget = max(1, int(self.c["rate_per_sec"] * TICK_SECONDS))
                 self._advance_wave()
+                self._admit()
                 self._send_due()
                 self._poll_due()
                 self._expire()
                 # An attempt whose 30 s just ran out goes again in this tick, not the next: the
-                # user's rule is 30 s between attempts, and a tick later made it 40.
+                # user's rule is 30 s between attempts, and a tick later made it 40. A device
+                # that finished in this tick's checks makes room for the next one here too.
+                self._admit()
                 self._send_due()
                 self._breaker()
                 left = self.conn.execute("""
                     SELECT COUNT(*) FROM cota_campaign_device WHERE campaign_id = ?
-                      AND state IN ('ready', 'waiting')
+                      AND state IN ('queued', 'ready', 'waiting')
                 """, (self.id,)).fetchone()[0]
                 if not left:
                     with self.conn:
@@ -928,6 +1116,25 @@ class Scheduler:
         """Spread calls out at the job's rate rather than bursting them."""
         self.sleep(1.0 / self.c["rate_per_sec"])
 
+    def _admit(self) -> None:
+        """Keep the job's devices in progress topped up (the user's design, 08-10-2026): a device
+        that has finished its whole sequence, answered or not, makes room for the next in line,
+        in job order, and that one is sent its first command in the same tick."""
+        if not self.window or (self.deadline is not None and self.now() >= self.deadline):
+            return
+        busy = self.conn.execute("SELECT COUNT(*) FROM cota_campaign_device WHERE campaign_id = ? "
+                                 "AND state IN ('ready', 'waiting')", (self.id,)).fetchone()[0]
+        room = self.window - busy
+        if room <= 0:
+            return
+        with self.conn:
+            self.conn.execute("""
+                UPDATE cota_campaign_device SET state = 'ready', due_at = ?
+                WHERE campaign_id = ? AND device_id IN (
+                    SELECT device_id FROM cota_campaign_device WHERE campaign_id = ? AND state = 'queued'
+                    ORDER BY seq LIMIT ?)
+            """, (self.now(), self.id, self.id, room))
+
     # ── waves and the automatic stop ──
     def _advance_wave(self) -> None:
         wave = self.conn.execute("SELECT active_wave FROM cota_campaign WHERE id = ?",
@@ -940,31 +1147,31 @@ class Scheduler:
         """, (self.id,)).fetchone()[0]
         if left:
             return
-        failed, finished = self.conn.execute("""
-            SELECT COALESCE(SUM(r.state = 'failed'), 0), COALESCE(SUM(r.state IN ('done', 'failed')), 0)
-            FROM cota_campaign_result r JOIN cota_campaign_device d
-              ON d.campaign_id = r.campaign_id AND d.device_id = r.device_id
-            WHERE r.campaign_id = ? AND d.wave = 0
-        """, (self.id,)).fetchone()
-        if finished and failed / finished > self.c["max_fail_share"]:
-            raise _Paused(f"The canary failed {failed} of {finished} commands — above the "
-                          f"{self.c['max_fail_share']:.0%} limit. Check them, then resume to "
-                          "send to the rest.")
+        # The canary is the proof a command works on live devices before the rest get it. Asleep
+        # canary devices prove nothing either way, so they are not held against it — but a canary
+        # in which nobody answered anything has proved nothing, and the rest wait for a person.
+        s = device_standing(self.conn, self.id, wave=0)
+        if AUTOMATIC_STOP and (s["heard"] or s["unreachable"]):
+            why = stop_reason(len(s["failing"]), len(s["heard"]), self.c["max_fail_share"],
+                              canary=True)
+            if why:
+                raise _Paused(why)
         with self.conn:
             self.conn.execute("UPDATE cota_campaign SET active_wave = 1 WHERE id = ?", (self.id,))
 
     def _breaker(self) -> None:
-        c = self.conn.execute("SELECT fail_base_failed, fail_base_finished, max_fail_share "
-                              "FROM cota_campaign WHERE id = ?", (self.id,)).fetchone()
-        failed, finished = self.conn.execute("""
-            SELECT COALESCE(SUM(state = 'failed'), 0), COALESCE(SUM(state IN ('done', 'failed')), 0)
-            FROM cota_campaign_result WHERE campaign_id = ?
-        """, (self.id,)).fetchone()
-        failed -= c["fail_base_failed"]
-        finished -= c["fail_base_finished"]
-        if finished >= FAIL_SAMPLE and failed / finished > c["max_fail_share"]:
-            raise _Paused(f"{failed} of {finished} commands failed ({failed / finished:.0%}) — "
-                          f"above the {c['max_fail_share']:.0%} limit. Check, then resume.")
+        """The automatic stop, on devices: of the devices that have answered something, more than
+        the job's share (10%) then failing a command. Judged on jobs over 20 devices once 20 have
+        answered; a smaller job is a person's field test, and its time limit already bounds it."""
+        if not AUTOMATIC_STOP or self.size < JUDGED_FROM:
+            return
+        s = device_standing(self.conn, self.id)
+        heard = len(s["heard"])
+        if heard < FAIL_SAMPLE:
+            return
+        why = stop_reason(len(s["failing"] - self.acknowledged), heard, self.c["max_fail_share"])
+        if why:
+            raise _Paused(why)
 
     # ── sending: one call per batch of devices ready for the same command ──
     def _send_due(self) -> None:
@@ -1109,56 +1316,130 @@ class Scheduler:
 
     # ── checking: only devices with an attempt outstanding, less often the longer they wait ──
     def _poll_due(self) -> None:
+        """Up to 200 devices per call through getGPRSCommandList once this run has held its answer
+        against the one-device call; one device per call until then for a lone device, and for
+        the rest of the run if the two disagreed."""
+        if self.bulk is None and not self._can_list():
+            self.bulk = False
         now = self.now()
+        per_call = 1 if self.bulk is False else cota.LIST_MAX_DEVICES
         due = self.conn.execute("""
             SELECT device_id, step, pending_task_id, wait_started_at, step_started_at
             FROM cota_campaign_device
             WHERE campaign_id = ? AND state = 'waiting' AND next_poll_at <= ?
             ORDER BY next_poll_at LIMIT ?
-        """, (self.id, now, max(0, self.budget))).fetchall()
+        """, (self.id, now, max(0, self.budget) * per_call)).fetchall()
         start = int(self.window_from.timestamp())
-        for d in due:
-            if self.budget <= 0:
-                return
+        at = 0
+        while at < len(due) and self.budget > 0:
             self._control()
+            per_call = 1 if self.bulk is False else cota.LIST_MAX_DEVICES   # _verify may change it
+            chunk = [dict(d) for d in due[at:at + per_call]]
+            at += len(chunk)
+            ids = [d["device_id"] for d in chunk]
             end = int(self.now() + cota.POLL_MARGIN.total_seconds())
-            status, raw = None, None
-            for _ in (1, 2):
-                client = self.client_factory()
-                try:
-                    status, raw = client.responses(d["device_id"], start, end)
-                except cota.CotaError as exc:
-                    if "rejected the token" in str(exc):
-                        if self.renew():
-                            continue
-                        raise _Paused("Session expired — sign in again, then resume") from None
-                    status, raw = None, None
-                finally:
-                    client.close()
-                break
-            self.budget -= 1
-            self._pace()
-            with self.conn:
-                self.conn.execute("UPDATE cota_campaign SET poll_calls = poll_calls + 1 WHERE id = ?",
-                                  (self.id,))
-            if status is None or not 200 <= status < 300:
+            replies = self._check(ids, start, end)
+            if replies is RECHECK:
+                # The bulk answer was not trusted: these devices go again, one per call, at once.
+                with self.conn:
+                    self.conn.executemany("UPDATE cota_campaign_device SET next_poll_at = ? WHERE "
+                                          "campaign_id = ? AND device_id = ?",
+                                          [(self.now(), self.id, d) for d in ids])
+                continue
+            if replies is None:
                 self.api_errors += 1
                 if self.api_errors >= API_ERRORS_TO_PAUSE:
                     raise _Paused(f"The cloud did not answer {API_ERRORS_TO_PAUSE} checks in a row — "
                                   "resume when it is answering again")
                 with self.conn:
-                    self.conn.execute("UPDATE cota_campaign_device SET next_poll_at = ? WHERE "
-                                      "campaign_id = ? AND device_id = ?",
-                                      (self.now() + POLL_SCHEDULE[0][1], self.id, d["device_id"]))
+                    self.conn.executemany("UPDATE cota_campaign_device SET next_poll_at = ? WHERE "
+                                          "campaign_id = ? AND device_id = ?",
+                                          [(self.now() + POLL_SCHEDULE[0][1], self.id, d) for d in ids])
                 continue
             self.api_errors = 0
-            # Store only what changed: a sleeping device answers the same thing every check.
-            if raw != self.last_reply.get(d["device_id"]):
-                self.last_reply[d["device_id"]] = raw
-                records = cota.reply_records(raw)
-                if records is not None:
+            for d in chunk:
+                records = replies[d["device_id"]]
+                # Store only what changed: a sleeping device answers the same thing every check.
+                seen = json.dumps(records, sort_keys=True)
+                if seen != self.last_reply.get(d["device_id"]):
+                    self.last_reply[d["device_id"]] = seen
                     cota.store_cloud_records(self.conn, d["device_id"], records)
-            self._judge(dict(d))
+                self._judge(d)
+
+    def _can_list(self) -> bool:
+        client = self.client_factory()
+        try:
+            return callable(getattr(client, "responses_many", None))
+        finally:
+            client.close()
+
+    def _ask(self, call) -> tuple[int | None, str | None]:
+        """One check call, signing in again once if the token was rejected. Counted against the
+        tick's budget and paced like every call."""
+        try:
+            for _ in (1, 2):
+                client = self.client_factory()
+                try:
+                    return call(client)
+                except cota.CotaError as exc:
+                    if "rejected the token" in str(exc):
+                        if self.renew():
+                            continue
+                        raise _Paused("Session expired — sign in again, then resume") from None
+                    return None, None
+                finally:
+                    client.close()
+            return None, None
+        finally:
+            self.budget -= 1
+            self._pace()
+            with self.conn:
+                self.conn.execute("UPDATE cota_campaign SET poll_calls = poll_calls + 1 WHERE id = ?",
+                                  (self.id,))
+
+    def _check(self, devices: list[int], start: int, end: int):
+        """{device: its records} for these devices; None when the call failed; RECHECK when a bulk
+        answer was not trusted and the devices should be asked again one at a time."""
+        if len(devices) == 1:
+            status, raw = self._ask(lambda c: c.responses(devices[0], start, end))
+            records = cota.reply_records(raw) if status and 200 <= status < 300 else None
+            return None if records is None else {devices[0]: records}
+        status, raw = self._ask(lambda c: c.responses_many(devices, start, end))
+        if not (status and 200 <= status < 300):
+            return None
+        found = cota.records_by_device(raw, devices)
+        if found is None:
+            self._stop_bulk("its answer could not be split by device")
+            return RECHECK
+        if self.bulk is None and self._verify(found, start, end) is False:
+            return RECHECK
+        return found
+
+    def _verify(self, found: dict[int, list[dict]], start: int, end: int) -> bool | None:
+        """Before a run trusts getGPRSCommandList, one device's records from it are held against
+        the one-device call — the app's own session got empty lists from it on 08-10-2026 while
+        the one-device call answered. True: the same records, trusted for the run. False: not —
+        one device per call from here, and the Errors page says why. None: nothing to compare yet
+        (neither call holds a record for it), so the next bulk check asks again."""
+        probe = next((d for d, recs in found.items() if recs), next(iter(found)))
+        status, raw = self._ask(lambda c: c.responses(probe, start, end))
+        single = cota.reply_records(raw) if status and 200 <= status < 300 else None
+        if single is None or not (single or found[probe]):
+            return None
+        ids = lambda recs: {str(cota._field(r, "id")) for r in recs}     # noqa: E731
+        if ids(single) == ids(found[probe]):
+            self.bulk = True
+            return True
+        self._stop_bulk(f"device {probe}: {len(found[probe])} records from it, "
+                        f"{len(single)} from the one-device call")
+        return False
+
+    def _stop_bulk(self, why: str) -> None:
+        self.bulk = False
+        from . import errors
+        errors.record("cota-job", cota.CotaError(
+            f"Job {self.id} checks one device per call for this run: getGPRSCommandList did not "
+            f"match the one-device check ({why})."), path=f"job {self.id}")
 
     def _judge(self, d: dict) -> None:
         """Where this device's attempt stands, and what happens next."""
@@ -1178,7 +1459,7 @@ class Scheduler:
             # Timed from the step's FIRST attempt: a device that takes minutes to wake answers on
             # whichever record is newest by then, and the gap is what tells the two apart.
             seen = cota._parse(last["answered_at"]).timestamp() if last["answered_at"] else now
-            seconds = max(0.0, seen - d["step_started_at"]) if d["step_started_at"] else None
+            seconds = self._timed(d["step_started_at"], seen)
             with self.conn:
                 self._finish_step(d["device_id"], step, "done", "answered", last["answer"], at,
                                   delay=cota_run.GAP_AFTER_ANSWER_SECONDS,
@@ -1221,7 +1502,7 @@ class Scheduler:
             first = self.conn.execute(f"SELECT MIN(sent_at) FROM cota_task WHERE id IN "
                                       f"({','.join('?' * len(ids))})", ids).fetchone()[0]
             seen = cota._parse(state["answered_at"]) if state["answered_at"] else cota._parse(cota._now())
-            seconds = (seen - cota._parse(first)).total_seconds() if first else None
+            seconds = self._timed(cota._parse(first).timestamp() if first else None, seen.timestamp())
             with self.conn:
                 self.conn.execute("""
                     UPDATE cota_campaign_result SET state = 'done', outcome = 'answered_late',
@@ -1246,13 +1527,23 @@ class Scheduler:
         expired, the rest skipped. The job then ends — no job runs past its limit."""
         if self.deadline is None or self.now() < self.deadline:
             return
+        at = cota._now()
+        # Devices still in line never started: every command skipped, and said so — not failed.
+        with self.conn:
+            self.conn.execute("""
+                UPDATE cota_campaign_result SET state = 'skipped', outcome = 'not_started',
+                       finished_at = ?
+                WHERE campaign_id = ? AND state = 'queued' AND device_id IN (
+                    SELECT device_id FROM cota_campaign_device WHERE campaign_id = ? AND state = 'queued')
+            """, (at, self.id, self.id))
+            self.conn.execute("UPDATE cota_campaign_device SET state = 'not_started' "
+                              "WHERE campaign_id = ? AND state = 'queued'", (self.id,))
         late = self.conn.execute("""
             SELECT device_id, step FROM cota_campaign_device WHERE campaign_id = ?
               AND state IN ('ready', 'waiting')
         """, (self.id,)).fetchall()
         if not late:
             return
-        at = cota._now()
         with self.conn:
             for d in late:
                 self.conn.execute("""

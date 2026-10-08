@@ -53,8 +53,8 @@
         </div>
         <div class="source-option {{ 'is-off' if source }}" data-source="csv">
           <div class="field-label-row">
-            <span class="field-label">…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
-              <a href="/cota/groups/template.csv">Download template</a></span></span>
+            <span class="field-label"><span data-tip="Columns: id (required), trackingCode (optional).">…or a CSV</span> ·
+              <a class="field-hint" href="/cota/groups/template.csv">Download template</a></span>
             <button type="button" class="link-btn source-clear" data-clear="csv" hidden>Clear</button>
           </div>
           <input type="file" name="file" accept=".csv" aria-label="Device CSV" {{ 'disabled' if source }}>
@@ -82,13 +82,17 @@
                 aria-label="Commands" placeholder="DAD76F4B&#10;DAD76C0A">{{ d.get('commands', '') }}</textarea>
       <ol class="line-names" id="line-names" aria-live="polite"></ol>
       <details class="advanced">
-        <summary>Settings <span class="opt">— batch {{ d.get('batch_size') or defaults.batch }} ·
+        <summary>Settings <span class="opt">— {{ d.get('in_progress') or defaults.in_progress }} at a time ·
+          batch {{ d.get('batch_size') or defaults.batch }} ·
           {{ d.get('rate_per_sec') or defaults.rate }} calls/s ·
           answer wait {{ d.get('answer_wait_seconds') or defaults.answer_wait }} s ·
           time limit {{ d.get('time_limit_minutes') or defaults.time_limit }} min</span></summary>
         <div class="field-row">
-          <label>Devices per send call
-            <input type="number" name="batch_size" min="1" max="5000"
+          <label><span data-tip="The rest wait in job order; each device that finishes its commands makes room for the next.">Devices in progress at once</span>
+            <input type="number" name="in_progress" min="1" step="1"
+                   value="{{ d.get('in_progress') or defaults.in_progress }}"></label>
+          <label><span data-tip="Up to {{ defaults.batch_max }} — checks read up to {{ defaults.batch_max }} too.">Devices per send call</span>
+            <input type="number" name="batch_size" min="1" max="{{ defaults.batch_max }}"
                    value="{{ d.get('batch_size') or defaults.batch }}"></label>
           <label>Calls per second
             <input type="number" name="rate_per_sec" min="0.1" max="100" step="0.1"
@@ -109,12 +113,8 @@
               <input type="number" name="cmd_type" value="{{ d.get('cmd_type') or defaults.cmd }}" aria-label="Type">
             </span></label>
         </div>
-        <p class="field-hint">Each command: 3 attempts, the answer wait apart, then the next command.
-          At the time limit, every device still in progress stops and the job ends. A device that
-          answers after the job has moved on is still recorded — as answered late.</p>
       </details>
-      <div class="form-actions"><button type="submit">Preview</button>
-        <span class="hint">Nothing is sent until you press Start.</span></div>
+      <div class="form-actions"><button type="submit" data-tip="Shows the plan. Nothing is sent until Start.">Preview</button></div>
     </form>
   </section>
 
@@ -122,7 +122,7 @@
   <section class="card" id="plan">
     {% if preview %}
     {%- set p = preview %}
-    <h2>Plan <span class="hint">nothing sent yet</span></h2>
+    <h2><span data-tip="Nothing has been sent. Start sends it.">Plan</span></h2>
     {% if p.problems %}<div class="notice notice-error">{{ p.problems[:5] | join('; ') }}{% if p.problems | length > 5 %} …{% endif %}</div>{% endif %}
     {% if p.bad %}<div class="notice notice-error">Fix these commands first:
       {% for s in p.bad %}line {{ s.line }} ({{ s.val1[:16] or 'blank' }}): {{ s.problem }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
@@ -131,25 +131,24 @@
     <dl class="kv plan-kv">
       <dt>Devices</dt><dd>{{ p.devices | comma }}</dd>
       <dt>Commands</dt><dd><ol class="plan-steps">{% for name in p.names %}<li><strong>{{ name }}</strong> <span class="mono dim">{{ p.steps[loop.index0].val1[:20] }}{% if p.steps[loop.index0].val1 | length > 20 %}…{% endif %}</span></li>{% endfor %}</ol></dd>
-      <dt>Canary</dt><dd>{% if p.canary %}the first {{ p.canary }} device{{ '' if p.canary == 1 else 's' }}, then the rest if no more than 10% fail{% else %}none — {{ p.devices }} devices go together{% endif %}</dd>
+      {% if p.canary %}<dt>Canary</dt><dd>the first {{ p.canary }} device{{ '' if p.canary == 1 else 's' }}, then the rest if no more than 10% fail</dd>{% endif %}
+      <dt>In progress</dt><dd>{% if p.in_progress < p.devices %}{{ p.in_progress | comma }} at a time, the rest in line — {{ p.rounds }} rounds{% else %}all {{ p.devices | comma }} at once{% endif %}</dd>
       <dt>Each command</dt><dd>{{ p.answer_wait | int }} s for an answer, up to 3 attempts, then the next command</dd>
-      <dt>Calls</dt><dd>{{ p.send_calls | comma }} send · about {{ p.check_calls | comma }} checks while devices answer
-        <div class="field-hint">A check reads one device per call — the cloud refuses a list — so for a
-          large job the calls-per-second setting decides how long it takes.</div></dd>
+      <dt><span data-tip="Sends and checks each carry up to {{ defaults.batch_max }} devices.">Calls</span></dt><dd>{{ p.send_calls | comma }} send of up to {{ p.batch }} devices · about {{ p.check_calls | comma }} checks while devices answer</dd>
       <dt>Time</dt><dd>about {% if p.estimate_minutes >= 90 %}{{ '%.1f' | format(p.estimate_minutes / 60) }} h{% else %}{{ p.estimate_minutes }} min{% endif %}
         if devices answer · at most {% if p.worst_minutes >= 90 %}{{ '%.1f' | format(p.worst_minutes / 60) }} h{% else %}{{ p.worst_minutes }} min{% endif %} if none does ·
         stops at {{ p.limit_minutes | int }} min whatever happens</dd>
     </dl>
     {% if p.over_limit and p.devices %}<div class="notice notice-warn">If devices do not answer, this
       job needs about {{ p.worst_minutes }} min — longer than its {{ p.limit_minutes | int }}-minute limit, so some
-      would be stopped unfinished. Raise the calls per second, split the group, or raise the limit.</div>{% endif %}
+      would be stopped unfinished{% if p.in_progress < p.devices %} or never started{% endif %}. Raise the devices in progress at once, raise the limit, or split the group.</div>{% endif %}
     {% if p.devices and p.steps and not p.bad and not p.busy and not p.problems %}
     <form method="post" action="/cota/jobs/start" class="stack-form">
       {#- What was previewed is exactly what starts: the plan's own ids, the form's own values. -#}
       {%- set fallback = {'batch_size': defaults.batch, 'rate_per_sec': defaults.rate,
-                          'time_limit_minutes': defaults.time_limit, 'device_type': defaults.type,
-                          'cmd_type': defaults.cmd} %}
-      {% for k in ('name', 'batch_size', 'rate_per_sec', 'time_limit_minutes', 'answer_wait_seconds', 'device_type', 'cmd_type') %}
+                          'time_limit_minutes': defaults.time_limit, 'in_progress': defaults.in_progress,
+                          'device_type': defaults.type, 'cmd_type': defaults.cmd} %}
+      {% for k in ('name', 'batch_size', 'rate_per_sec', 'time_limit_minutes', 'answer_wait_seconds', 'in_progress', 'device_type', 'cmd_type') %}
       <input type="hidden" name="{{ k }}" value="{{ d.get(k) or fallback.get(k, '') }}">
       {% endfor %}
       {#- A textarea, not a hidden input: the line breaks between commands must survive. -#}
@@ -165,18 +164,8 @@
     </form>
     {% endif %}
     {% else %}
-    <h2>How a job runs</h2>
-    <ol class="module-steps">
-      <li><strong>Each device moves through the commands on its own</strong>, one at a time —
-        the next 2 s after an answer.</li>
-      <li><strong>An attempt waits 30 s for the answer</strong>, then the command is sent again —
-        up to 3 attempts, then the next command. At most about 2 minutes per command.</li>
-      <li><strong>No job runs past its time limit</strong> — 60 minutes unless you set it. A late
-        answer is still recorded, as answered late.</li>
-      <li><strong>Devices ready for the same command go in one call</strong>, paced to the rate
-        you set. For more than 20 devices a canary goes first, and the job pauses itself if more
-        than 10% of commands fail.</li>
-    </ol>
+    <h2><span data-tip="Each command: 30 s for an answer, up to 3 attempts, then the next command. No job runs past its time limit.">Plan</span></h2>
+    <p class="hint">Preview to see the plan here.</p>
     {% endif %}
   </section>
 </div>

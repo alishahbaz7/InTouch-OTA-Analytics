@@ -116,3 +116,16 @@ def test_every_rule_in_the_stylesheet_is_whole():
         depth += line.count("{") - line.count("}")
         assert depth >= 0, f"app.css line {number} closes a rule that was never opened"
     assert depth == 0, "app.css ends inside an open rule"
+
+
+def test_cota_headings_carry_a_count_at_most_never_a_sentence():
+    """The user's rule (2026-10-08): no help text printed beside a title — it reads as filler.
+    A heading may carry a count; anything that explains goes in a data-tip, shown on hover."""
+    allowed = {"of", "device", "devices", "call", "calls", "matching", "job", "see", "jobs"}
+    for path in sorted((WEB / "templates").glob("*cota*.html")):
+        text = path.read_text(encoding="utf-8")
+        for h2 in re.findall(r"<h2[^>]*>(.*?)</h2>", text, re.S):
+            for hint in re.findall(r'<span class="hint">(.*?)</span>', h2, re.S):
+                prose = re.sub(r"\{\{.*?\}\}|\{%.*?%\}|<[^>]+>", " ", hint, flags=re.S)
+                words = {w.lower() for w in re.findall(r"[A-Za-z]+", prose)}
+                assert words <= allowed, f"{path.name}: heading hint reads as help text: {sorted(words - allowed)}"

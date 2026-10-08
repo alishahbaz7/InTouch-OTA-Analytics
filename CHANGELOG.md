@@ -7,7 +7,8 @@ carries one line per release; this file explains the reasoning.
 
 ## 2.0.2 — in development
 
-Built on 2.0.1 from the user's review of the Commands page and the job page (08 Oct 2026).
+Built on 2.0.1 from the user's review of the Commands page and the job page, and from the
+day's field-test jobs #8–#14 — up to 69 devices (08 Oct 2026).
 
 ### Commands: laid out for a growing library
 
@@ -21,6 +22,11 @@ Built on 2.0.1 from the user's review of the Commands page and the job page (08 
 - **Grouped by what a command does** — GET, SET, CLR — then by name. Each parameter says how many
   saved commands use it, so a rename says what it will affect. Each saved command has a **New
   job** action that opens a job with it on the first line.
+- **The two tables sit side by side** on a wide window, parameter names beside saved commands,
+  and stack on a narrower one. To fit, each saved command shows its **hex under its name** in
+  one cell — the user's ask, and easier to read than a separate column — with the parameter
+  reading, note and tags beneath; each parameter shows how many saved commands use it under
+  its name.
 - **Saving a command already saved under another name says so.** Two names can be on purpose, so
   it is not refused. Where one command has two names, the first saved names it everywhere — it
   used to be whichever row the database returned last.
@@ -63,6 +69,93 @@ changed stylesheet is fetched on the next page load.
 A test now also checks that every rule in the stylesheet is whole. Removing the retired chart
 styles line by line left half of a two-line rule behind, which the browser reads as the start of
 a selector — silently dropping the rule after it.
+
+### No help text on the page
+
+At the user's request — help text beside every title gave the pages a generated look. Across
+the COTA pages, headings now carry their title and at most a count, and tiles carry numbers.
+The explanations they used to print ("the four hex digits after D7 — named once…", "can be
+addressed by the cloud", "Nothing is sent until you press Start") are tooltips on the title or
+button they belong to, and appear only after the pointer has rested there for **5 seconds**.
+Nothing is lost for the person who wants it; nobody else sees it. Empty states and the steps
+needed to set up another cloud stay as they were. A test keeps COTA headings to a count.
+
+### Delete, Remove and Cancel: red, and asked first
+
+Every destructive action — deleting a group, a parameter name or a saved command, cancelling a
+job or a sequence — is red, and opens a confirmation in the app's own style first: what will
+go, what happens to anything that depended on it, with *Cancel* focused and the action in red.
+Names in the message are written as text, so a group named like a script stays a name.
+
+### The job page's top stays put, and leads with percentages
+
+- **The title, actions and progress stay at the top** while the command summary and devices
+  scroll under them, and condense to a strip once stuck — one short title row, a thin bar, and
+  the tiles in a single row (321 px → 178 px).
+- **Each tile leads with its share, the count beside it, smaller** — "23% 78". The answered
+  tile's "N on the first attempt" is gone (the summary table's *First try* column has it), and
+  the Jobs dashboard's answered and failed tiles read the same way.
+- **The command chain and the settings line are off the header.** The commands are the Command
+  summary's rows; the settings (devices, at a time, batch, rate, wait, limit, end time) are in
+  the job title's tooltip.
+
+### 200 devices a call, and 200 devices in progress at a time
+
+The user's design. **No call to the cloud carries more than 200 devices** — sends and checks
+alike; a larger batch typed in is held to 200, and 200 is now the default (it was 50). **A job
+keeps a set number of devices in progress — 200 by default, a job setting**: the rest wait in
+line in job order, and each device that finishes its whole sequence, answered or not, makes room
+for the next, which is sent its first command in the same tick. The cloud sees a small, steady
+load instead of the whole fleet at once.
+
+It also bounds how fast a big job goes: on a fleet like job #12's (57% never answered), 200 at a
+time gets through about 2,000 devices an hour. So the plan shows the rounds ("200 at a time, the
+rest in line — 5 rounds") and warns before *Start* when a job will not fit its time limit.
+Devices still in line at the limit are *not started* — every command skipped, never failed. The
+job page shows "N devices in line", an *In line* filter, and *In line* as the device's next step.
+
+### Jobs check 200 devices a call
+
+The cloud's new `getGPRSCommandList` (given to the user 08-10-2026) answers for up to 200 devices
+in one call, with the same records as the one-device `getGPRSCommand`. Checked live that day:
+id for id the same, over three windows. A job now checks its waiting devices 200 at a time.
+
+The same afternoon, the app's own session got an empty list from it for everything, while the
+one-device call answered. Trusted, that would make every command look unsent and resend it. So
+the first bulk check of every run is held against the one-device call for one device in it: the
+same records, and the run uses it; different, and the run checks one device per call, as
+before, and says so on the Errors page. A reply with a record that cannot be placed by its device
+is not used at all.
+
+The plan's estimates count checks at 200 devices a call. A 30,000-device job of 5 commands now
+fits the default hour even if no device answers; at one device a call it would have taken ~8½ h.
+
+### A job no longer pauses itself on devices — and there is no canary
+
+Field-test jobs #8 and #9 (7 devices) paused at "14%" with three devices asleep while the other
+four answered everything: the automatic stop counted failed *commands*, and a sleeping device
+fails every command it is sent. It was changed to count devices that answered and then failed —
+and job #12 (69 devices) still paused three times, on devices switching off or losing coverage
+mid-job. That is field behaviour, not a command doing harm. At the user's call, **a job now runs
+to the end or to its time limit, and a person pauses it.**
+
+- **No automatic pause on device failures, and no canary.** With no judgement after it, the
+  canary was only a wait — 1 device running the whole sequence while 68 waited, which read as
+  "sending one by one". Every device goes in the first send. A session that expired and three
+  failed calls in a row still pause: those are the cloud, not the devices. The mechanism is kept,
+  switched off and still tested (`cota_campaign.AUTOMATIC_STOP`), so it can come back as a job
+  setting.
+- **A device that has answered nothing is *Not reachable*** — a grey mark beside its state and a
+  filter of its own on the job page.
+- **An answer seen after a resume has no time to answer** when its command was sent before the
+  pause. A paused job does not check, so the time measured was the pause itself: job #9 showed
+  "34 min" and "18 min" for devices that may have answered in seconds.
+- **A job's scheduler can no longer stop without a trace.** Job #12's stopped twice with nothing
+  on the Errors page or in `errors.log` — the cause went only to the terminal — and the page then
+  said "The app was restarted", which it had not been. Whatever stops a scheduler is now
+  recorded, and the page says *the job stopped unexpectedly* unless the app really restarted.
+- While an older job's canary runs, the devices waiting for it say *After the canary* rather than
+  "Sends · due now".
 
 ### Fixed
 

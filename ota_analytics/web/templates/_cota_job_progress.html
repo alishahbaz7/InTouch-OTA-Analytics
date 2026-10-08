@@ -1,0 +1,49 @@
+{# A job's progress: why it is paused, the share finished, the outcome bar and the tiles. It sits
+   in the job page's sticky top with the title and actions, and condenses when the page scrolls.
+   Rendered with the page and again by /cota/jobs/<id>/status while the job runs. #}
+{% from "_cota_charts.html" import outcome_bar %}
+{%- set seg = {} -%}
+{%- for s in charts.outcomes %}{% set _ = seg.update({s.key: s.value}) %}{% endfor -%}
+{%- macro pct(value, total) -%}{{ '%.0f' % (value / total * 100) if total else 0 }}%{%- endmacro -%}
+{#- The share leads and the count follows, smaller (the user, 08-10-2026). -#}
+{%- macro value(n) -%}
+<div class="tile-value">{{ pct(n, job.total) }}<span class="tile-count">{{ n | comma }}</span></div>
+{%- endmacro -%}
+{% if job.state == 'paused' and job.pause_reason %}
+<div class="notice notice-warn">{{ job.pause_reason }}</div>
+{% endif %}
+
+<section class="card job-progress-card">
+  <div class="job-progress-head">
+    <span class="job-pct">{{ job.percent }}%</span>
+    <span class="hint">{{ job.finished | comma }} of {{ job.total | comma }} device commands finished</span>
+    <span class="hint job-calls">{{ job.send_calls | comma }} send calls · {{ job.poll_calls | comma }} checks</span>
+  </div>
+  {{ outcome_bar(charts.outcomes, job.total, big=true) }}
+
+  <div class="tiles job-tiles">
+    <div class="tile tone-green">
+      <div class="tile-label">Answered</div>
+      {{ value(seg.get('done', 0)) }}
+    </div>
+    <div class="tile tone-warn" data-tip="A command is out; its answer is not in yet.">
+      <div class="tile-label">Waiting for devices</div>
+      {{ value(seg.get('waiting', 0)) }}
+    </div>
+    <div class="tile {{ 'tone-red' if seg.get('failed') else 'tone-grey' }}" data-tip="No answer after 3 attempts.">
+      <div class="tile-label">Failed</div>
+      {{ value(seg.get('failed', 0)) }}
+    </div>
+    <div class="tile tone-grey" data-tip="Stopped at the job's {{ job.time_limit | int }}-minute time limit.">
+      <div class="tile-label">Expired</div>
+      {{ value(seg.get('expired', 0)) }}
+    </div>
+    <div class="tile muted-tile">
+      <div class="tile-label">Not sent yet</div>
+      {{ value(seg.get('not_sent', 0)) }}
+      {% if job.device_states.get('queued') %}<div class="tile-sub">{{ job.device_states.queued | comma }} device{{ '' if job.device_states.queued == 1 else 's' }} in line</div>
+      {%- elif job.device_states.get('not_started') %}<div class="tile-sub">{{ job.device_states.not_started | comma }} device{{ '' if job.device_states.not_started == 1 else 's' }} not started</div>
+      {%- elif job.canary_size and job.active_wave == 0 %}<div class="tile-sub">after the canary of {{ job.canary_size }}</div>{% endif %}
+    </div>
+  </div>
+</section>

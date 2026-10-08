@@ -601,7 +601,8 @@ def _jobs_context(conn, request: Request, **extra) -> dict:
 
 
 JOB_FORM_FIELDS = ("name", "group_id", "devices", "commands", "batch_size", "rate_per_sec",
-                   "time_limit_minutes", "answer_wait_seconds", "device_type", "cmd_type")
+                   "time_limit_minutes", "answer_wait_seconds", "in_progress", "device_type",
+                   "cmd_type")
 
 
 def _new_job_context(conn, request: Request, **extra) -> dict:
@@ -609,6 +610,8 @@ def _new_job_context(conn, request: Request, **extra) -> dict:
     return _cota_context(conn, request, "jobs", groups=cota_campaign.groups(conn),
                          live=cota_campaign.active(conn), library=cota_library.commands(conn),
                          defaults={"batch": cota_campaign.DEFAULT_BATCH,
+                                   "batch_max": cota_campaign.MAX_PER_CALL,
+                                   "in_progress": cota_campaign.DEFAULT_IN_PROGRESS,
                                    "rate": cota_campaign.DEFAULT_RATE,
                                    "time_limit": cota_campaign.DEFAULT_TIME_LIMIT_MINUTES,
                                    "answer_wait": cota_campaign.DEFAULT_ANSWER_WAIT_SECONDS,
@@ -665,7 +668,10 @@ async def cota_jobs_preview(request: Request):
         the_plan = cota_campaign.plan(
             conn, ids, draft["commands"], batch_size=batch, rate_per_sec=rate,
             answer_wait_seconds=_number(draft["answer_wait_seconds"], float, None),
-            time_limit_minutes=_number(draft["time_limit_minutes"], float, None))
+            time_limit_minutes=_number(draft["time_limit_minutes"], float, None),
+            in_progress=_number(draft["in_progress"], int, None))
+        # What was planned is what starts: a batch over 200 comes back as 200, in the form too.
+        draft["batch_size"] = str(the_plan["batch"])
         the_plan["problems"] = problems
         the_plan["device_ids"] = ",".join(map(str, ids))
         return _new_job_context(conn, request, draft=draft, preview=the_plan)
@@ -685,15 +691,15 @@ def _number(text: str, cast, default):
 def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Form(""),
                     commands: str = Form(""), batch_size: str = Form(""),
                     rate_per_sec: str = Form(""), time_limit_minutes: str = Form(""),
-                    answer_wait_seconds: str = Form(""), device_type: str = Form(""),
-                    cmd_type: str = Form("")):
+                    answer_wait_seconds: str = Form(""), in_progress: str = Form(""),
+                    device_type: str = Form(""), cmd_type: str = Form("")):
     conn = get_conn()
     ids, _, _ = cota_campaign.parse_device_ids(device_ids)
     # Refused, the page goes back to the form as it was — not to a list that has lost it.
     draft = {"name": name, "group_id": "", "devices": ", ".join(map(str, ids)),
              "commands": commands, "batch_size": batch_size, "rate_per_sec": rate_per_sec,
              "time_limit_minutes": time_limit_minutes, "answer_wait_seconds": answer_wait_seconds,
-             "device_type": device_type, "cmd_type": cmd_type}
+             "in_progress": in_progress, "device_type": device_type, "cmd_type": cmd_type}
 
     def refused(message: str):
         return templates.TemplateResponse(request, "cota_job_new.html", _new_job_context(
@@ -709,14 +715,16 @@ def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Fo
             batch_size=_number(batch_size, int, cota_campaign.DEFAULT_BATCH),
             rate_per_sec=_number(rate_per_sec, float, cota_campaign.DEFAULT_RATE),
             time_limit_minutes=_number(time_limit_minutes, float, None),
-            answer_wait_seconds=_number(answer_wait_seconds, float, None))
+            answer_wait_seconds=_number(answer_wait_seconds, float, None),
+            in_progress=_number(in_progress, int, None))
     except cota_campaign.CampaignError as exc:
         return refused(str(exc))
     cota_campaign.start(cid)
     return RedirectResponse(f"/cota/jobs/{cid}", status_code=303)
 
 
-JOB_DEVICE_FILTERS = ("", "waiting", "ready", "done", "failed", "expired", "cancelled")
+JOB_DEVICE_FILTERS = ("", "waiting", "ready", "queued", "done", "failed", "unreachable", "expired",
+                      "not_started", "cancelled")
 
 
 def _open_devices(text: str) -> list[int]:
@@ -762,6 +770,7 @@ def cota_job_status(request: Request, job_id: int, state: str = "", q: str = "",
         return JSONResponse({"ok": False})
     job = ctx["job"]
     return JSONResponse({"ok": True, "state": job["state"], "percent": job["percent"],
+                         "progress": templates.get_template("_cota_job_progress.html").render(ctx),
                          "html": templates.get_template("_cota_job_live.html").render(ctx)})
 
 

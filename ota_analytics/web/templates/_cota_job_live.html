@@ -1,6 +1,6 @@
-{# A job's live state: progress as tiles and pictures, the command summary, and its devices —
-   each of which can unfold to its own conversation. Rendered with the page and again by
-   /cota/jobs/<id>/status while the job runs. #}
+{# A job's live state below its sticky top (_cota_job_progress.html): the command summary, and
+   its devices — each of which can unfold to its own conversation. Rendered with the page and
+   again by /cota/jobs/<id>/status while the job runs. #}
 {% from "_icons.html" import icon %}
 {% from "_cota_charts.html" import took, outcome_bar %}
 {%- macro ticks(stage, stages) -%}
@@ -14,61 +14,16 @@
 {%- set stage_words = {'failed': 'not accepted', 'accepted': 'accepted, not yet listed',
                        'api': 'held by the cloud', 'delivered': 'sent by the cloud, no answer',
                        'device': 'answered'} -%}
-{%- set r = job.results -%}
-{%- set seg = {} -%}
-{%- for s in charts.outcomes %}{% set _ = seg.update({s.key: s.value}) %}{% endfor -%}
 {#- "in 1:42" — the page then counts it down each second from data-at. -#}
 {%- macro countdown(left) -%}
   {%- if left <= 0 -%}due now
   {%- elif left < 3600 -%}in {{ left // 60 }}:{{ '%02d' % (left % 60) }}
   {%- else -%}in {{ left // 3600 }}:{{ '%02d' % (left % 3600 // 60) }}:{{ '%02d' % (left % 60) }}{%- endif -%}
 {%- endmacro -%}
-{%- macro pct(value, total) -%}{{ '%.0f' % (value / total * 100) if total else 0 }}%{%- endmacro -%}
 <span hidden id="job-clock" data-now="{{ now_epoch }}"></span>
-{% if job.state == 'paused' and job.pause_reason %}
-<div class="notice notice-warn">{{ job.pause_reason }}</div>
-{% endif %}
 
 <section class="card">
-  <div class="job-progress-head">
-    <span class="job-pct">{{ job.percent }}%</span>
-    <span class="hint">{{ job.finished | comma }} of {{ job.total | comma }} device commands finished</span>
-    <span class="hint job-calls">{{ job.send_calls | comma }} send calls · {{ job.poll_calls | comma }} checks</span>
-  </div>
-  {{ outcome_bar(charts.outcomes, job.total, big=true) }}
-
-  <div class="tiles job-tiles">
-    <div class="tile tone-green">
-      <div class="tile-label">Answered</div>
-      <div class="tile-value">{{ seg.get('done', 0) | comma }}</div>
-      <div class="tile-sub">{{ pct(seg.get('done', 0), job.total) }} · {{ charts.first_try | comma }} on the first attempt</div>
-    </div>
-    <div class="tile tone-warn">
-      <div class="tile-label">Waiting for devices</div>
-      <div class="tile-value">{{ seg.get('waiting', 0) | comma }}</div>
-      <div class="tile-sub">a command in flight</div>
-    </div>
-    <div class="tile {{ 'tone-red' if seg.get('failed') else 'tone-grey' }}">
-      <div class="tile-label">Failed</div>
-      <div class="tile-value">{{ seg.get('failed', 0) | comma }}</div>
-      <div class="tile-sub">no answer after 3 attempts</div>
-    </div>
-    <div class="tile tone-grey">
-      <div class="tile-label">Expired</div>
-      <div class="tile-value">{{ seg.get('expired', 0) | comma }}</div>
-      <div class="tile-sub">stopped at the {{ job.time_limit | int }}-minute limit</div>
-    </div>
-    <div class="tile muted-tile">
-      <div class="tile-label">Not sent yet</div>
-      <div class="tile-value">{{ seg.get('not_sent', 0) | comma }}</div>
-      <div class="tile-sub">{% if job.canary_size and job.active_wave == 0 %}after the canary of {{ job.canary_size }}{% else %}queued{% endif %}</div>
-    </div>
-  </div>
-
-</section>
-
-<section class="card">
-  <h2>Command summary <span class="hint">each command, across every device</span></h2>
+  <h2><span data-tip="Each command, across every device in the job.">Command summary</span></h2>
   <div class="table-wrap">
   <table class="job-grid">
     <thead><tr><th>#</th><th>Command</th><th class="outcome-col">Outcome</th><th class="n">Answered</th>
@@ -101,8 +56,8 @@
   <div class="page-toolbar">
     <h2 class="toolbar-title">Devices <span class="hint">{{ devices_total | comma }}</span></h2>
     <span class="job-filters">
-      {% for key, label in [('', 'All'), ('waiting', 'Waiting'), ('ready', 'Up next'), ('done', 'Finished'),
-                            ('failed', 'With a failure'), ('expired', 'Expired')] %}
+      {% for key, label in [('', 'All'), ('waiting', 'Waiting'), ('ready', 'Up next'), ('queued', 'In line'), ('done', 'Finished'),
+                            ('failed', 'With a failure'), ('unreachable', 'Not reachable'), ('expired', 'Expired')] %}
       <a href="/cota/jobs/{{ job.id }}?state={{ key }}&q={{ q | urlencode }}" class="{{ 'on' if state == key }}">{{ label }}</a>
       {% endfor %}
     </span>
@@ -135,15 +90,18 @@
         <td class="n dim">{{ dv.serial | comma }}</td>
         <td class="n mono">{{ dv.device_id }}</td>
         <td class="mono dim">{{ dv.imei or '—' }}</td>
-        <td><span class="pill pill-dev-{{ dv.state }}">{{ {'ready': 'up next', 'waiting': 'waiting', 'done': 'finished', 'expired': 'expired', 'cancelled': 'cancelled'}.get(dv.state, dv.state) }}</span></td>
+        <td><span class="pill pill-dev-{{ dv.state }}">{{ {'queued': 'in line', 'ready': 'up next', 'waiting': 'waiting', 'done': 'finished', 'expired': 'expired', 'not_started': 'not started', 'cancelled': 'cancelled'}.get(dv.state, dv.state) }}</span>
+          {%- if dv.unreachable %}<span class="pill pill-dev-unreachable" data-tip="Has answered nothing in this job — asleep or out of coverage. Not counted by the automatic stop.">not reachable</span>{% endif %}</td>
         <td>{{ job.names[dv.step] }}</td>
         <td class="n">{{ dv.step + 1 }}/{{ total_steps }}</td>
         <td class="n">{{ dv.attempt if dv.state in ('ready', 'waiting') and dv.attempt else '—' }}</td>
         <td class="next-cell">
           {%- if dv.next %}
           <span class="next-what" title="{{ dv.next.note }}">{{ dv.next.what }}</span>
+          {%- if dv.next.at is not none %}
           <span class="countdown" data-at="{{ dv.next.at }}">{{ countdown(dv.next.left) }}</span>
           <span class="dim small">{{ dv.next.clock }}</span>
+          {%- endif %}
           {%- elif job.state == 'paused' and dv.state in ('ready', 'waiting') %}<span class="dim">paused</span>
           {%- else %}<span class="dim">—</span>{% endif -%}
         </td>
@@ -169,8 +127,9 @@
                 <span class="mono dim small">{{ s.value[:24] }}{% if s.value | length > 24 %}…{% endif %}</span>
                 {#- A result stays 'queued' until it is judged: sent is in flight, unsent is not yet sent. -#}
                 <span class="pill pill-result-{{ s.state }}">{{ ('In flight' if s.attempts else 'Not sent yet') if s.state == 'queued' else words.get(s.state, s.state) }}</span>
-                {% if s.answered_attempt %}<span class="hint">attempt {{ s.answered_attempt }} carried the answer ·
-                  {{ took(s.answer_seconds) }} after attempt 1</span>{% endif %}
+                {% if s.answered_attempt %}<span class="hint">attempt {{ s.answered_attempt }} carried the answer
+                  {%- if s.answer_seconds is not none %} · {{ took(s.answer_seconds) }} after attempt 1
+                  {%- else %} · <span data-tip="The job was paused while this command waited, so when the answer came is not known.">seen after a resume</span>{% endif %}</span>{% endif %}
               </div>
               {% if s.attempts %}
               <ol class="conv-attempts">

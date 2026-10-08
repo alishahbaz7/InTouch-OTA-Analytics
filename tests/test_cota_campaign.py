@@ -56,6 +56,8 @@ class Fleet:
         self.records = defaultdict(list)
         self.sent = defaultdict(int)               # (device, value) → sends
         self.send_calls, self.poll_calls = [], 0
+        self.list_calls = []                       # devices asked for in each bulk check
+        self.list_empty = False
         self.fail_sends = self.fail_polls = self.reject_sends = 0
         self.n = 0
 
@@ -88,6 +90,21 @@ class Fleet:
         if self.fail_polls:
             self.fail_polls -= 1
             return 503, "busy"
+        return 200, json.dumps({"data": self._records(device_id)})
+
+    def responses_many(self, device_ids, start, end):
+        """getGPRSCommandList: the same records for up to 200 devices. `list_empty` is what the
+        app's own session got from it on 08-10-2026 — an empty list, whatever was asked."""
+        assert len(device_ids) <= cota.LIST_MAX_DEVICES
+        self.list_calls.append(len(device_ids))
+        if self.fail_polls:
+            self.fail_polls -= 1
+            return 503, "busy"
+        if self.list_empty:
+            return 200, '{"data":[]}'
+        return 200, json.dumps({"data": [r for d in device_ids for r in self._records(d)]})
+
+    def _records(self, device_id):
         out = []
         for r in self.records[device_id]:
             rec = {k: v for k, v in r.items() if not k.startswith("_")}
@@ -104,7 +121,7 @@ class Fleet:
                 elif r["_how"] == "note":
                     rec.update(status=1, response="Command sent at 2026-10-06 09:00:05")
             out.append(rec)
-        return 200, json.dumps({"data": out})
+        return out
 
     def close(self):
         pass
@@ -120,6 +137,7 @@ def fleet(monkeypatch):
     started = []
     monkeypatch.setattr(cota_campaign, "start", lambda cid: started.append(cid))
     monkeypatch.setattr(cota_campaign, "_threads", {})
+    monkeypatch.setattr(cota_campaign, "_started_here", set())
     monkeypatch.setattr(cota_run, "start", lambda rid: None)
     conn = db.connect()
 
@@ -133,6 +151,13 @@ def fleet(monkeypatch):
 
     run.clock, run.conn, run.started = clock, conn, started
     return run
+
+
+@pytest.fixture
+def automatic_stop(monkeypatch):
+    """The automatic stop and its canary: switched off since 08-10-2026 (the user's call), kept
+    working so they can come back as a job setting."""
+    monkeypatch.setattr(cota_campaign, "AUTOMATIC_STOP", True)
 
 
 def _results(conn, cid):
@@ -206,7 +231,7 @@ def test_one_at_a_time_per_device(fleet):
 
 # ── batching, waves and the automatic stop ────────────────────────────────
 
-def test_a_large_group_is_sent_in_batches_after_its_canary(fleet):
+def test_a_large_group_is_sent_in_batches_after_its_canary(fleet, automatic_stop):
     devices = list(range(1000, 1120))                          # 120 devices
     job, cloud = fleet(devices, batch_size=50, rate_per_sec=50)
     assert job["state"] == "done" and job["results"] == {"done": 600}
@@ -220,15 +245,23 @@ def test_a_large_group_is_sent_in_batches_after_its_canary(fleet):
     assert rest_first > canary_done                            # the rest waited for the canary
 
 
-def test_a_failing_canary_stops_the_job_before_the_rest(fleet):
+def test_a_failing_canary_stops_the_job_before_the_rest(fleet, automatic_stop):
     devices = list(range(2000, 2030))                          # 30 devices: canary of 1
     fails = lambda d, v, n: "fail:20"
     job, cloud = fleet(devices, text=GET_FTP, how=fails, rate_per_sec=50)
-    assert job["state"] == "paused" and "canary failed" in job["pause_reason"]
+    assert job["state"] == "paused"
+    assert job["pause_reason"].startswith("1 of 1 canary devices that answered then failed a command")
     assert {i for _, _, ids in cloud.send_calls for i in ids} == {2000}   # nobody else touched
 
 
-def test_resuming_after_the_canary_sends_to_the_rest_and_the_stop_still_guards(fleet):
+def test_a_canary_where_nobody_answered_anything_waits_for_a_person(fleet, automatic_stop):
+    devices = list(range(2000, 2030))
+    job, cloud = fleet(devices, text=GET_FTP, how=lambda d, v, n: "pending", rate_per_sec=50)
+    assert job["state"] == "paused" and "No device in the canary answered anything" in job["pause_reason"]
+    assert {i for _, _, ids in cloud.send_calls for i in ids} == {2000}
+
+
+def test_resuming_after_the_canary_sends_to_the_rest_and_the_stop_still_guards(fleet, automatic_stop):
     devices = list(range(2000, 2030))
     fails = lambda d, v, n: "fail:20"
     job, cloud = fleet(devices, text=GET_FTP, how=fails, rate_per_sec=50)
@@ -237,6 +270,225 @@ def test_resuming_after_the_canary_sends_to_the_rest_and_the_stop_still_guards(f
     job, _ = fleet([], cloud=cloud, campaign_id=job["id"])
     assert job["state"] == "paused" and "above the 10% limit" in job["pause_reason"]
     assert job["results"].get("failed", 0) >= cota_campaign.FAIL_SAMPLE
+
+
+# ── no automatic pause on devices, and no canary (the user's call, 08-10-2026) ──
+
+def test_devices_going_quiet_never_pause_a_job_and_nobody_waits_for_a_canary(fleet):
+    """Job #12 paused three times on devices dropping out mid-job — field behaviour, not harm."""
+    devices = list(range(4000, 4030))
+    quiet = set(devices[1:10])                                 # 9 of 30 answer once, then go quiet
+    how = lambda d, v, n: "pending" if d in quiet and v != GET_FTP else "answer:20"
+    job, cloud = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}\n{CLR_SOS}", how=how, rate_per_sec=50)
+    assert job["state"] == "done" and job["canary_size"] == 0
+    assert sorted(cloud.send_calls[0][2]) == devices           # everyone in the first send
+
+
+def test_a_scheduler_that_dies_is_recorded_and_not_called_a_restart(fleet, monkeypatch):
+    """Job #12's thread died twice with nothing recorded, and the page said the app had
+    restarted when it had not."""
+    from ota_analytics import errors
+    cid = cota_campaign.create(fleet.conn, name="t", device_ids=[786], commands_text=GET_FTP)
+
+    def dies(self):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(cota_campaign.Scheduler, "run", dies)
+    with pytest.raises(RuntimeError):
+        cota_campaign._run(cid)
+    assert any(e["source"] == "cota-job" and "database is locked" in e["message"]
+               for e in errors.recent(fleet.conn))
+    cota_campaign._started_here.add(cid)                       # this process ran it
+    assert cota_campaign.recover(fleet.conn) == 1
+    assert cota_campaign.summary(fleet.conn, cid)["pause_reason"].startswith(
+        "The job stopped unexpectedly")
+
+
+# ── the automatic stop, when switched on: devices, never a sleeping one ──
+
+def test_sleeping_devices_never_pause_a_field_test(fleet):
+    """Jobs #8 and #9: 7 devices, three of them asleep, paused twice at "14%" while every command
+    was being answered by the rest. Asleep is not reachable, not a failing command."""
+    asleep = {631, 14657, 14906}
+    how = lambda d, v, n: "pending" if d in asleep else "answer:20"
+    devices = [15154, 13298, 14657, 631, 4287, 14906, 786]
+    job, _ = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}\n{CLR_SOS}", how=how)
+    assert job["state"] == "done" and job["results"] == {"done": 12, "failed": 9}
+    standing = cota_campaign.device_standing(fleet.conn, job["id"])
+    assert standing["unreachable"] == asleep and not standing["failing"]
+    rows, total = cota_campaign.device_rows(fleet.conn, job["id"], state="unreachable")
+    assert total == 3 and {r["device_id"] for r in rows} == asleep and all(r["unreachable"] for r in rows)
+    rows, _ = cota_campaign.device_rows(fleet.conn, job["id"])
+    assert {r["device_id"] for r in rows if r["unreachable"]} == asleep
+
+
+def test_sleeping_devices_never_pause_a_large_job_either(fleet, automatic_stop):
+    devices = list(range(3000, 3030))                          # 30 devices, canary of 1
+    asleep = set(devices[1:11])                                # a third of the fleet
+    how = lambda d, v, n: "pending" if d in asleep else "answer:20"
+    job, _ = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}", how=how, rate_per_sec=50)
+    assert job["state"] == "done"
+    assert cota_campaign.device_standing(fleet.conn, job["id"])["unreachable"] == asleep
+
+
+def test_devices_that_answered_then_go_quiet_pause_a_large_job(fleet, automatic_stop):
+    """What a harmful command leaves behind: devices answering until it, silent after it."""
+    devices = list(range(4000, 4030))
+    quiet = set(devices[1:6])                                  # 5 of 30 — 17%
+    how = lambda d, v, n: "pending" if d in quiet and v != GET_FTP else "answer:20"
+    job, _ = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}\n{CLR_SOS}", how=how, rate_per_sec=50)
+    assert job["state"] == "paused"
+    assert job["pause_reason"].startswith("5 of 30 devices that answered then failed a command (17%)")
+
+
+def test_a_resume_counts_only_devices_that_start_failing_after_it(fleet, automatic_stop):
+    devices = list(range(4000, 4030))
+    first, later = set(devices[1:6]), set(devices[6:10])       # 5 quiet, then 4 more
+    def how(d, v, n):
+        if d in first and v != GET_FTP or d in later and v == CLR_SOS:
+            return "pending"
+        return "answer:20"
+    job, cloud = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}\n{CLR_SOS}", how=how, rate_per_sec=50)
+    assert job["pause_reason"].startswith("5 of 30")
+    cota_campaign.request(fleet.conn, job["id"], "resume")
+    job, _ = fleet([], cloud=cloud, campaign_id=job["id"])
+    # The first five keep failing and are not counted again; the four new ones are 13%.
+    assert job["state"] == "paused" and job["pause_reason"].startswith("4 of 30")
+    cota_campaign.request(fleet.conn, job["id"], "resume")
+    job, _ = fleet([], cloud=cloud, campaign_id=job["id"])
+    assert job["state"] == "done"
+
+
+def test_a_device_answering_with_a_failure_counts_without_answering_first(fleet, automatic_stop):
+    devices = list(range(5000, 5030))
+    refuse = set(devices[1:5])                                 # 4 of 30 refuse the first command
+    how = lambda d, v, n: "fail:20" if d in refuse else "answer:20"
+    job, _ = fleet(devices, text=GET_FTP, how=how, rate_per_sec=50)
+    assert cota_campaign.device_standing(fleet.conn, job["id"])["failing"] == refuse
+    assert job["state"] == "paused" and job["pause_reason"].startswith("4 of 30")
+
+
+def test_an_answer_first_seen_after_a_resume_has_no_time(fleet):
+    """A paused job does not check. Job #9's "34 min" to answer was its 33-minute pause."""
+    cid = cota_campaign.create(fleet.conn, name="t", device_ids=[786], commands_text=GET_FTP)
+    fleet.clock.hooks.append((15, lambda: cota_campaign.request(fleet.conn, cid, "pause")))
+    cloud = Fleet(fleet.clock, lambda d, v, n: "answer:100")
+    job, _ = fleet([], cloud=cloud, campaign_id=cid)
+    assert job["state"] == "paused"
+    fleet.clock.t += 600                                       # the answer arrives meanwhile
+    cota_campaign.request(fleet.conn, cid, "resume")
+    job, _ = fleet([], cloud=cloud, campaign_id=cid)
+    r = _results(fleet.conn, cid)[(786, 0)]
+    assert job["state"] == "done" and r["state"] == "done" and r["answered_attempt"] == 1
+    assert r["answer_seconds"] is None
+    assert cota_campaign.grid(fleet.conn, cid)[0]["median_answer"] is None
+
+
+# ── checks: up to 200 devices a call (getGPRSCommandList, 08-10-2026) ──────
+
+def test_checks_read_up_to_200_devices_a_call(fleet):
+    devices = list(range(6000, 6450))                          # 450 devices
+    job, cloud = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}", batch_size=200, rate_per_sec=50,
+                       in_progress=450)
+    assert job["state"] == "done" and job["results"] == {"done": 900}
+    assert cloud.list_calls and max(cloud.list_calls) == cota.LIST_MAX_DEVICES
+    # One-device checks: the first bulk answer's comparison, and a lone due device now and then.
+    assert cloud.poll_calls <= 5
+    assert len(cloud.list_calls) + cloud.poll_calls < 40       # was ~1,800 at one device a call
+
+
+def test_a_bulk_check_that_disagrees_falls_back_to_one_device_per_call(fleet):
+    """The app's own session got empty lists from getGPRSCommandList while the one-device call
+    answered (08-10-2026). Trusted, that would have made every command look unsent."""
+    from ota_analytics import errors
+    cloud = Fleet(fleet.clock)
+    cloud.list_empty = True
+    devices = list(range(7000, 7030))
+    job, _ = fleet(devices, text=GET_FTP, cloud=cloud, rate_per_sec=50)
+    assert job["state"] == "done" and job["results"] == {"done": 30}
+    assert len(cloud.list_calls) == 1                          # asked once, not trusted, not again
+    assert cloud.poll_calls >= 30                              # then every device on its own
+    assert any(e["source"] == "cota-job" and "one device per call" in e["message"]
+               for e in errors.recent(fleet.conn))
+
+
+def test_a_cloud_client_without_the_bulk_call_checks_one_device_per_call(fleet):
+    class OneAtATime(Fleet):
+        responses_many = None
+    cloud = OneAtATime(fleet.clock)
+    job, _ = fleet(list(range(7100, 7125)), text=GET_FTP, cloud=cloud, rate_per_sec=50)
+    assert job["state"] == "done" and job["results"] == {"done": 25} and cloud.list_calls == []
+
+
+# ── devices in progress: 200 at a time by default, the rest in line (08-10-2026) ──
+
+def _spans(conn, cid):
+    """seq, first send and last finished command of each device, in epoch seconds."""
+    out = {}
+    for r in conn.execute("""
+        SELECT d.device_id, d.seq,
+               (SELECT MIN(t.sent_at) FROM cota_task t WHERE t.job_id = c.job_id
+                  AND t.device_id = d.device_id) AS first,
+               (SELECT MAX(x.finished_at) FROM cota_campaign_result x WHERE x.campaign_id = c.id
+                  AND x.device_id = d.device_id) AS last
+        FROM cota_campaign_device d JOIN cota_campaign c ON c.id = d.campaign_id
+        WHERE d.campaign_id = ?
+    """, (cid,)):
+        out[r["device_id"]] = (r["seq"], cota._parse(r["first"]).timestamp(),
+                               cota._parse(r["last"]).timestamp())
+    return out
+
+
+def test_no_more_than_the_devices_in_progress_and_a_finished_one_makes_room(fleet):
+    devices = list(range(8000, 8012))
+    asleep = lambda d, v, n: "pending" if d == 8001 else "answer:20"
+    job, cloud = fleet(devices, text=f"{GET_FTP}\n{GET_6C0A}", in_progress=3, rate_per_sec=50,
+                       how=asleep)
+    assert job["state"] == "done" and job["in_progress"] == 3
+    spans = _spans(fleet.conn, job["id"])
+    for _, start, _ in spans.values():
+        assert sum(1 for _, s, e in spans.values() if s <= start < e) <= 3
+    starts = [start for _, start, _ in sorted(spans.values())]
+    assert starts == sorted(starts)                            # in job order
+    # The sleeping device keeps its place; the others keep turning over around it.
+    _, s1, e1 = spans[8001]
+    assert sum(1 for d, (_, s, e) in spans.items() if d != 8001 and s1 < s and e < e1) >= 2
+
+
+def test_devices_still_in_line_at_the_time_limit_are_not_started_not_failed(fleet):
+    devices = list(range(8100, 8110))
+    job, _ = fleet(devices, text=GET_FTP, in_progress=1, time_limit_minutes=5,
+                   how=lambda d, v, n: "pending")              # each takes ~90 s
+    assert job["state"] == "done"
+    assert job["device_states"].get("not_started", 0) >= 5 and job["device_states"].get("done", 0) >= 2
+    never = [r for r in _results(fleet.conn, job["id"]).values() if r["outcome"] == "not_started"]
+    assert never and all(r["state"] == "skipped" for r in never)
+
+
+def test_a_device_in_line_is_busy_for_other_jobs_and_says_it_is_in_line(fleet):
+    cid = cota_campaign.create(fleet.conn, name="a", device_ids=[1, 2, 3], commands_text=GET_FTP,
+                               in_progress=1)
+    assert cota_campaign.summary(fleet.conn, cid)["device_states"] == {"ready": 1, "queued": 2}
+    assert cota_campaign.busy_devices(fleet.conn, [3]) == [3]
+    rows, total = cota_campaign.device_rows(fleet.conn, cid, state="queued")
+    assert total == 2 and rows[0]["next"]["what"] == "In line" and rows[0]["next"]["at"] is None
+
+
+def test_a_send_never_carries_more_than_200_devices(fleet):
+    p = cota_campaign.plan(fleet.conn, list(range(1000)), GET_FTP, batch_size=5000, in_progress=1000)
+    assert p["batch"] == cota_campaign.MAX_PER_CALL == 200 and p["send_calls"] == 5
+    p = cota_campaign.plan(fleet.conn, list(range(1000)), GET_FTP)
+    assert p["in_progress"] == 200 and p["rounds"] == 5        # the defaults
+
+
+def test_a_bulk_answer_is_split_by_device_or_not_used_at_all():
+    rec = lambda d: {"id": f"x{d}", "deviceId": d, "status": 1}
+    body = lambda *recs: json.dumps({"data": list(recs)})
+    assert cota.records_by_device(body(rec(786), rec(14906), rec(786)), [786, 14906, 555]) == {
+        786: [rec(786), rec(786)], 14906: [rec(14906)], 555: []}
+    assert cota.records_by_device(body(rec(786), rec(1)), [786]) is None          # not asked for
+    assert cota.records_by_device(body({"id": "y", "status": 1}), [786]) is None  # whose is it?
+    assert cota.records_by_device("<html>login</html>", [786]) is None
+    assert cota.records_by_device('{"data":[]}', [786, 14906]) == {786: [], 14906: []}
 
 
 # ── the failure cases, at fleet scale ─────────────────────────────────────
@@ -345,7 +597,8 @@ def test_cancel_stops_everything_left(fleet):
 def test_a_job_left_running_by_a_restart_comes_back_paused(fleet):
     cid = cota_campaign.create(fleet.conn, name="t", device_ids=[14906], commands_text=GET_FTP)
     assert cota_campaign.recover(fleet.conn) == 1
-    assert cota_campaign.summary(fleet.conn, cid)["state"] == "paused"
+    job = cota_campaign.summary(fleet.conn, cid)
+    assert job["state"] == "paused" and job["pause_reason"] == cota_campaign.RESTARTED
 
 
 # ── one thing at a time per device ────────────────────────────────────────
@@ -373,7 +626,7 @@ def test_bad_commands_stop_the_job_before_it_starts(fleet):
 
 def test_the_plan_preview_counts_calls_before_anything_is_sent(fleet):
     p = cota_campaign.plan(fleet.conn, list(range(30000)), FIVE, batch_size=50)
-    assert p["devices"] == 30000 and p["send_calls"] == 600 * 5 and p["canary"] == 20
+    assert p["devices"] == 30000 and p["send_calls"] == 600 * 5 and p["canary"] == 0   # no canary
     assert p["names"] == ["GET FTP_SETTINGS", "GET 6C0A", "CLR SOS", "SET 6C0A", "SET 6B38"]
     assert cota_campaign.plan(fleet.conn, [786], FIVE, batch_size=1000)["send_calls"] == 5
 
@@ -684,6 +937,15 @@ def test_nothing_is_later_than_the_jobs_time_limit():
     assert nxt["what"] == "Stops — time limit" and nxt["at"] == now + 20
 
 
+def test_the_rest_wait_for_the_canary_rather_than_saying_they_send_now():
+    """Job #12: 68 devices read "Sends · due now" for minutes while the canary went first."""
+    waiting = _dev(state="ready", attempt=0, due_at=900.0, wave=1)
+    nxt = cota_campaign.next_action(_job(active_wave=0), KINDS, waiting, None, now=1200.0)
+    assert nxt["what"] == "After the canary" and nxt["at"] is None
+    nxt = cota_campaign.next_action(_job(active_wave=1), KINDS, waiting, None, now=1200.0)
+    assert nxt["what"] == "Sends"                              # the canary is through: due now
+
+
 def test_nothing_is_next_in_a_paused_job_or_for_a_finished_device():
     assert cota_campaign.next_action(_job(state="paused"), KINDS, _dev(), SENT, now=1200.0) is None
     assert cota_campaign.next_action(_job(), KINDS, _dev(state="done"), SENT, now=1200.0) is None
@@ -737,13 +999,21 @@ def test_two_devices_four_commands_finish_well_inside_an_hour_even_if_nothing_an
     assert fleet.clock.t <= 4 * 90 + 20                              # ~90 s per command
 
 
-@pytest.mark.parametrize("devices, steps, rate, over", [(2, 4, 5.0, False), (30000, 5, 5.0, True)])
-def test_the_plan_states_the_worst_case_and_whether_it_fits_the_limit(fleet, devices, steps, rate, over):
+@pytest.mark.parametrize("devices, steps, in_progress, over, worst", [
+    (2, 4, None, False, 8),               # 4 × 3 × (30 s + a tick)
+    (300, 6, None, False, 24),            # 200 at a time: two rounds of 12 min
+    (1000, 6, None, False, 60),           # five rounds — exactly the hour
+    (2000, 6, None, True, 120),           # ten rounds: the plan says it will not fit
+    (2000, 6, 2000, False, 12),           # all at once instead
+    (30000, 5, 30000, False, 30),         # all at once, the calls decide: 200 devices a call
+    (30000, 12, 30000, True, 72),
+])
+def test_the_plan_states_the_worst_case_and_whether_it_fits_the_limit(fleet, devices, steps,
+                                                                      in_progress, over, worst):
     text = "\n".join([GET_FTP] * steps)
-    p = cota_campaign.plan(fleet.conn, list(range(1, devices + 1)), text, rate_per_sec=rate)
+    p = cota_campaign.plan(fleet.conn, list(range(1, devices + 1)), text, in_progress=in_progress)
     assert p["limit_minutes"] == 60 and p["over_limit"] is over and p["answer_wait"] == 30
-    if devices == 2:
-        assert p["worst_minutes"] == 8                               # 4 × 3 × (30 s + a tick)
+    assert p["worst_minutes"] == worst
 
 
 # ── scale ─────────────────────────────────────────────────────────────────
@@ -755,15 +1025,22 @@ def test_scale_a_fleet_job_in_calls_rows_and_time(fleet):
     """1,000 devices × 5 commands by default; OTA_SCALE_DEVICES=30000 for the full fleet."""
     devices = list(range(100000, 100000 + SCALE))
     began = time.perf_counter()
-    job, cloud = fleet(devices, batch_size=1000, rate_per_sec=200)
+    # Every device at once: this measures calls at full size. The 200-in-progress default is
+    # tested on its own below.
+    job, cloud = fleet(devices, batch_size=1000, rate_per_sec=200, in_progress=SCALE)
     elapsed = time.perf_counter() - began
     canary = cota_campaign.canary_size(SCALE)
-    ideal = 5 + 5 * math.ceil((SCALE - canary) / 1000)
+    per_call = cota_campaign.MAX_PER_CALL                       # a batch of 1,000 is held to 200
+    ideal = (5 if canary else 0) + 5 * math.ceil((SCALE - canary) / per_call)
+    assert max(len(ids) for _, _, ids in cloud.send_calls) <= per_call
     assert job["state"] == "done" and job["results"] == {"done": SCALE * 5}
     # Answers to a big batch are found over several ticks (checks are paced), so a command's next
     # step can go in a few calls rather than one — but never one call per device.
     assert ideal <= len(cloud.send_calls) <= 3 * ideal
     rows = fleet.conn.execute("SELECT COUNT(*) FROM cota_task").fetchone()[0]
     assert rows == SCALE * 5                                    # one task per device per command
-    print(f"\n  {SCALE} devices × 5: {len(cloud.send_calls)} sends, {cloud.poll_calls} checks, "
-          f"{rows} tasks, simulated {fleet.clock.t / 60:.0f} min, {elapsed:.1f}s real")
+    checks = cloud.poll_calls + len(cloud.list_calls)
+    assert checks < SCALE                                       # 200 devices a check, not one
+    print(f"\n  {SCALE} devices × 5: {len(cloud.send_calls)} sends, {checks} checks "
+          f"({len(cloud.list_calls)} bulk), {rows} tasks, simulated {fleet.clock.t / 60:.0f} min, "
+          f"{elapsed:.1f}s real")

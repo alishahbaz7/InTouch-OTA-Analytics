@@ -1778,9 +1778,10 @@ def test_a_group_name_never_reaches_a_script_string(client, cota_env):
     before the script runs. The name goes through a data attribute instead."""
     name = "x');alert(1);('"
     body = client.post("/cota/groups", data={"name": name, "devices": "786"}).text
-    onsubmit = re.findall(r'onsubmit="([^"]*)"', body)
-    assert onsubmit and not any("alert" in s for s in onsubmit)
+    # No inline script at all: the confirmation reads the name from data-name and sets it as text.
+    assert "onsubmit=" not in body and "x');alert" not in body          # quotes always escaped
     assert 'data-name="x&#39;);alert(1);(&#39;"' in body
+    assert 'data-confirm="Delete the group “{name}”?' in body
 
 
 def test_a_preview_plans_the_job_and_sends_nothing(client, cloud, no_job_threads):
@@ -1839,10 +1840,46 @@ def test_starting_a_job_runs_it_in_the_background(client, cloud, no_job_threads)
 def test_a_job_page_redraws_from_the_local_record_only(client, cloud, no_job_threads):
     client.post("/cota/jobs/start", data={"device_ids": "786", "commands": "DAD76F4B"})
     out = client.get("/cota/jobs/1/status").json()
-    assert out["ok"] and out["state"] == "running" and "device commands finished" in out["html"]
+    assert out["ok"] and out["state"] == "running" and "device commands finished" in out["progress"]
+    assert "Command summary" in out["html"] and "Command summary" not in out["progress"]
     assert cloud.checks == [] and cloud.sent == []
     assert client.get("/cota/jobs/99/status").json() == {"ok": False}
     assert client.get("/cota/jobs/99", follow_redirects=False).headers["location"] == "/cota"
+
+
+def test_devices_in_progress_go_from_the_form_to_the_job_and_a_batch_is_held_to_200(
+        client, cloud, no_job_threads):
+    ids = ", ".join(str(n) for n in range(1, 451))
+    body = re.sub(r"\s+", " ", _job_preview(client, devices=ids, in_progress="150", batch_size="999"))
+    assert "150 at a time, the rest in line — 3 rounds" in body
+    assert 'name="in_progress" value="150"' in body and 'name="batch_size" value="200"' in body
+    reply = client.post("/cota/jobs/start", data={"device_ids": ids, "commands": "DAD76F4B",
+                                                  "in_progress": "150", "batch_size": "200"},
+                        follow_redirects=False)
+    assert reply.status_code == 303
+    conn = db.connect()
+    assert tuple(conn.execute("SELECT in_progress, batch_size FROM cota_campaign").fetchone()) == (150, 200)
+    page = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
+    assert "150 at a time" in page and "300 devices in line" in page and ">In line</a>" in page
+    # Each tile's share leads, its count beside it (the user, 08-10-2026): nothing sent yet.
+    assert '100%<span class="tile-count">450</span>' in page and '0%<span class="tile-count">0</span>' in page
+    assert "on the first attempt</div>" not in page              # the tile's sub-line is gone
+    # The title, actions and progress are the sticky top; the devices scroll under it.
+    assert page.index('id="job-top"') < page.index('id="job-progress"') < page.index('id="job-live"')
+
+
+def test_a_device_that_answered_nothing_is_marked_not_reachable(client, cloud, no_job_threads):
+    client.post("/cota/jobs/start", data={"device_ids": "786, 14906", "commands": "DAD76F4B"})
+    conn = db.connect()
+    with conn:                                     # 786 answered; 14906 gave up unanswered
+        conn.execute("UPDATE cota_campaign_result SET state = 'done', outcome = 'answered' "
+                     "WHERE device_id = 786")
+        conn.execute("UPDATE cota_campaign_result SET state = 'failed', outcome = 'not_delivered' "
+                     "WHERE device_id = 14906")
+    body = client.get("/cota/jobs/1?state=unreachable").text
+    assert 'class="on">Not reachable</a>' in body
+    assert body.count("pill-dev-unreachable") == 1 and 'data-unfold="14906"' in body
+    assert 'data-unfold="786"' not in body                        # filtered out: it answered
 
 
 def test_a_device_in_a_live_job_is_refused_by_the_next_plan(client, cloud, no_job_threads):
@@ -1943,7 +1980,9 @@ def test_the_answer_wait_and_time_limit_are_job_settings(client, cloud, no_job_t
     row = db.connect().execute("SELECT answer_wait_seconds, validity_hours FROM cota_campaign").fetchone()
     assert row[0] == 45 and abs(row[1] - 20 / 60) < 1e-9
     body = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
-    assert "answer wait 45 s · time limit 20 min — ends by" in body
+    # The settings are in the title's tooltip, not on the page (the user, 08-10-2026).
+    assert re.search(r'<h2 data-tip="[^"]*answer wait 45 s · time limit 20 min, ends by', body)
+    assert 'class="job-meta"' not in body and 'class="step-chain"' not in body
     preview = client.post("/cota/jobs/preview", data={"devices": "786", "commands": "DAD76F4B",
                                                       "answer_wait_seconds": "40"}).text
     assert re.search(r'name="answer_wait_seconds"[^>]*value="40"', preview)
@@ -2009,7 +2048,8 @@ def test_a_bad_saved_command_is_refused_and_kept_in_the_form(client, cota_env):
 def test_a_saved_command_name_never_reaches_a_script_string(client, cota_env):
     client.post("/cota/commands/saved", data={"name": "x');alert(1);('", "val1": "DAD76F4B"})
     body = client.get("/cota/commands").text
-    assert not any("alert" in s for s in re.findall(r'onsubmit="([^"]*)"', body))
+    assert "onsubmit=" not in body
+    assert 'data-confirm="Delete the saved command “{name}”? This cannot be undone."' in body
 
 
 def test_saved_commands_can_be_edited_filtered_and_deleted(client, cota_env):
@@ -2101,10 +2141,10 @@ def test_the_library_is_searched_counted_and_numbered(client, cota_env):
     for n, v in (("Read FTP", "DAD76F4B"), ("SOS off", "DDD76D66"), ("Timers", "DAD76C0A")):
         _save(client, n, v)
     body = re.sub(r"\s+", " ", client.get("/cota/commands").text)
-    assert 'name="q"' in body and "Saved commands <span class=\"hint\">3 ·" in body
+    assert 'name="q"' in body and re.search(r'>Saved commands</span> <span class="hint">3</span>', body)
     found = re.sub(r"\s+", " ", client.get("/cota/commands?q=sos").text)
-    assert "1 of 3 ·" in found and "SOS off" in found and "Read FTP" not in found
-    assert re.search(r'<td class="n dim">1</td> <td><strong>SOS off', found)    # S.No.
+    assert '<span class="hint">1 of 3</span>' in found and "SOS off" in found and "Read FTP" not in found
+    assert re.search(r'<td class="n dim">1</td> <td class="name-cell"><strong>SOS off', found)  # S.No.
 
 
 def test_the_library_pages_at_5_20_or_50(client, cota_env):
@@ -2149,7 +2189,7 @@ def test_the_library_exports_and_imports_through_a_preview(client, cota_env):
               "command,Read FTP,DAD76F4B,read,\n")
     preview = client.post("/cota/commands/import",
                           files={"file": ("lib.csv", upload.encode(), "text/csv")}).text
-    assert "Import — what it would change" in preview and "Apply — 1 new, 0 updated" in preview
+    assert ">Import preview</span>" in preview and "Apply — 1 new, 0 updated" in preview
     assert db.connect().execute("SELECT COUNT(*) FROM cota_saved_command").fetchone()[0] == 1
     content = re.search(r'<textarea name="content" hidden>(.*?)</textarea>', preview, re.S).group(1)
     done = client.post("/cota/commands/import/apply", data={"content": html.unescape(content)},
@@ -2194,3 +2234,21 @@ def test_the_stylesheet_url_changes_when_the_stylesheet_does(client, monkeypatch
     assert api.static_version().endswith(".1800000000") and api.static_version() != first
     monkeypatch.undo()
     assert f'app.css?v={api.static_version()}"' in client.get("/cota").text
+
+
+
+def test_every_delete_and_cancel_asks_first_and_is_red(client, cloud, no_job_threads):
+    """The user's standard: destructive actions are red, and each opens a confirmation."""
+    client.post("/cota/groups", data={"name": "Desk", "devices": "14906, 786"})
+    client.post("/cota/commands/saved", data={"name": "Read FTP", "val1": "DAD76F4B"})
+    client.post("/cota/commands/parameters", data={"code": "6C0A", "name": "TIMERS"})
+    client.post("/cota/jobs/start", data={"device_ids": "786", "commands": "DAD76F4B"})
+    for path in ("/cota/devices", "/cota/commands", "/cota/jobs/1"):
+        body = client.get(path).text
+        destructive = re.findall(r'<button[^>]*>(?:(?!</button>).)*?<span>(Delete|Remove|Reset|Cancel)</span>',
+                                 body, re.S)
+        assert destructive, path
+        for button in re.findall(r'<button[^>]*danger[^>]*>', body):
+            assert "danger" in button
+        assert body.count("data-confirm=") >= len(destructive), path
+    assert 'id="confirm-dialog"' in client.get("/cota/commands").text            # one dialog, in base

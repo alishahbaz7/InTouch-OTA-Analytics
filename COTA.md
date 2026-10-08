@@ -96,6 +96,23 @@ ever turns out to check `origin` or `referer`, add them; don't copy the cookies.
   decide).
 - `startTime` / `endTime` are **Unix epoch seconds**. The example is 05-Oct-2026 00:00 IST to
   06-Oct-2026 00:00 IST, which is the portal's "today" view.
+
+### Read replies in bulk — `GET /IntouchAdminApi/api/getGPRSCommandList`
+
+`?deviceId=786,14906&startTime=1791331200&endTime=1791504000` — given to the user 08-10-2026.
+
+- **`deviceId` takes a comma list, up to 200 devices** (the cloud's cap). Same parameters, same
+  `{"data": [...]}` body and the same record fields as `getGPRSCommand`; each record carries its
+  `deviceId`, which is how a reply is split back into devices (`cota.records_by_device`).
+- **Checked live 08-10-2026, read-only:** for 786 and 14906, over today, yesterday and the last two
+  hours, it returned exactly the one-device call's records, id for id (108, 26 and 35).
+  `cvtms.mappls.com` and `ctvms.mappls.com` are the same back end.
+- **The same afternoon the app's own session got `{"data": []}` from it for everything** — one
+  device or many, held commands included — while the one-device call answered, and a portal
+  session's token got the records. Whether that was the session's permissions or the endpoint
+  being switched on in between is not known. So a job never trusts it blind: the first bulk check
+  of every run is held against the one-device call for one device in it. Same records — bulk for
+  the run. Different — one device per call for the rest of the run, and the Errors page says so.
 - Replies are **polled**: the cloud does not push them.
 - **Response body (captured 2026-10-06):** a list of **command records**, one per command sent
   to the device from anywhere, not a list of replies:
@@ -328,12 +345,23 @@ on `/cota/devices`.
 
 | Setting | Default | Why |
 |---|---|---|
-| Devices per send call | 50 | raise during live runs as the cloud allows (open question 8) |
+| Devices in progress at once | 200 | the rest wait in line in job order; a device that finishes its sequence makes room for the next (the user's design, 2026-10-08). ~2,000 devices an hour on a fleet like job #12's — raise it for a big job, or the limit |
+| Devices per send call | 200 — and never more | the user's rule, 2026-10-08: no call carries more than 200 devices, sends or checks |
 | Calls per second | 5 | sends and checks together; checks dominate (below) |
 | Wait for an answer, per attempt | 30 s | the user's rule (2026-10-07); then sent again, 3 attempts, then the next command |
 | Time limit for the whole job | 60 min | at the limit every device still in progress stops; replaced waiting 12 h for held commands |
-| Canary | 1% of jobs over 20 devices, 1–20 | the rest go only if the canary stays within the stop |
-| Automatic stop | >10% of finished commands failed, or 3 failed calls in a row | judged after 20 |
+| Canary | **off** (with the automatic stop) | was 1% of jobs over 20 devices, 1–20 |
+| Automatic stop | **off** — only 3 failed calls in a row, or an expired session, pause a job | the user's call, 2026-10-08 |
+
+**No automatic pause on devices** (the user's call, 2026-10-08). Counting failed *commands*
+paused two 7-device field tests at "14%" with three devices asleep while every command was being
+answered by the other four. Counting devices that answered and then failed paused job #12 (69
+devices) three times on devices switching off or losing coverage mid-job. Neither was harm. A job
+now runs to the end or to its time limit; a person pauses it. Without a judgement, the canary was
+only a wait, so it went too. The machinery is kept and tested (`AUTOMATIC_STOP`) so it can return
+as a job setting. A device that has answered nothing is shown as **Not reachable**, and an
+answer first seen after a resume to a command sent before it gets no time to answer: a paused
+job does not check, so the time would be the pause.
 
 **Upload format:** the cloud's device list, `id,trackingCode`. `id` is required and
 `trackingCode` (IMEI) is optional; a header row is optional too. The fleet list
@@ -343,13 +371,15 @@ on `/cota/devices`.
 
 | Devices × commands | Send calls | Checks | Scheduler time |
 |---|---|---|---|
-| 1,000 × 5 | 15 | 10,010 | seconds |
-| 5,000 × 5 | 37 | 35,696 | 48 s (303 s before `ix_cota_task_device`) |
-| 30,000 × 5 | 162 | 152,072 | 236 s for 15 simulated minutes |
+| 1,000 × 5 | 10 | 61 | 7 s real for 5 simulated minutes |
+| 5,000 × 5 | 30 | 274 | 47 s real for 5 simulated minutes |
+| 30,000 × 5 | 157 | 1,571 | 279 s real for 6 simulated minutes |
 
-The checks are the bill: about one per device per command, because a check reads one device. At
-5 calls/s, 30,000 × 5 is about 8½ hours. At 20 calls/s it would be about 2 hours, if the cloud
-allows it.
+Since `getGPRSCommandList` (08-10-2026) a check reads up to 200 devices. Before it, at one
+device a call, the same jobs took 10,010, 35,696 and 152,072 checks: the checks were the bill,
+and 30,000 × 5 was about 8½ hours at 5 calls/s. These figures are with every device answering
+in 20 s and the batch at 1,000 devices; a run whose bulk check is not trusted goes back to the
+old figures.
 
 **Live test, 06-10-2026 21:26 (job #1, `DAD76F4B` to 14906 and 786):** both sends were
 accepted, and each call carried both devices. Neither device answered, so after 3 attempts each
@@ -396,7 +426,7 @@ In DevTools, open the Network tab and select **Fetch/XHR**. Do the action in the
 | 5 | ~~Login API~~ — **captured 2026-10-06**: `POST https://ctvms.mappls.com/IntouchAdminApi/user/login`, multipart, `username` + `password` as MD5 hex. Still unseen: the **reply** (which field holds the token); `sources.find_token` looks for the usual names and the Sign in page lists the fields if none match | Lets the tool get a fresh token by itself, as `sources.py` already does for the OTA platform. |
 | 6 | A command that uses `val2`+ | Confirms the multi-value payload shape. |
 | 7 | Meaning of `/0` in `saveCOTAConfig/0` | |
-| 8 | Max devices per send call, and the call rate the cloud tolerates | Sets a job's batch size and calls/s. Checks are one device per call (HTTP 400 on a list), so the rate decides how long a fleet job takes. |
+| 8 | Max devices per send call, and the call rate the cloud tolerates | Sets a job's batch size and calls/s. Checks read up to 200 devices a call since `getGPRSCommandList` (08-10-2026); before that, at one device per call, the rate decided how long a fleet job took. |
 | 9 | ~~Scale~~ — **known 2026-10-06**: 23,103 devices, up to 10% more; a job may be the whole fleet | Sized for 30,000 and simulated at that size. |
 | 10 | Who uses it: engineers (CLI) or an ops team (web page) | Decides how soon the dashboard page is needed and who gets the admin role. |
 
@@ -450,6 +480,8 @@ requirements, not extras.
 | 2026-10-05 | Nothing is sent without an explicit send step, and the first send of a job is a canary |
 | 2026-10-05 | Version 2.0.0, a major version, because it is the first time the app writes to a production system. Schema v10 |
 | 2026-10-05 | `cota.py` and the schema v10 tables were committed with v1.9.1 (`7ce78fb`, pushed to `main`) by accident, ahead of the CLI and tests. They are inert until wired up: the tables are empty and nothing calls the module |
+| 2026-10-08 | Jobs check up to 200 devices a call with `getGPRSCommandList`, held each run against the one-device call before it is trusted |
+| 2026-10-08 | The automatic stop counts devices that answered and then failed, never one that has answered nothing (the user's choice) |
 
 ## Developing
 

@@ -3,8 +3,9 @@
 The cloud (ctvms IntouchAdminApi) can already send a command to a device and show what the
 device replied, one screen at a time. This module drives the same two calls in bulk:
 
-    saveCOTAConfig/0   send one command to a list of devices
-    getGPRSCommand     what one device received and replied within a time window
+    saveCOTAConfig/0     send one command to a list of devices
+    getGPRSCommand       what one device received and replied within a time window
+    getGPRSCommandList   the same for up to 200 devices in one call (jobs only)
 
 and keeps every request and reply in the local database, so a job of many devices × many
 commands can be sent, watched, exported and analysed. COTA.md explains the design and lists
@@ -33,6 +34,13 @@ from . import exports, normalize, sources
 BASE_URL = "https://ctvms.mappls.com/IntouchAdminApi/api"
 SEND_PATH = "/saveCOTAConfig/0"          # what the trailing 0 selects is not known yet
 RESPONSES_PATH = "/getGPRSCommand"
+# The same records for many devices in one call: `deviceId` takes a comma list, capped at 200 by
+# the cloud. Given to the user 08-10-2026 and checked live that day — over three windows, id for
+# id the one-device call's records, each carrying its deviceId. The app's own session got empty
+# lists from it the same afternoon, so a job holds it against the one-device call before trusting
+# it (cota_campaign.Scheduler._verify).
+LIST_PATH = "/getGPRSCommandList"
+LIST_MAX_DEVICES = 200
 
 ENV_TOKEN = "OTA_COTA_TOKEN"
 TOKEN_ACCOUNT = "cota-bearer"            # keyring username under sources.SERVICE_NAME
@@ -133,6 +141,12 @@ class Client:
     def responses(self, device_id: int, start: int, end: int) -> tuple[int, str]:
         return self._call("GET", RESPONSES_PATH,
                           params={"deviceId": device_id, "startTime": start, "endTime": end})
+
+    def responses_many(self, device_ids, start: int, end: int) -> tuple[int, str]:
+        """getGPRSCommandList: up to LIST_MAX_DEVICES devices in one call."""
+        return self._call("GET", LIST_PATH,
+                          params={"deviceId": ",".join(str(d) for d in device_ids),
+                                  "startTime": start, "endTime": end})
 
     def _call(self, method: str, path: str, **kwargs) -> tuple[int, str]:
         try:
@@ -879,6 +893,23 @@ def reply_records(raw: str | None) -> list[dict] | None:
     if isinstance(payload, dict) and isinstance(payload.get("data"), list) and not payload["data"]:
         return []
     return None
+
+
+def records_by_device(raw: str | None, device_ids) -> dict[int, list[dict]] | None:
+    """A getGPRSCommandList body split by device: every device asked for gets its list — [] when
+    the period holds nothing for it. None when the body holds no list, or a record this cannot
+    place (no deviceId, or a device not asked for): the whole answer is then not used, rather than
+    a guess made about whose record it is."""
+    records = reply_records(raw)
+    if records is None:
+        return None
+    out = {int(d): [] for d in device_ids}
+    for record in records:
+        device = _epoch(_field(record, "deviceId"))
+        if device not in out:
+            return None
+        out[device].append(record)
+    return out
 
 
 def _field(record: dict, name: str):

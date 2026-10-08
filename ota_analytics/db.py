@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -49,6 +49,12 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     # v16: a job's own wait for an answer, and when each answer came — on which attempt.
     "cota_campaign": {
         "answer_wait_seconds": "REAL",
+        # v17: the automatic stop counts devices, and what a person has already seen is not
+        # counted again; an answer that arrived during a pause has no measurable time.
+        "fail_acknowledged": "TEXT",
+        "resumed_at": "REAL",
+        # v18: how many devices a job keeps in progress at once (NULL: all of them).
+        "in_progress": "INTEGER",
     },
     "cota_campaign_result": {
         "answer_seconds": "REAL",

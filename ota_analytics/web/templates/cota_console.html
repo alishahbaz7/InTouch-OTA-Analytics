@@ -98,8 +98,6 @@
                 <input type="text" name="cmd_type" form="composer" class="mono"
                        inputmode="numeric" value="{{ d.get('cmd_type') or default_cmd }}" required>
                 <span class="hint" id="cmd-name">{{ (d.get('cmd_type') or default_cmd) | int | command_name }}</span></label>
-              <p class="footnote">Sent with every command from this page. Defaults: model
-                {{ default_type }}, type {{ default_cmd }}.</p>
             </div>
           </details>
           {%- if device.type != default_type or (d.get('cmd_type') and d.get('cmd_type') | int != default_cmd) %}
@@ -151,11 +149,10 @@
         <input type="date" class="cal-picker" tabindex="-1" aria-hidden="true">
       </label>
       {% endfor %}
-      <button type="submit" class="range-apply">Show</button>
+      <button type="submit" class="range-apply" data-tip="Up to {{ max_range_days }} days.">Show</button>
       <span class="range-presets">
         {% for p in presets %}<a href="/cota/console?{{ p.query }}">{{ p.label }}</a>{% endfor %}
       </span>
-      <span class="hint">up to {{ max_range_days }} days</span>
     </form>
 
     <div class="thread-scroll" id="thread" data-device="{{ device.id }}"
@@ -192,10 +189,9 @@
                 placeholder="One command per line, sent in order — e.g.&#10;DAD76F4B&#10;DAD76C0A"
                 {{ 'disabled' if run_live }}>{{ d.get('commands', '') }}</textarea>
       <div class="sequence-foot">
-        <span class="hint">One at a time · {{ run_rules.wait }} s for an answer, then sent again ·
-          up to {{ run_rules.tries }} attempts, then the next command · next {{ run_rules.after_answer }} s after an answer</span>
         {{ library_pick('sequence') }}
         <button type="submit" class="composer-send" id="sequence-btn"
+                data-tip="One at a time: {{ run_rules.wait }} s for an answer, then sent again — up to {{ run_rules.tries }} attempts, then the next command."
                 {{ 'disabled' if run_live or not cota_status.token_held }}>
           {{ icon('send') }}<span>Start sequence</span></button>
       </div>
@@ -244,18 +240,7 @@
   {% else %}
     <div class="thread-intro">
       <h2>Configure a device</h2>
-      <p class="lead">One device, one command at a time — and what the device said back.</p>
-      <ol class="module-steps">
-        <li><strong>Start configuration</strong> with the cloud's device id, or an IMEI from the
-          device map.</li>
-        <li><strong>Send</strong> a command. Its exact request is in the <em>Raw</em> panel once
-          it has gone.</li>
-        <li><strong>Watch the ticks.</strong> ✓ the cloud accepted the command; white ✓✓ the
-          cloud holds it for the device; green ✓✓ the device answered. This page checks
-          {{ auto_tries }} times, every {{ auto_every }} seconds, after each send — or press ⟳.</li>
-        <li><strong>Click a command or an answer</strong> for its raw request and API response.</li>
-      </ol>
-      <p class="hint">Every command and every check is recorded, and shows up under Jobs.</p>
+      <p class="hint">Pick a device on the left, or start one with its device id or IMEI.</p>
     </div>
   {% endif %}
   </section>

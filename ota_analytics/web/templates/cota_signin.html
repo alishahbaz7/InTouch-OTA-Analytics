@@ -78,13 +78,11 @@
         <label class="inline">
           <input type="checkbox" name="remember" value="true"
                  {{ 'checked' if cota_status.password_saved }}>
-          Remember me <span class="opt">— keeps the password in {{ credential_store }}, so an
-            expired token renews itself</span>
+          <span data-tip="Keeps the password in {{ credential_store }}, so an expired token renews itself.">Remember me</span>
         </label>
         {%- set preset = connection.cloud != 'custom' and connection.login_url %}
         <details class="advanced" {{ 'open' if not connection.login_url }}>
-          <summary>Sign-in details{% if preset %} <span class="opt">— set by the
-            {{ clouds[connection.cloud][0] }} preset</span>{% endif %}</summary>
+          <summary{% if preset %} data-tip="Set by the {{ clouds[connection.cloud][0] }} preset."{% endif %}>Sign-in details</summary>
           {% if preset %}
           <p class="footnote">Taken from the portal's own sign-in request: multipart form,
             password sent as its MD5 hash. Locked for this cloud; choose “Other cloud” to change.</p>

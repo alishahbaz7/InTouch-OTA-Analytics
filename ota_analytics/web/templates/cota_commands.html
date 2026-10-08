@@ -26,10 +26,9 @@
       <summary class="tool-btn" title="Load a library file — yours or a colleague's">{{ icon('upload') }}<span>Import</span></summary>
       <div class="dropdown-panel import-panel">
         <form method="post" action="/cota/commands/import" enctype="multipart/form-data" class="stack-form">
-          <label>Library file (.csv)
+          <label><span data-tip="Adds and updates — never deletes. Every change is shown before it is made.">Library file (.csv)</span>
             <input type="file" name="file" accept=".csv" required></label>
-          <p class="field-hint">Adds and updates — never deletes. You see every change before it is
-            made. <a href="/cota/commands/template.csv">Download template</a></p>
+          <p class="field-hint"><a href="/cota/commands/template.csv">Download template</a></p>
           <div class="form-actions"><button type="submit" class="btn-icon">{{ icon('upload') }}<span>Preview import</span></button></div>
         </form>
       </div>
@@ -41,7 +40,7 @@
 {% if import_plan %}
 {%- set c = import_plan.counts -%}
 <section class="card" id="import">
-  <h2>Import — what it would change <span class="hint">nothing written yet</span></h2>
+  <h2><span data-tip="Nothing is written until Apply. An import never deletes.">Import preview</span></h2>
   <div class="job-counts">
     <span class="count-pill answered-count">New <b>{{ c.new }}</b></span>
     <span class="count-pill waiting-count">Updated <b>{{ c.updated }}</b></span>
@@ -77,10 +76,13 @@
 </section>
 {% endif %}
 
+{# Parameter names beside saved commands: two independent lists, so a wide window shows both at
+   once; a narrow one stacks them. #}
+<div class="library-columns">
 {# ── parameter names: one name, every GET / SET / CLR of it ── #}
 <section class="card" id="parameters">
   <div class="list-head">
-    <h2>Parameter names <span class="hint">{{ count(params_total, params_all) }} · the four hex digits after D7, named once and read everywhere</span></h2>
+    <h2><span data-tip="The four hex digits after D7. Named once, every GET, SET and CLR of that parameter reads by the name.">Parameter names</span> <span class="hint">{{ count(params_total, params_all) }}</span></h2>
     <button type="button" class="btn-primary btn-icon" data-fold="param-form">{{ icon('plus') }}<span>Add</span></button>
   </div>
   <div class="fold" id="param-form" {{ '' if pf else 'hidden' }}>
@@ -94,29 +96,28 @@
       </div>
       <div class="form-actions"><button type="submit" class="btn-icon">{{ icon('tag') }}<span>Save name</span></button>
         <button type="button" class="tool-btn" data-fold="param-form">{{ icon('x') }}<span>Close</span></button>
-        <span class="hint">DAD76C0A then reads as GET <em>name</em>, DBD76C0A… as SET <em>name</em>.</span></div>
+      </div>
     </form>
   </div>
   {% if parameters %}
   <div class="table-wrap">
   <table class="library-table">
-    <thead><tr><th class="n">S.No.</th><th>Code</th><th>Name</th><th class="n">Used by</th><th>Reads as</th><th></th></tr></thead>
+    <thead><tr><th class="n">S.No.</th><th>Code</th><th>Name</th><th></th></tr></thead>
     <tbody>
       {% for p in parameters %}
       <tr>
         <td class="n dim">{{ p_first + loop.index }}</td>
         <td class="mono">{{ p.code }}</td>
-        <td>{{ p.name }}{% if p.builtin and not p.own %} <span class="pill">built-in</span>{% elif p.builtin %} <span class="hint">was {{ p.builtin }}</span>{% endif %}</td>
-        <td class="n {{ 'dim' if not p.used_by }}">{{ p.used_by }}</td>
-        <td class="dim small reads-cell">GET / SET / CLR {{ p.name }}</td>
+        <td class="name-cell">{{ p.name }}{% if p.builtin and not p.own %} <span class="pill">built-in</span>{% endif %}
+          <span class="sub-line">used by {{ p.used_by }} saved command{{ '' if p.used_by == 1 else 's' }}{% if p.builtin and p.own %} · was {{ p.builtin }}{% endif %}</span></td>
         <td class="row-actions">
           <button type="button" class="link-btn btn-icon" data-fill-code="{{ p.code }}" data-fill-name="{{ p.name }}"
                   title="Rename">{{ icon('edit') }}<span>Rename</span></button>
           {% if p.own %}
           <form method="post" action="/cota/commands/parameters/{{ p.code }}/delete" class="inline-form"
-                data-name="{{ p.code }}"
-                onsubmit="return confirm('Remove your name for ' + this.dataset.name + '?')">
-            <button type="submit" class="link-btn btn-icon" title="Remove your name">{{ icon('trash') }}<span>{{ 'Reset' if p.builtin else 'Remove' }}</span></button>
+                data-name="{{ p.code }} · {{ p.name }}" data-confirm-action="{{ 'Reset' if p.builtin else 'Remove' }}"
+                data-confirm="{{ 'Reset {name} to its built-in name, ' ~ p.builtin ~ '?' if p.builtin else 'Remove the name {name}? Commands on this parameter go back to showing its code.' }}">
+            <button type="submit" class="link-btn btn-icon danger" title="Remove your name">{{ icon('trash') }}<span>{{ 'Reset' if p.builtin else 'Remove' }}</span></button>
           </form>
           {% endif %}
         </td>
@@ -134,7 +135,7 @@
 {# ── saved commands: a whole command under a name, with tags ── #}
 <section class="card" id="saved">
   <div class="list-head">
-    <h2>Saved commands <span class="hint">{{ count(saved_total, saved_all) }} · picked in Configure and Jobs instead of typed</span></h2>
+    <h2><span data-tip="A whole command under a name — picked in Configure and New job instead of typed.">Saved commands</span> <span class="hint">{{ count(saved_total, saved_all) }}</span></h2>
     <button type="button" class="btn-primary btn-icon" data-fold="cmd-form">{{ icon('plus') }}<span>Add</span></button>
   </div>
   <div class="fold" id="cmd-form" {{ '' if f else 'hidden' }}>
@@ -170,24 +171,25 @@
   {% if saved %}
   <div class="table-wrap">
   <table class="library-table">
-    <thead><tr><th class="n">S.No.</th><th>Name</th><th>Command</th><th>Type</th><th>Reads as</th><th>Tags</th><th>Note</th><th></th></tr></thead>
+    <thead><tr><th class="n">S.No.</th><th>Name · command</th><th>Type</th><th></th></tr></thead>
     <tbody>
       {% for c in saved %}
       <tr>
         <td class="n dim">{{ c_first + loop.index }}</td>
-        <td><strong>{{ c.name }}</strong></td>
-        <td class="mono small" title="{{ c.val1 }}">{{ c.val1[:28] }}{% if c.val1 | length > 28 %}…{% endif %}</td>
+        <td class="name-cell"><strong>{{ c.name }}</strong>
+          <span class="cmd-line mono" title="{{ c.val1 }}">{{ c.val1[:36] }}{% if c.val1 | length > 36 %}…{% endif %}</span>
+          {%- set reads = c.reads_as if c.reads_as and c.reads_as | upper != c.name | upper else '' %}
+          {%- if reads or c.note or c.tag_list %}
+          <span class="sub-line">{{ reads }}{% if reads and c.note %} · {% endif %}{{ c.note }}
+            {%- for t in c.tag_list %} <span class="tag-chip">{{ t }}</span>{% endfor %}</span>
+          {%- endif %}</td>
         <td><span class="pill pill-kind-{{ c.kind }}">{{ {'get': 'GET', 'set': 'SET', 'clear': 'CLR'}.get(c.kind, '?') }}</span></td>
-        <td class="dim small">{{ c.reads_as }}</td>
-        <td>{% for t in c.tag_list %}<span class="tag-chip">{{ t }}</span>{% endfor %}</td>
-        <td class="dim small">{{ c.note }}</td>
         <td class="row-actions">
           <a class="link-btn btn-icon" href="/cota/jobs/new?{{ {'commands': c.val1} | urlencode }}" title="A new job with this command">{{ icon('send') }}<span>New job</span></a>
           <a class="link-btn btn-icon" href="/cota/commands?edit={{ c.id }}#saved" title="Edit">{{ icon('edit') }}<span>Edit</span></a>
           <form method="post" action="/cota/commands/saved/{{ c.id }}/delete" class="inline-form"
-                data-name="{{ c.name }}"
-                onsubmit="return confirm('Delete the saved command “' + this.dataset.name + '”?')">
-            <button type="submit" class="link-btn btn-icon" title="Delete">{{ icon('trash') }}<span>Delete</span></button>
+                data-name="{{ c.name }}" data-confirm="Delete the saved command “{name}”? This cannot be undone.">
+            <button type="submit" class="link-btn btn-icon danger" title="Delete">{{ icon('trash') }}<span>Delete</span></button>
           </form>
         </td>
       </tr>
@@ -202,6 +204,7 @@
   <p class="hint">No saved commands yet — <strong>Add</strong> one, or <strong>Import</strong> a colleague's library.</p>
   {% endif %}
 </section>
+</div>
 {% endblock %}
 
 {% block scripts %}

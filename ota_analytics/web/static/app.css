@@ -431,7 +431,14 @@ table.grouped thead .group-row th[colspan] + th[colspan] {
 .footnote { color: var(--muted); font-size: 11.5px; margin: 8px 0 0; }
 .footnote a, .lede a, .hint a, .field-hint a, .notice a { color: var(--accent); }
 .empty { color: var(--muted); font-style: italic; font-size: 12.5px; }
-h2 [data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
+[data-tip] { cursor: help; }
+button[data-tip], a[data-tip], summary[data-tip] { cursor: pointer; }
+/* The help tooltip: appears only after the pointer rests on a title or control (base.html). */
+.hold-tip { position: fixed; z-index: 70; max-width: 340px; padding: 7px 10px; border-radius: 6px;
+            background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, .35); font-size: 12px; line-height: 1.45;
+            pointer-events: none; }
+.hold-tip[hidden] { display: none; }
 .muted { color: var(--muted); font-weight: 400; }
 .dim { color: var(--dim); }
 .small { font-size: 12px; }
@@ -454,6 +461,27 @@ h2 [data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
               text-overflow: ellipsis; }
 .tile-value { font-size: 21px; font-weight: 600; margin: 2px 0 0; font-variant-numeric: tabular-nums; }
 .tile-sub { color: var(--muted); font-size: 11px; }
+/* A tile's count beside its share: the share leads, the count follows smaller (the user). */
+.tile-count { color: var(--dim); font-size: 13px; font-weight: 500; margin-left: 8px; }
+
+/* The job page's top — title, actions, progress — stays under the top bar while the devices
+   scroll beneath it, and condenses to a strip once stuck (the user, 08-10-2026). */
+.job-top-mark { height: 0; }                  /* watched: once it passes the top bar, the top is stuck */
+.job-top { position: sticky; top: var(--stick-at, 0px); z-index: 15; background: var(--bg); }
+.job-progress-card { margin-bottom: 12px; }
+.job-top.is-stuck { padding-top: 6px; box-shadow: 0 10px 12px -12px rgba(0, 0, 0, .7); }
+.job-top.is-stuck .card { margin-bottom: 6px; padding: 6px 12px; }
+.job-top.is-stuck .notice { margin-bottom: 6px; padding: 5px 10px; }
+.job-top.is-stuck .job-title-row h2 { font-size: 14px; }
+.job-top.is-stuck .job-actions .tool-btn { padding-top: 3px; padding-bottom: 3px; }
+.job-top.is-stuck .job-pct { font-size: 15px; }
+.job-top.is-stuck .stack.stack-big { height: 5px; margin: 4px 0 6px; }
+.job-top.is-stuck .job-tiles { margin: 0; gap: 6px; }
+.job-top.is-stuck .tile { display: flex; align-items: baseline; gap: 8px; padding: 3px 10px; }
+.job-top.is-stuck .tile-value { font-size: 15px; margin: 0; }
+.job-top.is-stuck .tile-count { font-size: 11px; margin-left: 5px; }
+.job-top.is-stuck .tile-sub { display: none; }
+@media (max-width: 760px) { .job-top { position: static; } }   /* a phone needs the room */
 .tile.alert { border-color: var(--alert); background: linear-gradient(var(--panel), rgba(255,107,94,.07)); }
 .tile.alert .tile-value { color: var(--alert); }
 .tile.ok-tile .tile-value { color: var(--ok); }
@@ -1288,6 +1316,12 @@ button.bubble:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .pill-dev-done { background: rgba(53,196,138,.15); color: var(--ok); }
 .pill-dev-expired { background: rgba(100,112,127,.2); color: var(--muted); }   /* asleep all window: not a fault */
 .pill-dev-cancelled { background: rgba(100,112,127,.2); color: var(--muted); }
+/* Waiting in job order for a device in progress to finish; or never reached by the time limit. */
+.pill-dev-queued { background: var(--panel-2); color: var(--muted); }
+.pill-dev-not_started { background: rgba(100,112,127,.2); color: var(--muted); }
+/* Answered nothing in the job: asleep or out of coverage. Muted like expired — not a fault, and
+   never counted by the automatic stop. */
+.pill-dev-unreachable { background: rgba(100,112,127,.2); color: var(--muted); margin-left: 4px; }
 .job-head-card { padding-top: 12px; padding-bottom: 12px; }
 .job-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .job-title-row h2 { margin: 0; }
@@ -1328,7 +1362,6 @@ a.btn-primary, a.tool-btn { text-decoration: none; }
 .mini-pct { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dim); min-width: 42px;
             text-align: right; }
 .job-list td { vertical-align: middle; }
-.job-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
 .toolbar-title { margin: 0; }
 .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
@@ -1342,6 +1375,21 @@ a.btn-primary, a.tool-btn { text-decoration: none; }
 .library-panel .dropdown-item em { font-style: normal; color: var(--muted); font-size: 11.5px; }
 /* The dashboard's column charts keep a sensible height on a wide window. */
 .chart-card .svg-chart { max-height: 190px; }
+/* Destructive actions are red — Delete, Remove, Reset, Cancel a job — and every one asks first,
+   through the one confirmation dialog in base.html. */
+.link-btn.danger { color: var(--bad); }
+.tool-btn.danger { color: var(--bad); }
+.tool-btn.danger:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+.btn-danger { background: var(--bad); color: #fff; border: none; border-radius: 8px; height: 32px;
+              padding: 0 14px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.btn-danger:hover { filter: brightness(1.1); }
+.confirm-dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+                  color: var(--text); padding: 18px 20px 16px; width: min(420px, calc(100vw - 32px));
+                  box-shadow: 0 16px 48px rgba(0, 0, 0, .45); }
+.confirm-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.confirm-dialog h3 { margin: 0 0 8px; font-size: 14px; }
+.confirm-dialog p { margin: 0 0 16px; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 /* Commands: one search for the library, Export / Import beside it, folded add forms. */
 .library-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .library-search { flex: 1; }
@@ -1350,6 +1398,19 @@ a.btn-primary, a.tool-btn { text-decoration: none; }
 .library-import > summary::after { content: none; }
 .import-panel { width: 340px; padding: 12px; }
 .import-apply { margin-top: 12px; }
+/* Parameter names beside saved commands; stacked on a narrower window. Each table scrolls
+   sideways inside its own card if it must, rather than pushing the page wide. */
+.library-columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 14px;
+                   align-items: start; }
+.library-columns > .card { margin: 0; min-width: 0; }
+.library-columns .table-wrap { overflow-x: auto; }
+.library-columns th { position: static; }
+.library-columns .row-actions .link-btn { margin-left: 6px; }
+.name-cell { white-space: normal; min-width: 150px; }
+.sub-line { display: block; color: var(--muted); font-size: 11.5px; }
+.cmd-line { display: block; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+.name-cell .tag-chip { margin: 2px 0 0 4px; }
+@media (max-width: 1200px) { .library-columns { grid-template-columns: minmax(0, 1fr); } }
 .fold { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
         padding: 12px; margin: 4px 0 12px; }
 .fold[hidden] { display: none; }
@@ -1415,7 +1476,6 @@ a.btn-primary, a.tool-btn { text-decoration: none; }
 .param-row { grid-template-columns: 110px 1fr; }
 .library-table { margin-top: 12px; }
 .library-table td { vertical-align: middle; }
-.library-table td.reads-cell { white-space: normal; }
 .row-actions { text-align: right; white-space: nowrap; }
 .row-actions .link-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
 .row-actions .link-btn svg { width: 14px; height: 14px; }
