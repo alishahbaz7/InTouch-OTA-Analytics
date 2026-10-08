@@ -26,28 +26,47 @@
       <label>Name
         <input type="text" name="name" value="{{ d.get('name', '') }}" placeholder="e.g. FTP settings — Delhi fleet">
       </label>
-      <label>Devices — a saved group
-        <select name="group_id">
-          <option value="">— or type / upload them below —</option>
-          {% for g in groups %}
-          <option value="{{ g.id }}" {{ 'selected' if d.get('group_id') == g.id | string }}>{{ g.name }} · {{ g.devices | comma }} devices</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>…or device ids
-        <textarea name="devices" rows="3" class="mono" spellcheck="false"
-                  placeholder="786, 14906">{{ d.get('devices', '') if not d.get('group_id') }}</textarea>
-      </label>
-      <label>…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
-          <a href="/cota/groups/template.csv">Download template</a></span>
-        <input type="file" name="file" accept=".csv">
-      </label>
+      {#- Devices come from one place. Whichever is used, the other two grey out — disabled, so
+          they are not sent either — and Clear empties it and brings them back. Set here as well
+          as by the script, so the page is right when it comes back from a preview. -#}
+      {%- set source = 'group' if d.get('group_id') else ('ids' if (d.get('devices') or '').strip() else '') %}
+      <div class="device-sources" id="device-sources">
+        <div class="source-option {{ 'is-off' if source and source != 'group' }}" data-source="group">
+          <div class="field-label-row">
+            <span class="field-label">Devices — a saved group</span>
+            <button type="button" class="link-btn source-clear" data-clear="group" {{ '' if source == 'group' else 'hidden' }}>Clear</button>
+          </div>
+          <select name="group_id" aria-label="Saved group" {{ 'disabled' if source and source != 'group' }}>
+            <option value="">— or type / upload them below —</option>
+            {% for g in groups %}
+            <option value="{{ g.id }}" {{ 'selected' if d.get('group_id') == g.id | string }}>{{ g.name }} · {{ g.devices | comma }} devices</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="source-option {{ 'is-off' if source and source != 'ids' }}" data-source="ids">
+          <div class="field-label-row">
+            <span class="field-label">…or device ids</span>
+            <button type="button" class="link-btn source-clear" data-clear="ids" {{ '' if source == 'ids' else 'hidden' }}>Clear</button>
+          </div>
+          <textarea name="devices" rows="3" class="mono" spellcheck="false" aria-label="Device ids"
+                    placeholder="786, 14906" {{ 'disabled' if source and source != 'ids' }}>{{ d.get('devices', '') if not d.get('group_id') }}</textarea>
+        </div>
+        <div class="source-option {{ 'is-off' if source }}" data-source="csv">
+          <div class="field-label-row">
+            <span class="field-label">…or a CSV — <span class="field-hint">id (required), trackingCode (optional) ·
+              <a href="/cota/groups/template.csv">Download template</a></span></span>
+            <button type="button" class="link-btn source-clear" data-clear="csv" hidden>Clear</button>
+          </div>
+          <input type="file" name="file" accept=".csv" aria-label="Device CSV" {{ 'disabled' if source }}>
+        </div>
+      </div>
       <div class="field-label-row">
         <span class="field-label">Commands — one per line, sent in order</span>
         {% if library %}
         <details class="dropdown library-pick">
           <summary class="tool-btn">{{ icon('book') }}<span>From library</span></summary>
           <div class="dropdown-panel library-panel">
+            {% if library | length > 8 %}<input type="search" class="library-filter" placeholder="Filter {{ library | length }} commands" aria-label="Filter saved commands" data-library-filter>{% endif %}
             {% for c in library %}
             <button type="button" class="dropdown-item" data-val1="{{ c.val1 }}">
               <span>{{ c.name }}</span><em class="mono">{{ c.val1[:18] }}{% if c.val1 | length > 18 %}…{% endif %}</em>
@@ -165,6 +184,44 @@
 
 {% block scripts %}
 <script>
+// One source of devices at a time: a saved group, typed ids, or a CSV. Whichever holds
+// something, the other two are disabled — greyed, and not sent — until it is cleared.
+(function () {
+  var wrap = document.getElementById('device-sources');
+  if (!wrap) return;
+  var fields = { group: wrap.querySelector('[name="group_id"]'),
+                 ids: wrap.querySelector('[name="devices"]'),
+                 csv: wrap.querySelector('[name="file"]') };
+  function used() {
+    if (fields.group.value) return 'group';
+    if (fields.ids.value.trim()) return 'ids';
+    if (fields.csv.files && fields.csv.files.length) return 'csv';
+    return '';
+  }
+  function apply() {
+    var on = used();
+    Object.keys(fields).forEach(function (key) {
+      var off = !!on && on !== key;
+      var box = wrap.querySelector('[data-source="' + key + '"]');
+      fields[key].disabled = off;
+      box.classList.toggle('is-off', off);
+      box.querySelector('[data-clear]').hidden = on !== key;
+    });
+  }
+  wrap.addEventListener('input', apply);
+  wrap.addEventListener('change', apply);
+  wrap.addEventListener('click', function (e) {
+    var button = e.target.closest('[data-clear]');
+    if (!button) return;
+    var key = button.getAttribute('data-clear');
+    fields[key].value = '';
+    apply();
+    fields[key].focus();
+  });
+  apply();
+})();
+</script>
+<script>
 // Each command line's name as it is typed — asked of this install, which knows the library, so
 // the page and the plan cannot disagree. And the library picker adds a line.
 (function () {
@@ -190,6 +247,14 @@
   }
   box.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(ask, 300); });
   if (box.value.trim()) ask();
+  document.querySelectorAll('[data-library-filter]').forEach(function (input) {
+    input.addEventListener('input', function () {
+      var needle = input.value.trim().toLowerCase();
+      input.parentNode.querySelectorAll('[data-val1]').forEach(function (b) {
+        b.hidden = needle && b.textContent.toLowerCase().indexOf(needle) === -1;
+      });
+    });
+  });
   document.querySelectorAll('.library-pick [data-val1]').forEach(function (b) {
     b.addEventListener('click', function () {
       var v = box.value.replace(/\s+$/, '');

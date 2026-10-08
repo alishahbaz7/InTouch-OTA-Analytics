@@ -105,3 +105,14 @@ def test_no_rule_names_the_same_selector_twice():
         names = [s.strip() for s in selectors.split(",") if s.strip()]
         repeated = {n for n in names if names.count(n) > 1}
         assert not repeated, f"selector named twice in one rule: {sorted(repeated)}"
+
+
+def test_every_rule_in_the_stylesheet_is_whole():
+    """Retiring rules line by line once left half of a two-line rule behind — a stray
+    `text-align: …; }` that the browser reads as the start of a selector, silently dropping the
+    rule after it. Braces that do not balance are how that shows."""
+    depth = 0
+    for number, line in enumerate(CSS.splitlines(), start=1):
+        depth += line.count("{") - line.count("}")
+        assert depth >= 0, f"app.css line {number} closes a rule that was never opened"
+    assert depth == 0, "app.css ends inside an open rule"

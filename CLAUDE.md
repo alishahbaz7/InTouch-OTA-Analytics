@@ -411,9 +411,11 @@ Jobs, Commands, Devices, Sign in).
   and most likely sent one live GET to the desk device.
 - **"Command sent at …" in `response` is the cloud's delivery note, not an answer**
   (`cota.is_delivery_note`) — stage `delivered`, white ✓✓, never green.
-- **In Jinja, never name a dict key `items`, `keys` or `values`.** `thread.items` resolves to
-  the dict's own method before the key, and the template loops over a function. The console's
-  list is `entries` for that reason.
+- **In Jinja, never name a dict key after a dict method** — `items`, `keys`, `values`,
+  `update`, `get`, `pop`, `copy`. `thread.items` resolves to the dict's own method before the
+  key, and the template loops over a function; the console's list is `entries` for that reason.
+  It bit again with an import's counts: `c.update` printed "<built-in method update…>" on the
+  Apply button, so the key is `updated`.
 - Device-map uploads do **not** go through `sources._validate_csv`, which demands an `IMEI`
   header. A map headed "Device Unique No" is valid, and `cota.import_device_map` names any
   missing column itself.
@@ -773,6 +775,10 @@ release/dev side by side. Load it before changing any page, nav item, form or st
 - **Never style a bare `header` (or `nav`, `aside`, `section`).** `header { position: sticky }`
   made the console's own heading stick and paint over the top bar on scroll. The top bar is
   `header.topbar`; `test_no_bare_header_rule_can_make_other_headings_sticky` holds it.
+- **The stylesheet URL carries the file's own time** (`api.static_version`), not only the app
+  version. By version alone it stayed `?v=2.0.1` through a day of style changes and the browser
+  kept its copy — new parts of pages rendered unstyled while every screenshot from a fresh
+  browser looked right. If a page looks unstyled to the user and fine to you, suspect the cache.
 - **The dev copy flags stale code** (`api.code_is_stale`): Python on disk newer than the running
   process shows "Restart to load new code". If a page looks wrong after an edit — blank icons,
   missing data, a 500 — check for that chip before debugging.

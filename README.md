@@ -58,7 +58,7 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 879 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 899 tests
 ```
 
 **Running the release and a development copy together.** The packaged release serves on

@@ -1,102 +1,188 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "macros.html" import pager %}
 {% block title %}Commands — Intouch COTA{% endblock %}
+
+{%- macro count(shown, all) -%}
+  {%- if q and shown != all %}{{ shown | comma }} of {{ all | comma }}{% else %}{{ all | comma }}{% endif -%}
+{%- endmacro -%}
 
 {% block content %}
 {% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
 {%- set f = draft or editing or {} -%}
+{%- set pf = param_draft or {} -%}
 
-<div class="module-grid">
-  {# ── parameter names: one name, every GET / SET / CLR of it ── #}
-  <section class="card" id="parameters">
-    <h2>Parameter names <span class="hint">the four hex digits after D7 — named once, read everywhere</span></h2>
+{# ── one search for both tables; the library as a file, out and in ── #}
+<section class="card library-bar">
+  <form method="get" action="/cota/commands" class="inline-search library-search">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search names, codes, commands, tags, notes"
+           aria-label="Search the command library">
+    <button type="submit">Search</button>
+    {% if q %}<a class="link-btn" href="/cota/commands">Clear</a>{% endif %}
+  </form>
+  <span class="library-actions">
+    <a class="tool-btn" href="/cota/commands/export.csv" title="The whole library as one CSV — to share">{{ icon('download') }}<span>Export</span></a>
+    <details class="dropdown library-import" {{ 'open' if import_open }}>
+      <summary class="tool-btn" title="Load a library file — yours or a colleague's">{{ icon('upload') }}<span>Import</span></summary>
+      <div class="dropdown-panel import-panel">
+        <form method="post" action="/cota/commands/import" enctype="multipart/form-data" class="stack-form">
+          <label>Library file (.csv)
+            <input type="file" name="file" accept=".csv" required></label>
+          <p class="field-hint">Adds and updates — never deletes. You see every change before it is
+            made. <a href="/cota/commands/template.csv">Download template</a></p>
+          <div class="form-actions"><button type="submit" class="btn-icon">{{ icon('upload') }}<span>Preview import</span></button></div>
+        </form>
+      </div>
+    </details>
+  </span>
+</section>
+
+{# ── an import, before anything is written ── #}
+{% if import_plan %}
+{%- set c = import_plan.counts -%}
+<section class="card" id="import">
+  <h2>Import — what it would change <span class="hint">nothing written yet</span></h2>
+  <div class="job-counts">
+    <span class="count-pill answered-count">New <b>{{ c.new }}</b></span>
+    <span class="count-pill waiting-count">Updated <b>{{ c.updated }}</b></span>
+    <span class="count-pill">Already the same <b>{{ c.same }}</b></span>
+    <span class="count-pill failed-count">With a problem <b>{{ c.error }}</b></span>
+  </div>
+  <div class="table-wrap">
+  <table class="library-table">
+    <thead><tr><th class="n">Line</th><th>Kind</th><th>Name</th><th>Command</th><th>Change</th><th></th></tr></thead>
+    <tbody>
+      {% for r in import_plan.rows %}
+      <tr>
+        <td class="n dim">{{ r.line }}</td>
+        <td class="dim">{{ r.kind }}</td>
+        <td>{{ r.name or '—' }}</td>
+        <td class="mono small">{{ r.command[:28] }}{% if r.command | length > 28 %}…{% endif %}</td>
+        <td><span class="pill pill-change-{{ r.action }}">{{ {'new': 'new', 'update': 'update', 'same': 'same', 'error': 'problem'}[r.action] }}</span></td>
+        <td class="dim small">{{ r.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <form method="post" action="/cota/commands/import/apply" class="form-actions import-apply">
+    <textarea name="content" hidden>{{ import_content }}</textarea>
+    {% if c.new or c.updated %}
+    <button type="submit" class="btn-icon">{{ icon('upload') }}<span>Apply — {{ c.new }} new, {{ c.updated }} updated</span></button>
+    {% else %}
+    <span class="hint">Nothing to change — everything in the file is already here.</span>
+    {% endif %}
+    <a class="tool-btn" href="/cota/commands">{{ icon('x') }}<span>Cancel</span></a>
+  </form>
+</section>
+{% endif %}
+
+{# ── parameter names: one name, every GET / SET / CLR of it ── #}
+<section class="card" id="parameters">
+  <div class="list-head">
+    <h2>Parameter names <span class="hint">{{ count(params_total, params_all) }} · the four hex digits after D7, named once and read everywhere</span></h2>
+    <button type="button" class="btn-primary btn-icon" data-fold="param-form">{{ icon('plus') }}<span>Add</span></button>
+  </div>
+  <div class="fold" id="param-form" {{ '' if pf else 'hidden' }}>
     <form method="post" action="/cota/commands/parameters" class="stack-form">
       <div class="field-row param-row">
         <label>Code
           <input type="text" name="code" class="mono" maxlength="4" required placeholder="6C0A"
-                 pattern="[0-9A-Fa-f]{4}" title="Four hex digits" id="param-code"></label>
+                 pattern="[0-9A-Fa-f]{4}" title="Four hex digits" id="param-code" value="{{ pf.get('code', '') }}"></label>
         <label>Name
-          <input type="text" name="name" required placeholder="e.g. TIMERS" id="param-name"></label>
+          <input type="text" name="name" required placeholder="e.g. TIMERS" id="param-name" value="{{ pf.get('name', '') }}"></label>
       </div>
       <div class="form-actions"><button type="submit" class="btn-icon">{{ icon('tag') }}<span>Save name</span></button>
+        <button type="button" class="tool-btn" data-fold="param-form">{{ icon('x') }}<span>Close</span></button>
         <span class="hint">DAD76C0A then reads as GET <em>name</em>, DBD76C0A… as SET <em>name</em>.</span></div>
     </form>
-    <table class="library-table">
-      <thead><tr><th>Code</th><th>Name</th><th>Reads as</th><th></th></tr></thead>
-      <tbody>
-        {% for p in parameters %}
-        <tr>
-          <td class="mono">{{ p.code }}</td>
-          <td>{{ p.name }}{% if p.builtin and not p.own %} <span class="pill">built-in</span>{% elif p.builtin %} <span class="hint">was {{ p.builtin }}</span>{% endif %}</td>
-          <td class="dim small reads-cell">GET / SET / CLR {{ p.name }}</td>
-          <td class="row-actions">
-            <button type="button" class="link-btn btn-icon" data-fill-code="{{ p.code }}" data-fill-name="{{ p.name }}"
-                    title="Rename">{{ icon('edit') }}<span>Rename</span></button>
-            {% if p.own %}
-            <form method="post" action="/cota/commands/parameters/{{ p.code }}/delete" class="inline-form"
-                  data-name="{{ p.code }}"
-                  onsubmit="return confirm('Remove your name for ' + this.dataset.name + '?')">
-              <button type="submit" class="link-btn btn-icon" title="Remove your name">{{ icon('trash') }}<span>{{ 'Reset' if p.builtin else 'Remove' }}</span></button>
-            </form>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </section>
+  </div>
+  {% if parameters %}
+  <div class="table-wrap">
+  <table class="library-table">
+    <thead><tr><th class="n">S.No.</th><th>Code</th><th>Name</th><th class="n">Used by</th><th>Reads as</th><th></th></tr></thead>
+    <tbody>
+      {% for p in parameters %}
+      <tr>
+        <td class="n dim">{{ p_first + loop.index }}</td>
+        <td class="mono">{{ p.code }}</td>
+        <td>{{ p.name }}{% if p.builtin and not p.own %} <span class="pill">built-in</span>{% elif p.builtin %} <span class="hint">was {{ p.builtin }}</span>{% endif %}</td>
+        <td class="n {{ 'dim' if not p.used_by }}">{{ p.used_by }}</td>
+        <td class="dim small reads-cell">GET / SET / CLR {{ p.name }}</td>
+        <td class="row-actions">
+          <button type="button" class="link-btn btn-icon" data-fill-code="{{ p.code }}" data-fill-name="{{ p.name }}"
+                  title="Rename">{{ icon('edit') }}<span>Rename</span></button>
+          {% if p.own %}
+          <form method="post" action="/cota/commands/parameters/{{ p.code }}/delete" class="inline-form"
+                data-name="{{ p.code }}"
+                onsubmit="return confirm('Remove your name for ' + this.dataset.name + '?')">
+            <button type="submit" class="link-btn btn-icon" title="Remove your name">{{ icon('trash') }}<span>{{ 'Reset' if p.builtin else 'Remove' }}</span></button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {{ pager(ppage, ppages, params_total, psize, sizes, p_base, 'ppage', 'psize') }}
+  {% else %}
+  <p class="hint">{{ 'No parameter name matches.' if q else 'No parameter names yet.' }}</p>
+  {% endif %}
+</section>
 
-  {# ── saved commands: a whole command under a name, with tags ── #}
-  <section class="card" id="saved">
-    <h2>{{ 'Edit command' if f.get('id') else 'Save a command' }} <span class="hint">pick it in Configure and Jobs instead of typing it</span></h2>
+{# ── saved commands: a whole command under a name, with tags ── #}
+<section class="card" id="saved">
+  <div class="list-head">
+    <h2>Saved commands <span class="hint">{{ count(saved_total, saved_all) }} · picked in Configure and Jobs instead of typed</span></h2>
+    <button type="button" class="btn-primary btn-icon" data-fold="cmd-form">{{ icon('plus') }}<span>Add</span></button>
+  </div>
+  <div class="fold" id="cmd-form" {{ '' if f else 'hidden' }}>
     <form method="post" action="/cota/commands/saved" class="stack-form">
       {% if f.get('id') %}<input type="hidden" name="command_id" value="{{ f.id }}">{% endif %}
-      <label>Name
-        <input type="text" name="name" required value="{{ f.get('name', '') }}" placeholder="e.g. Ignition timer 1 s"></label>
-      <label>Command
-        <input type="text" name="val1" class="mono" required spellcheck="false" id="saved-val1"
-               value="{{ f.get('val1', '') }}" placeholder="DBD76B82D531"></label>
+      <div class="field-row">
+        <label>Name
+          <input type="text" name="name" required value="{{ f.get('name', '') }}" placeholder="e.g. Ignition timer 1 s"></label>
+        <label>Command
+          <input type="text" name="val1" class="mono" required spellcheck="false" id="saved-val1"
+                 value="{{ f.get('val1', '') }}" placeholder="DBD76B82D531"></label>
+      </div>
       <div class="field-hint" id="saved-reads">{% if f.get('reads_as') %}Reads as {{ f.reads_as }}{% endif %}</div>
-      <label>Tags
-        <input type="text" name="tags" value="{{ f.get('tags', '') }}" placeholder="comma separated — e.g. timers, pilot"></label>
-      <label>Note
-        <input type="text" name="note" value="{{ f.get('note', '') }}" placeholder="optional — what it does, and when to use it"></label>
+      <div class="field-row">
+        <label>Tags
+          <input type="text" name="tags" value="{{ f.get('tags', '') }}" placeholder="comma separated — e.g. timers, pilot"></label>
+        <label>Note
+          <input type="text" name="note" value="{{ f.get('note', '') }}" placeholder="optional — what it does, and when to use it"></label>
+      </div>
       <div class="form-actions">
         <button type="submit" class="btn-icon">{{ icon('book') }}<span>{{ 'Save changes' if f.get('id') else 'Save command' }}</span></button>
-        {% if f.get('id') %}<a class="tool-btn" href="/cota/commands#saved">{{ icon('x') }}<span>Cancel</span></a>{% endif %}
+        {% if f.get('id') %}<a class="tool-btn" href="/cota/commands#saved">{{ icon('x') }}<span>Cancel</span></a>
+        {% else %}<button type="button" class="tool-btn" data-fold="cmd-form">{{ icon('x') }}<span>Close</span></button>{% endif %}
       </div>
     </form>
-  </section>
-</div>
-
-<section class="card">
-  <div class="page-toolbar">
-    <h2 class="toolbar-title">Saved commands <span class="hint">{{ saved_total | comma }}</span></h2>
-    {% if tags %}
-    <span class="job-filters">
-      <a href="/cota/commands?q={{ q | urlencode }}#saved" class="{{ 'on' if not tag }}">All</a>
-      {% for t in tags %}<a href="/cota/commands?tag={{ t | urlencode }}&q={{ q | urlencode }}#saved" class="{{ 'on' if tag == t }}">{{ t }}</a>{% endfor %}
-    </span>
-    {% endif %}
-    <form method="get" action="/cota/commands" class="inline-search">
-      <input type="hidden" name="tag" value="{{ tag }}">
-      <input type="text" name="q" value="{{ q }}" placeholder="Name, hex, tag or note" aria-label="Search saved commands">
-      <button type="submit">Search</button>
-    </form>
   </div>
+  {% if tags %}
+  <div class="job-filters library-tags">
+    <a href="/cota/commands?{{ {'q': q} | urlencode }}#saved" class="{{ 'on' if not tag }}">All</a>
+    {% for t in tags %}<a href="/cota/commands?{{ {'q': q, 'tag': t} | urlencode }}#saved" class="{{ 'on' if tag == t }}">{{ t }}</a>{% endfor %}
+  </div>
+  {% endif %}
   {% if saved %}
+  <div class="table-wrap">
   <table class="library-table">
-    <thead><tr><th>Name</th><th>Command</th><th>Reads as</th><th>Tags</th><th>Note</th><th></th></tr></thead>
+    <thead><tr><th class="n">S.No.</th><th>Name</th><th>Command</th><th>Type</th><th>Reads as</th><th>Tags</th><th>Note</th><th></th></tr></thead>
     <tbody>
       {% for c in saved %}
       <tr>
+        <td class="n dim">{{ c_first + loop.index }}</td>
         <td><strong>{{ c.name }}</strong></td>
-        <td class="mono small">{{ c.val1[:28] }}{% if c.val1 | length > 28 %}…{% endif %}</td>
-        <td><span class="pill pill-kind-{{ c.kind }}">{{ {'get': 'GET', 'set': 'SET', 'clear': 'CLR'}.get(c.kind, '?') }}</span>
-          <span class="dim small">{{ c.reads_as }}</span></td>
+        <td class="mono small" title="{{ c.val1 }}">{{ c.val1[:28] }}{% if c.val1 | length > 28 %}…{% endif %}</td>
+        <td><span class="pill pill-kind-{{ c.kind }}">{{ {'get': 'GET', 'set': 'SET', 'clear': 'CLR'}.get(c.kind, '?') }}</span></td>
+        <td class="dim small">{{ c.reads_as }}</td>
         <td>{% for t in c.tag_list %}<span class="tag-chip">{{ t }}</span>{% endfor %}</td>
         <td class="dim small">{{ c.note }}</td>
         <td class="row-actions">
+          <a class="link-btn btn-icon" href="/cota/jobs/new?{{ {'commands': c.val1} | urlencode }}" title="A new job with this command">{{ icon('send') }}<span>New job</span></a>
           <a class="link-btn btn-icon" href="/cota/commands?edit={{ c.id }}#saved" title="Edit">{{ icon('edit') }}<span>Edit</span></a>
           <form method="post" action="/cota/commands/saved/{{ c.id }}/delete" class="inline-form"
                 data-name="{{ c.name }}"
@@ -108,21 +194,36 @@
       {% endfor %}
     </tbody>
   </table>
-  {% elif saved_total %}
+  </div>
+  {{ pager(cpage, cpages, saved_total, csize, sizes, c_base, 'cpage', 'csize') }}
+  {% elif saved_all %}
   <p class="hint">No saved command matches.</p>
   {% else %}
-  <p class="hint">No saved commands yet — save one above, and it can be picked in Configure and Jobs.</p>
+  <p class="hint">No saved commands yet — <strong>Add</strong> one, or <strong>Import</strong> a colleague's library.</p>
   {% endif %}
 </section>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Rename fills the form above rather than opening a second one; the command box says what the
-// command reads as, from the same naming the rest of the app uses.
+// The add forms stay folded until asked for; Rename opens the parameter form filled in; the
+// command box says what the command reads as, from the same naming the rest of the app uses.
 (function () {
+  function openFold(id, open) {
+    var fold = document.getElementById(id);
+    if (!fold) return;
+    fold.hidden = open === undefined ? !fold.hidden : !open;
+    if (!fold.hidden) {
+      var first = fold.querySelector('input:not([type=hidden])');
+      if (first) first.focus();
+    }
+  }
+  document.querySelectorAll('[data-fold]').forEach(function (b) {
+    b.addEventListener('click', function () { openFold(b.getAttribute('data-fold')); });
+  });
   document.querySelectorAll('[data-fill-code]').forEach(function (b) {
     b.addEventListener('click', function () {
+      openFold('param-form', true);
       document.getElementById('param-code').value = b.getAttribute('data-fill-code');
       var name = document.getElementById('param-name');
       name.value = b.getAttribute('data-fill-name'); name.focus(); name.select();

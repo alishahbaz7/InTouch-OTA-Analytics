@@ -2031,8 +2031,9 @@ def test_a_job_shows_tiles_and_pictures_instead_of_pills(client, cloud, no_job_t
     for label in ("Answered", "Waiting for devices", "Failed", "Expired", "Not sent yet"):
         assert f'<div class="tile-label">{label}</div>' in body
     assert 'class="stack stack-big"' in body
-    assert "Time to answer <span>from the first attempt" in body and "No answers yet." in body
-    assert "Answered on attempt" in body
+    # The time-to-answer and answered-on-attempt pictures were taken out at the user's request;
+    # the same figures stay per command in the summary.
+    assert "Answered on attempt" not in body and "First try" in body
 
 
 def test_by_command_is_now_the_command_summary(client, cloud, no_job_threads):
@@ -2065,3 +2066,131 @@ def test_each_device_says_what_happens_next_and_when(client, cloud, no_job_threa
         conn.execute("UPDATE cota_campaign SET state = 'paused'")
     paused = client.get("/cota/jobs/1/status").json()["html"]
     assert '<span class="dim">paused</span>' in paused and "next-what" not in paused
+
+
+def _source_state(body):
+    """{source: (greyed, field disabled)} for the three device sources on the New job form."""
+    out = {}
+    for key, tag in (("group", "<select"), ("ids", "<textarea"), ("csv", '<input type="file"')):
+        head = re.search(r'<div class="source-option([^"]*)" data-source="%s">' % key, body)
+        field = re.search(re.escape(tag) + r"[^>]*>", body[head.end():]).group(0)
+        out[key] = ("is-off" in head.group(1), " disabled" in field)
+    return out
+
+
+def test_a_new_job_takes_devices_from_one_source_at_a_time(client, cloud, no_job_threads):
+    blank = client.get("/cota/jobs/new").text
+    assert _source_state(blank) == {"group": (False, False), "ids": (False, False), "csv": (False, False)}
+    client.post("/cota/groups", data={"name": "Desk", "devices": "14906, 786"})
+    gid = db.connect().execute("SELECT id FROM cota_group").fetchone()[0]
+    by_group = client.post("/cota/jobs/preview", data={"group_id": str(gid), "commands": "DAD76F4B"}).text
+    assert _source_state(by_group) == {"group": (False, False), "ids": (True, True), "csv": (True, True)}
+    by_ids = client.post("/cota/jobs/preview", data={"devices": "786", "commands": "DAD76F4B"}).text
+    assert _source_state(by_ids) == {"group": (True, True), "ids": (False, False), "csv": (True, True)}
+    assert re.search(r'data-clear="ids"\s*>Clear', by_ids)          # Clear shows on the one in use
+
+
+# ─── Commands: search, paging, folds, sharing (2.0.1) ───────────────────────
+
+def _save(client, name, val1, tags=""):
+    return client.post("/cota/commands/saved", data={"name": name, "val1": val1, "tags": tags},
+                       follow_redirects=False)
+
+
+def test_the_library_is_searched_counted_and_numbered(client, cota_env):
+    for n, v in (("Read FTP", "DAD76F4B"), ("SOS off", "DDD76D66"), ("Timers", "DAD76C0A")):
+        _save(client, n, v)
+    body = re.sub(r"\s+", " ", client.get("/cota/commands").text)
+    assert 'name="q"' in body and "Saved commands <span class=\"hint\">3 ·" in body
+    found = re.sub(r"\s+", " ", client.get("/cota/commands?q=sos").text)
+    assert "1 of 3 ·" in found and "SOS off" in found and "Read FTP" not in found
+    assert re.search(r'<td class="n dim">1</td> <td><strong>SOS off', found)    # S.No.
+
+
+def test_the_library_pages_at_5_20_or_50(client, cota_env):
+    for i in range(25):
+        _save(client, f"Cmd {i:02d}", "DAD76F4B")
+    flat = lambda path: re.sub(r"\s+", " ", client.get(path).text)
+    first = flat("/cota/commands")
+    assert "1–20 of <strong>25</strong>" in first and "Cmd 19" in first and "Cmd 20" not in first
+    second = flat("/cota/commands?cpage=2")
+    assert "21–25 of <strong>25</strong>" in second and '<td class="n dim">21</td>' in second
+    assert "21–25 of <strong>25</strong>" in flat("/cota/commands?csize=5&cpage=5")
+    assert "1–20 of <strong>25</strong>" in flat("/cota/commands?csize=7")      # not a size: 20
+
+
+def test_the_add_forms_stay_folded_until_asked_for(client, cota_env):
+    body = client.get("/cota/commands").text
+    assert re.search(r'<div class="fold" id="param-form"\s+hidden>', body)
+    assert re.search(r'<div class="fold" id="cmd-form"\s+hidden>', body)
+    _save(client, "Read FTP", "DAD76F4B")
+    cid = db.connect().execute("SELECT id FROM cota_saved_command").fetchone()[0]
+    editing = client.get(f"/cota/commands?edit={cid}").text
+    assert re.search(r'<div class="fold" id="cmd-form"\s+>', editing)         # open, filled in
+
+
+def test_saving_a_command_already_saved_under_another_name_says_so(client, cota_env):
+    _save(client, "SOS off", "DDD76D66")
+    reply = _save(client, "Clear SOS", "DDD76D66")
+    body = client.get(reply.headers["location"]).text
+    assert "Saved “Clear SOS”. The same command is also saved as “SOS off”." in body
+
+
+def test_the_library_exports_and_imports_through_a_preview(client, cota_env):
+    _save(client, "Read FTP", "DAD76F4B", "read")
+    client.post("/cota/commands/parameters", data={"code": "6C0A", "name": "TIMERS"})
+    exported = client.get("/cota/commands/export.csv")
+    assert exported.status_code == 200 and "cota_commands" in exported.headers["content-disposition"]
+    text = exported.content.decode("utf-8-sig")
+    assert text.splitlines()[0] == "kind,name,command,tags,note" and "command,Read FTP,DAD76F4B,read," in text
+    assert client.get("/cota/commands/template.csv").content.decode("utf-8-sig").startswith("kind,name,command")
+
+    upload = ("kind,name,command,tags,note\ncommand,SOS off,DDD76D66,alarm,\n"
+              "command,Read FTP,DAD76F4B,read,\n")
+    preview = client.post("/cota/commands/import",
+                          files={"file": ("lib.csv", upload.encode(), "text/csv")}).text
+    assert "Import — what it would change" in preview and "Apply — 1 new, 0 updated" in preview
+    assert db.connect().execute("SELECT COUNT(*) FROM cota_saved_command").fetchone()[0] == 1
+    content = re.search(r'<textarea name="content" hidden>(.*?)</textarea>', preview, re.S).group(1)
+    done = client.post("/cota/commands/import/apply", data={"content": html.unescape(content)},
+                       follow_redirects=False)
+    assert done.headers["location"] == "/cota/commands?imported=1,0,1,0"
+    assert "Imported: 1 new, 0 updated, 1 already the same." in client.get(done.headers["location"]).text
+    assert db.connect().execute("SELECT COUNT(*) FROM cota_saved_command").fetchone()[0] == 2
+
+
+def test_an_import_without_a_file_or_the_columns_says_why(client, cota_env):
+    assert "Choose a file to import" in client.post("/cota/commands/import", data={}).text
+    bad = client.post("/cota/commands/import", files={"file": ("x.csv", b"a,b\n1,2\n", "text/csv")}).text
+    assert "kind, name and command" in bad
+
+
+def test_a_saved_command_starts_a_new_job(client, cota_env):
+    _save(client, "Read FTP", "DAD76F4B")
+    assert 'href="/cota/jobs/new?commands=DAD76F4B"' in client.get("/cota/commands").text
+    new = client.get("/cota/jobs/new?commands=DAD76F4B").text
+    assert re.search(r'id="job-commands"[^>]*>DAD76F4B</textarea>', new)
+
+
+def test_a_long_library_gets_a_filter_in_the_picker(client, cota_env):
+    for i in range(9):
+        _save(client, f"Cmd {i}", "DAD76F4B")
+    assert "data-library-filter" in client.get("/cota/jobs/new").text
+
+
+
+def test_the_stylesheet_url_changes_when_the_stylesheet_does(client, monkeypatch, tmp_path):
+    """Versioned by the app version alone, the URL stayed the same through a day of style
+    changes and the browser kept its old copy: new parts of pages came out unstyled."""
+    from ota_analytics import api
+
+    first = api.static_version()
+    css = tmp_path / "static" / "app.css"
+    css.parent.mkdir()
+    css.write_text("body {}", encoding="utf-8")
+    monkeypatch.setattr(api, "WEB", tmp_path)
+    import os
+    os.utime(css, (1_800_000_000, 1_800_000_000))
+    assert api.static_version().endswith(".1800000000") and api.static_version() != first
+    monkeypatch.undo()
+    assert f'app.css?v={api.static_version()}"' in client.get("/cota").text

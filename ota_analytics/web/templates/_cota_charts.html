@@ -24,15 +24,6 @@
 </div>
 {%- endmacro -%}
 
-{%- macro legend(segments, total) -%}
-<ul class="chart-legend">
-  {%- for s in segments %}
-  <li><i class="swatch swatch-{{ s.tone }}"></i><span>{{ s.label }}</span>
-    <b>{{ '{:,}'.format(s.value) }}</b>{% if total %}<em>{{ '%.0f' % (s.value / total * 100) }}%</em>{% endif %}</li>
-  {%- endfor %}
-</ul>
-{%- endmacro -%}
-
 {#- Columns with their count on top. series: [{label, value, current?}]. `every` thins the axis
     labels on a long series (24 hours) without dropping a bar. -#}
 {%- macro column_chart(series, aria, width=460, height=170, every=1) -%}

@@ -16,6 +16,8 @@ shows the built-in name for a moment — never a wrong one.
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 
 from . import cota, cota_run
@@ -35,7 +37,10 @@ def refresh(conn) -> None:
     """Load the names into memory for describe_command. Two small tables; cheap."""
     global _loaded_from
     parameters = {r["code"]: r["name"] for r in conn.execute("SELECT code, name FROM cota_parameter")}
-    commands = {r["val1"]: r["name"] for r in conn.execute("SELECT val1, name FROM cota_saved_command")}
+    # Two saved names for one command: the first saved names it everywhere — newest read first,
+    # so the oldest is the one left standing. Not whichever row the database returned last.
+    commands = {r["val1"]: r["name"] for r in conn.execute(
+        "SELECT val1, name FROM cota_saved_command ORDER BY id DESC")}
     cota.LIBRARY = {"parameters": parameters, "commands": commands}
     _loaded_from = _database_of(conn)
 
@@ -53,16 +58,24 @@ def _database_of(conn) -> str:
 
 # ── parameters ──────────────────────────────────────────────────────────────────────────────
 
-def parameters(conn) -> list[dict]:
-    """The user's names and the built-ins they have not renamed, by code."""
+def parameters(conn, *, q: str = "") -> list[dict]:
+    """The user's names and the built-ins they have not renamed, by code — each with how many
+    saved commands use it, so a rename says what it will affect."""
     mine = {r["code"]: dict(r) for r in conn.execute(
         "SELECT code, name, updated_at FROM cota_parameter")}
+    used: dict[str, int] = {}
+    for (value,) in conn.execute("SELECT val1 FROM cota_saved_command"):
+        if len(value) >= 8 and value[2:4] == "D7":
+            used[value[4:8]] = used.get(value[4:8], 0) + 1
     rows = []
     for code in sorted(set(mine) | set(cota.COMMAND_PARAMETERS)):
         own = mine.get(code)
         rows.append({"code": code, "name": own["name"] if own else cota.COMMAND_PARAMETERS[code],
                      "builtin": cota.COMMAND_PARAMETERS.get(code), "own": bool(own),
-                     "updated_at": own["updated_at"] if own else ""})
+                     "updated_at": own["updated_at"] if own else "", "used_by": used.get(code, 0)})
+    if q.strip():
+        needle = q.strip().lower()
+        rows = [r for r in rows if needle in r["code"].lower() or needle in r["name"].lower()]
     return rows
 
 
@@ -114,8 +127,23 @@ def commands(conn, *, q: str = "", tag: str = "") -> list[dict]:
     if q.strip():
         needle = q.strip().lower()
         rows = [r for r in rows if needle in r["name"].lower() or needle in r["val1"].lower()
-                or needle in r["note"].lower() or any(needle in t.lower() for t in r["tag_list"])]
+                or needle in r["note"].lower() or needle in r["reads_as"].lower()
+                or any(needle in t.lower() for t in r["tag_list"])]
+    # Grouped by what they do — how a command is looked for — then by name.
+    rows.sort(key=lambda r: (_KIND_ORDER.get(r["kind"], 9), r["name"].lower()))
     return rows
+
+
+_KIND_ORDER = {"get": 0, "set": 1, "clear": 2, "unknown": 3}
+
+
+def same_command(conn, val1: str, command_id: int | None = None) -> list[str]:
+    """Other saved commands with exactly this value — said when saving, not refused: two names
+    for one command can be on purpose."""
+    value = "".join((val1 or "").split()).upper()
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM cota_saved_command WHERE val1 = ? AND id IS NOT ? ORDER BY name",
+        (value, command_id))]
 
 
 def all_tags(conn) -> list[str]:
@@ -182,3 +210,109 @@ def describe_lines(text: str) -> list[dict]:
                     "problem": step["problem"] or "",
                     "name": "" if step["problem"] else (cota.describe_command(step["val1"]) or "")})
     return out
+
+
+# ── sharing: one CSV for both kinds ───────────────────────────────────────────────────────────
+# A file a colleague can open in Excel, and load into their own install. Import only adds and
+# updates — it never deletes — so loading someone's file cannot wipe your own names.
+
+CSV_COLUMNS = ["kind", "name", "command", "tags", "note"]
+TEMPLATE_CSV = ("kind,name,command,tags,note\n"
+                "parameter,TIMERS,6C0A,,\n"
+                "command,Read FTP settings,DAD76F4B,read,What the device sends its files to\n"
+                "command,Clear SOS,DDD76D66,alarm,\n")
+_KINDS = {"parameter": "parameter", "param": "parameter", "command": "command", "cmd": "command"}
+
+
+def export_rows(conn) -> list[dict]:
+    """Your parameter names (built-ins only when you renamed them) and every saved command."""
+    rows = [{"kind": "parameter", "name": r["name"], "command": r["code"], "tags": "", "note": ""}
+            for r in conn.execute("SELECT code, name FROM cota_parameter ORDER BY code")]
+    rows += [{"kind": "command", "name": c["name"], "command": c["val1"], "tags": c["tags"],
+              "note": c["note"]} for c in commands(conn)]
+    return rows
+
+
+def export_csv(conn) -> str:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(export_rows(conn))
+    return buffer.getvalue()
+
+
+def plan_import(conn, content: bytes) -> dict:
+    """Read a shared file and say what it would change, row by row — nothing is written. Each
+    row: new, update (what differs), same, or a problem with its line number."""
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {"rows": [], "error": "Not a text file — export a CSV from Commands, or start "
+                                     "from the template."}
+    reader = csv.DictReader(io.StringIO(text))
+    header = [h.strip().lower() for h in (reader.fieldnames or [])]
+    missing = [c for c in ("kind", "name", "command") if c not in header]
+    if missing:
+        return {"rows": [], "error": "The first line must name the columns kind, name and command "
+                                     f"(missing: {', '.join(missing)}) — see the template."}
+    params = {r["code"]: r["name"] for r in conn.execute("SELECT code, name FROM cota_parameter")}
+    saved = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM cota_saved_command")}
+    rows = []
+    for line, raw in enumerate(reader, start=2):
+        row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
+        if not any(row.get(c) for c in CSV_COLUMNS):
+            continue                                    # a blank line
+        kind = _KINDS.get(row.get("kind", "").lower())
+        name, value = row.get("name", ""), "".join(row.get("command", "").split()).upper()
+        entry = {"line": line, "kind": kind or row.get("kind", ""), "name": name, "command": value,
+                 "tags": clean_tags(row.get("tags", "")), "note": row.get("note", ""),
+                 "action": "error", "detail": ""}
+        if not kind:
+            entry["detail"] = "kind must be parameter or command"
+        elif not name:
+            entry["detail"] = "no name"
+        elif kind == "parameter":
+            if not _CODE.match(value):
+                entry["detail"] = "a parameter code is four hex digits, e.g. 6C0A"
+            elif value not in params:
+                entry["action"] = "new"
+            elif params[value] == name:
+                entry["action"] = "same"
+            else:
+                entry.update(action="update", detail=f"was “{params[value]}”")
+        else:
+            _, problem = cota_run.classify(value)
+            if problem or not _HEX.match(value):
+                entry["detail"] = problem or "the command must be hexadecimal"
+            elif name not in saved:
+                entry["action"] = "new"
+            else:
+                old = saved[name]
+                changes = [what for what, a, b in (("command", old["val1"], value),
+                                                   ("tags", old["tags"], entry["tags"]),
+                                                   ("note", old["note"], entry["note"])) if a != b]
+                entry.update(action="update" if changes else "same",
+                             detail=("changes " + ", ".join(changes)) if changes else "")
+        rows.append(entry)
+    # "updated", not "update": a key named like a dict method is read as the method in Jinja.
+    counts = {"new": 0, "updated": 0, "same": 0, "error": 0}
+    for r in rows:
+        counts["updated" if r["action"] == "update" else r["action"]] += 1
+    return {"rows": rows, "counts": counts, "error": "" if rows else "The file has no rows."}
+
+
+def apply_import(conn, content: bytes) -> dict:
+    """Apply what plan_import said, rows with a problem left out. Read again from the same
+    bytes, so what is applied is exactly what was previewed."""
+    planned = plan_import(conn, content)
+    saved_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM cota_saved_command")}
+    for r in planned["rows"]:
+        if r["action"] not in ("new", "update"):
+            continue
+        if r["kind"] == "parameter":
+            save_parameter(conn, r["command"], r["name"])
+        else:
+            save_command(conn, name=r["name"], val1=r["command"], tags=r["tags"], note=r["note"],
+                         command_id=saved_ids.get(r["name"]))
+    refresh(conn)
+    return planned.get("counts", {})

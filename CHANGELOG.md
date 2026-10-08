@@ -5,7 +5,74 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
-## 2.0.1 — in development
+## 2.0.2 — in development
+
+Built on 2.0.1 from the user's review of the Commands page and the job page (08 Oct 2026).
+
+### Commands: laid out for a growing library
+
+- **One search** across both tables — names, codes, commands, tags and notes. While searching,
+  each table says how many of its rows match ("1 of 3").
+- **A total and an S.No. column** on both tables; the numbers carry on across pages.
+- **Paging at 5, 20 or 50 rows**, with the dashboard's own pager; each table pages on its own,
+  and keeps the search and the other table's place.
+- **The add forms stay folded** under an *Add* button until wanted; *Rename* and *Edit* open
+  them filled in. The tables are the page.
+- **Grouped by what a command does** — GET, SET, CLR — then by name. Each parameter says how many
+  saved commands use it, so a rename says what it will affect. Each saved command has a **New
+  job** action that opens a job with it on the first line.
+- **Saving a command already saved under another name says so.** Two names can be on purpose, so
+  it is not refused. Where one command has two names, the first saved names it everywhere — it
+  used to be whichever row the database returned last.
+
+### Sharing a library: export and import
+
+- **Export** writes the whole library as one CSV — `kind, name, command, tags, note` — for both
+  parameter names and saved commands, so it opens in Excel and can be sent to a colleague. A
+  **template** shows the format.
+- **Import** reads such a file and first shows, row by row, what it would do: *new*, *update*
+  (and what changes), *same*, or a *problem* with its line number. Nothing is written until
+  *Apply*, and an import never deletes — loading someone's file cannot wipe your own names.
+- The *From library* picker in New job and Configure is taller, has a scrollbar that can be seen
+  on the dark theme, and gets a filter once there are more than eight saved commands. Past six
+  commands the list had looked cut off.
+
+### A job takes its devices from one source
+
+A saved group, typed ids or a CSV: whichever is used, the other two grey out and are not sent;
+*Clear* empties it and brings them back. Before, all three were open at once and the server
+quietly picked one (CSV, then group, then ids). The page is right on its return from a preview
+as well, not only while typing.
+
+### The job page, leaner
+
+The time-to-answer chart and the answered-on-attempt bar under the tiles are gone, at the
+user's request. The same figures are per command in the Command summary (*First try*, *Time to
+answer*) and per device in the device table. They had first been drawn as a column chart that
+scaled with its card and filled half a wide screen, then as compact bars — which the user saw
+unstyled (next section), and asked to have removed.
+
+### The stylesheet reaches the browser when it changes
+
+Its URL was versioned by the app version — `app.css?v=2.0.1` — so it stayed the same through a
+day of style changes on one version, and the browser kept the copy it had. New parts of pages
+came out unstyled: bars as plain text ("< 30 s 5"), while every screenshot from a fresh browser
+looked right. The URL now carries the file's own time as well (`api.static_version`), so a
+changed stylesheet is fetched on the next page load.
+
+A test now also checks that every rule in the stylesheet is whole. Removing the retired chart
+styles line by line left half of a two-line rule behind, which the browser reads as the start of
+a selector — silently dropping the rule after it.
+
+### Fixed
+
+- The import preview's *Apply* button read "<built-in method update…>": its counts used the key
+  `update`, and in Jinja a key named like a dict method is read as the method. Now `updated`,
+  and CLAUDE.md lists the names to avoid.
+
+---
+
+## 2.0.1 — 2026-10-07
 
 Built on 2.0.0 after the first live jobs (06–07 Oct 2026).
 

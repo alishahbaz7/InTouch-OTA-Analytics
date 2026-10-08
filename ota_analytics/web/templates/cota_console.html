@@ -18,6 +18,7 @@
   <details class="dropdown library-pick">
     <summary class="tool-btn" title="Pick a saved command">{{ icon('book') }}<span>Library</span></summary>
     <div class="dropdown-panel library-panel library-up">
+      {% if library | length > 8 %}<input type="search" class="library-filter" placeholder="Filter {{ library | length }} commands" aria-label="Filter saved commands" data-library-filter>{% endif %}
       {% for c in library %}
       <button type="button" class="dropdown-item" data-library="{{ target }}" data-val1="{{ c.val1 }}">
         <span>{{ c.name }}</span><em class="mono">{{ c.val1[:18] }}{% if c.val1 | length > 18 %}…{% endif %}</em>
@@ -441,6 +442,15 @@ document.querySelectorAll('.dt-field').forEach(function (field) {
     if (preview) preview.textContent = JSON.stringify(body);
   }
   form.addEventListener('input', draw);
+  // Past eight saved commands the picker gets a filter.
+  document.querySelectorAll('[data-library-filter]').forEach(function (input) {
+    input.addEventListener('input', function () {
+      var needle = input.value.trim().toLowerCase();
+      input.parentNode.querySelectorAll('[data-library]').forEach(function (b) {
+        b.hidden = needle && b.textContent.toLowerCase().indexOf(needle) === -1;
+      });
+    });
+  });
   // A saved command from the library: fills the one-command box, or adds a line to a sequence.
   document.querySelectorAll('[data-library]').forEach(function (b) {
     b.addEventListener('click', function () {

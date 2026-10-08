@@ -2,7 +2,7 @@
    each of which can unfold to its own conversation. Rendered with the page and again by
    /cota/jobs/<id>/status while the job runs. #}
 {% from "_icons.html" import icon %}
-{% from "_cota_charts.html" import took, outcome_bar, legend, column_chart %}
+{% from "_cota_charts.html" import took, outcome_bar %}
 {%- macro ticks(stage, stages) -%}
   {%- if stage == 'failed' %}<span class="tick tick-failed" title="{{ stages.failed }}">✗</span>
   {%- elif stage == 'accepted' %}<span class="tick tick-accepted" title="{{ stages.accepted }}">✓</span>
@@ -65,30 +65,6 @@
     </div>
   </div>
 
-  <div class="chart-grid">
-    <figure class="chart-card">
-      <figcaption>Time to answer <span>from the first attempt · {{ charts.timed | comma }} answer{{ '' if charts.timed == 1 else 's' }}</span></figcaption>
-      {% if charts.timed %}
-      {{ column_chart(charts.answer_times, 'Answers by time from the first attempt') }}
-      <p class="chart-note">Typical {{ took(charts.median_answer) }} · slowest {{ took(charts.slowest_answer) }} ·
-        resend after {{ took(job.answer_wait) }}</p>
-      {% else %}
-      <p class="chart-empty">No answers yet.</p>
-      {% endif %}
-    </figure>
-    <figure class="chart-card">
-      {%- set tried = charts.attempts | sum(attribute='value') %}
-      <figcaption>Answered on attempt <span>which attempt the answer came on</span></figcaption>
-      {% if tried %}
-      {{ outcome_bar(charts.attempts, tried, big=true) }}
-      {{ legend(charts.attempts, tried) }}
-      <p class="chart-note">Most answers on a later attempt means devices answer slower than the
-        resend — set a longer answer wait for the next job.</p>
-      {% else %}
-      <p class="chart-empty">No answers yet.</p>
-      {% endif %}
-    </figure>
-  </div>
 </section>
 
 <section class="card">

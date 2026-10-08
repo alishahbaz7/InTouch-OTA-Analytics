@@ -169,6 +169,19 @@ templates.env.globals["nav_state"] = nav.state
 templates.env.globals["nav_icons"] = nav.ICONS
 
 
+def static_version(name: str = "app.css") -> str:
+    """The stylesheet's version in its URL: the app version plus the file's own time. By app
+    version alone it stayed `?v=2.0.1` through a day of style changes, the browser kept the copy
+    it had, and new parts of a page came out unstyled — plain text where bars should be."""
+    try:
+        return f"{__version__}.{int((WEB / 'static' / name).stat().st_mtime)}"
+    except OSError:
+        return __version__
+
+
+templates.env.globals["static_version"] = static_version
+
+
 def _relative_age(timestamp: str | None) -> str:
     """'4 min ago' — how fresh the data is, which is what people actually want to know."""
     if not timestamp:
@@ -609,12 +622,14 @@ def cota_jobs(request: Request):
 
 
 @app.get("/cota/jobs/new", response_class=HTMLResponse)
-def cota_job_new(request: Request, source: int = Query(0, alias="from"), which: str = "all"):
-    """A new job — blank, or filled from an earlier one (Duplicate, Rerun). Declared before
-    /cota/jobs/{job_id}, which would otherwise claim "new" and refuse it as not a number."""
+def cota_job_new(request: Request, source: int = Query(0, alias="from"), which: str = "all",
+                 commands: str = ""):
+    """A new job — blank, filled from an earlier one (Duplicate, Rerun), or started from a saved
+    command (Commands → New job). Declared before /cota/jobs/{job_id}, which would otherwise
+    claim "new" and refuse it as not a number."""
     conn = get_conn()
     draft = cota_campaign.draft_from(conn, source, which if which == "unfinished" else "all") \
-        if source else None
+        if source else ({"commands": commands[:5000]} if commands.strip() else None)
     return templates.TemplateResponse(request, "cota_job_new.html",
                                       _new_job_context(conn, request, draft=draft))
 
@@ -860,19 +875,65 @@ def cota_groups_delete(request: Request, group_id: int):
 
 # ─── Intouch COTA: the command library ──────────────────────────────────────
 
+LIBRARY_PAGE_SIZES = (5, 20, 50)
+
+
+def _paged(rows: list, page: int, size: int) -> tuple[list, int, int, int]:
+    """One page of a list, the page and size actually used, and the page count."""
+    size = size if size in LIBRARY_PAGE_SIZES else 20
+    pages = max(1, -(-len(rows) // size))
+    page = min(max(1, page), pages)
+    return rows[(page - 1) * size: page * size], page, size, pages
+
+
 def _commands_context(conn, request: Request, q: str = "", tag: str = "", edit: int = 0,
+                      ppage: int = 1, psize: int = 20, cpage: int = 1, csize: int = 20,
                       **extra) -> dict:
-    editing = next((c for c in cota_library.commands(conn) if c["id"] == edit), None) if edit else None
-    return _cota_context(conn, request, "commands", parameters=cota_library.parameters(conn),
-                         saved=cota_library.commands(conn, q=q, tag=tag),
-                         saved_total=conn.execute("SELECT COUNT(*) FROM cota_saved_command").fetchone()[0],
-                         tags=cota_library.all_tags(conn), q=q, tag=tag, editing=editing, **extra)
+    all_saved = cota_library.commands(conn)
+    editing = next((c for c in all_saved if c["id"] == edit), None) if edit else None
+    params = cota_library.parameters(conn, q=q)
+    saved = cota_library.commands(conn, q=q, tag=tag)
+    param_rows, ppage, psize, ppages = _paged(params, ppage, psize)
+    saved_rows, cpage, csize, cpages = _paged(saved, cpage, csize)
+    # Each pager carries the search and the other pager's place, so moving one keeps the rest.
+    keep = {"q": q, "tag": tag}
+    p_base = urlencode({**keep, "cpage": cpage, "csize": csize})
+    c_base = urlencode({**keep, "ppage": ppage, "psize": psize})
+    return _cota_context(conn, request, "commands",
+                         parameters=param_rows, params_total=len(params),
+                         params_all=len(cota_library.parameters(conn)),
+                         ppage=ppage, psize=psize, ppages=ppages, p_base=p_base,
+                         p_first=(ppage - 1) * psize,
+                         saved=saved_rows, saved_total=len(saved), saved_all=len(all_saved),
+                         cpage=cpage, csize=csize, cpages=cpages, c_base=c_base,
+                         c_first=(cpage - 1) * csize, sizes=LIBRARY_PAGE_SIZES,
+                         tags=cota_library.all_tags(conn), q=q, tag=tag, editing=editing,
+                         **extra)
 
 
 @app.get("/cota/commands", response_class=HTMLResponse)
-def cota_commands(request: Request, q: str = "", tag: str = "", edit: int = 0):
-    return templates.TemplateResponse(request, "cota_commands.html",
-                                      _commands_context(get_conn(), request, q, tag, edit))
+def cota_commands(request: Request, q: str = "", tag: str = "", edit: int = 0, ppage: int = 1,
+                  psize: int = 20, cpage: int = 1, csize: int = 20, saved: int = 0,
+                  imported: str = ""):
+    conn = get_conn()
+    result = None
+    if saved:
+        # After a save: say so, and say if the same command is also saved under another name —
+        # two names for one command can be on purpose, so it is said, not refused.
+        row = conn.execute("SELECT name, val1 FROM cota_saved_command WHERE id = ?", (saved,)).fetchone()
+        if row:
+            twins = cota_library.same_command(conn, row["val1"], saved)
+            result = {"level": "warn" if twins else "ok",
+                      "message": f"Saved “{row['name']}”." + (
+                          f" The same command is also saved as “{'”, “'.join(twins)}”." if twins else "")}
+    elif imported:
+        counts = dict(zip(("new", "updated", "same", "error"),
+                          (int(x) if x.isdigit() else 0 for x in (imported.split(",") + ["0"] * 4)[:4])))
+        result = {"level": "ok", "message": f"Imported: {counts['new']} new, {counts['updated']} "
+                  f"updated, {counts['same']} already the same" + (
+                      f", {counts['error']} left out with a problem." if counts["error"] else ".")}
+    return templates.TemplateResponse(request, "cota_commands.html", _commands_context(
+        conn, request, q, tag, edit, ppage, psize, cpage, csize, result=result))
 
 
 @app.post("/cota/commands/parameters", response_class=HTMLResponse)
@@ -882,10 +943,13 @@ def cota_commands_parameter(request: Request, code: str = Form(""), name: str = 
         saved = cota_library.save_parameter(conn, code, name)
         result = {"level": "ok", "message": f"{saved} is now “{name.strip()}” — every GET, SET "
                                             "and CLR of it reads by that name."}
+        draft = None
     except cota_library.LibraryError as exc:
         result = {"level": "error", "message": str(exc)}
+        draft = {"code": code, "name": name}
     return templates.TemplateResponse(request, "cota_commands.html",
-                                      _commands_context(conn, request, result=result))
+                                      _commands_context(conn, request, result=result,
+                                                        param_draft=draft))
 
 
 @app.post("/cota/commands/parameters/{code}/delete")
@@ -900,9 +964,9 @@ def cota_commands_save(request: Request, command_id: str = Form(""), name: str =
     conn = get_conn()
     editing = int(command_id) if command_id.isdigit() else None
     try:
-        cota_library.save_command(conn, name=name, val1=val1, tags=tags, note=note,
-                                  command_id=editing)
-        return RedirectResponse("/cota/commands#saved", status_code=303)
+        saved = cota_library.save_command(conn, name=name, val1=val1, tags=tags, note=note,
+                                          command_id=editing)
+        return RedirectResponse(f"/cota/commands?saved={saved}#saved", status_code=303)
     except cota_library.LibraryError as exc:
         draft = {"id": editing, "name": name, "val1": val1, "tags": tags, "note": note}
         return templates.TemplateResponse(request, "cota_commands.html", _commands_context(
@@ -913,6 +977,51 @@ def cota_commands_save(request: Request, command_id: str = Form(""), name: str =
 def cota_commands_delete(command_id: int):
     cota_library.delete_command(get_conn(), command_id)
     return RedirectResponse("/cota/commands#saved", status_code=303)
+
+
+@app.get("/cota/commands/export.csv")
+def cota_commands_export():
+    """The whole library as one CSV — to share with colleagues, and load into their install."""
+    body = "﻿" + cota_library.export_csv(get_conn())
+    return Response(content=body.encode("utf-8"), media_type=EXPORT_MEDIA["csv"], headers={
+        "Content-Disposition": f'attachment; filename="{exports.timestamped("cota_commands", "csv")}"'})
+
+
+@app.get("/cota/commands/template.csv")
+def cota_commands_template():
+    return Response(content=("﻿" + cota_library.TEMPLATE_CSV).encode("utf-8"),
+                    media_type=EXPORT_MEDIA["csv"],
+                    headers={"Content-Disposition": 'attachment; filename="cota_commands_template.csv"'})
+
+
+@app.post("/cota/commands/import", response_class=HTMLResponse)
+async def cota_commands_import(request: Request):
+    """Read a shared file and show what it would change. Nothing is written until Apply."""
+    form = await request.form()
+    upload = form.get("file")
+    content = await upload.read() if upload is not None and getattr(upload, "filename", "") else b""
+
+    def build():
+        conn = get_conn()
+        if not content:
+            return _commands_context(conn, request, result={
+                "level": "error", "message": "Choose a file to import — export one from Commands, "
+                                             "or start from the template."})
+        plan = cota_library.plan_import(conn, content)
+        if plan["error"]:
+            return _commands_context(conn, request, result={"level": "error", "message": plan["error"]})
+        return _commands_context(conn, request, import_plan=plan,
+                                 import_content=content.decode("utf-8-sig", errors="replace"))
+
+    ctx = await run_in_threadpool(build)
+    return templates.TemplateResponse(request, "cota_commands.html", ctx)
+
+
+@app.post("/cota/commands/import/apply")
+def cota_commands_import_apply(content: str = Form("")):
+    counts = cota_library.apply_import(get_conn(), content.encode("utf-8"))
+    done = ",".join(str(counts.get(k, 0)) for k in ("new", "updated", "same", "error"))
+    return RedirectResponse(f"/cota/commands?imported={done}", status_code=303)
 
 
 COTA_DEVICE_PAGE_SIZES = (25, 50, 100)
