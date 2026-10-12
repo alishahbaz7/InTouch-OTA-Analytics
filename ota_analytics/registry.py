@@ -368,19 +368,13 @@ FALLBACK_SORTS = {
 DEFAULT_FALLBACK_SORT = "when"
 
 
-def fallbacks(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
-              sort: str = DEFAULT_FALLBACK_SORT, min_times: int = 1,
-              model: str | None = None) -> list[dict]:
-    """Fallback occurrences, one row per occurrence.
+def _fallback_filter(min_times: int, model: str | None, since: str | None,
+                     until: str | None) -> tuple[str, list]:
+    """The list's filters, written once for the list, its count and its model chips.
 
-    `times` is how many times *that device* has fallen back in all of recorded history, not just
-    within this page — a device on its sixth fallback is a different problem from one on its
-    first, and the row has to say so wherever it is read.
-
-    `min_times=2` narrows to devices that have done it more than once: the same population the
-    repeat table summarizes, seen as individual occurrences rather than totals.
-    """
-    order = FALLBACK_SORTS.get(sort, FALLBACK_SORTS[DEFAULT_FALLBACK_SORT])
+    The period bounds the *occurrences* — when the fallback happened — so the list says what the
+    tile above it counts. Without it the Changes page showed "Fallbacks 6" for Today over a list
+    of 271 (09-10-2026): every fallback ever recorded."""
     extra, params = "", []
     if min_times > 1:
         extra += " AND fb.times >= ?"
@@ -388,6 +382,28 @@ def fallbacks(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
     if model:
         extra += " AND d.device_model = ?"
         params.append(model)
+    if since or until:
+        clause, bounds = _window_clause(since, until)
+        extra += " AND " + clause
+        params.extend(bounds)
+    return extra, params
+
+
+def fallbacks(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
+              sort: str = DEFAULT_FALLBACK_SORT, min_times: int = 1,
+              model: str | None = None, since: str | None = None,
+              until: str | None = None) -> list[dict]:
+    """Fallback occurrences, one row per occurrence, in a period when one is given.
+
+    `times` is how many times *that device* has fallen back in all of recorded history, not just
+    within this page or period — a device on its sixth fallback is a different problem from one
+    on its first, and the row has to say so wherever it is read.
+
+    `min_times=2` narrows to devices that have done it more than once: the same population the
+    repeat table summarizes, seen as individual occurrences rather than totals.
+    """
+    order = FALLBACK_SORTS.get(sort, FALLBACK_SORTS[DEFAULT_FALLBACK_SORT])
+    extra, params = _fallback_filter(min_times, model, since, until)
 
     rows = conn.execute(f"""
         SELECT c.imei, c.changed_at, c.old_value AS from_firmware, c.new_value AS to_firmware,
@@ -404,19 +420,14 @@ def fallbacks(conn: sqlite3.Connection, limit: int = 50, offset: int = 0,
 
 
 def fallback_count(conn: sqlite3.Connection, min_times: int = 1,
-                   model: str | None = None) -> int:
+                   model: str | None = None, since: str | None = None,
+                   until: str | None = None) -> int:
     """How many occurrences the current filter selects — what the pager has to count.
 
     Built from the same clauses `fallbacks()` uses, so the pager can never disagree with the
     number of rows the list actually returns.
     """
-    extra, params = "", []
-    if min_times > 1:
-        extra += " AND fb.times >= ?"
-        params.append(min_times)
-    if model:
-        extra += " AND d.device_model = ?"
-        params.append(model)
+    extra, params = _fallback_filter(min_times, model, since, until)
 
     return conn.execute(f"""
         SELECT COUNT(*)
@@ -426,13 +437,16 @@ def fallback_count(conn: sqlite3.Connection, min_times: int = 1,
     """, params).fetchone()[0]
 
 
-def fallback_models(conn: sqlite3.Connection) -> list[dict]:
-    """Models that have ever fallen back, for the filter — a pick-list beats typing a name."""
+def fallback_models(conn: sqlite3.Connection, since: str | None = None,
+                    until: str | None = None) -> list[dict]:
+    """Models that fell back in the period (ever, without one), for the filter — a pick-list
+    beats typing a name, and a chip for a model with nothing in the period would show nothing."""
+    clause, params = _window_clause(since, until)
     rows = conn.execute(f"""
         SELECT COALESCE(d.device_model, '(unknown)') AS label, COUNT(*) AS events
-        {FALLBACK_EVENT}
+        {FALLBACK_EVENT} AND {clause}
         GROUP BY d.device_model ORDER BY events DESC
-    """).fetchall()
+    """, params).fetchall()
     return [dict(r) for r in rows]
 
 

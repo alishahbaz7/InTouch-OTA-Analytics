@@ -373,14 +373,23 @@ JOIN snapshot s ON s.id = m.snapshot_id;
 
 -- The cloud addresses a device by its internal id, people by IMEI ("Device Unique No").
 -- The send call also needs the device type, so both come from here.
+-- v21: the Devices list. Keyed by the cloud's device id — a device can be added by its id alone,
+-- and its IMEI is learned later from the cloud's records (it was keyed by IMEI before, so a device
+-- without one could not be listed). Tags are set-up, like groups; the last job's name and
+-- status are copied here when the day's record is cleared, so the list still says them tomorrow.
 CREATE TABLE IF NOT EXISTS cota_device (
-  imei        TEXT PRIMARY KEY,
-  device_id   INTEGER NOT NULL,
-  device_type INTEGER NOT NULL,
-  source      TEXT,                 -- file the mapping was loaded from
-  updated_at  TEXT NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS ix_cota_device_id ON cota_device(device_id);
+  device_id       INTEGER PRIMARY KEY,
+  imei            TEXT,                 -- NULL until known
+  device_type     INTEGER NOT NULL,     -- the cloud's model number, sent with every command
+  tags            TEXT NOT NULL DEFAULT '',   -- comma separated, as cota_library.clean_tags writes
+  source          TEXT,                 -- added | device list | cloud record | group | …
+  added_at        TEXT,
+  updated_at      TEXT NOT NULL,
+  last_job_name   TEXT,
+  last_job_status TEXT,
+  last_job_at     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cota_device_imei ON cota_device(imei) WHERE imei IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS cota_job (
   id          INTEGER PRIMARY KEY,
@@ -495,7 +504,8 @@ CREATE TABLE IF NOT EXISTS cota_run_step (
   pending_task_id INTEGER,             -- sent, outcome not yet decided: a resume watches it again
   outcome         TEXT,
   started_at      TEXT,
-  finished_at     TEXT
+  finished_at     TEXT,
+  wait_after_seconds INTEGER NOT NULL DEFAULT 0   -- v22: pause after this command
 );
 CREATE INDEX IF NOT EXISTS ix_cota_run_step ON cota_run_step(run_id, seq);
 
@@ -513,6 +523,9 @@ CREATE TABLE IF NOT EXISTS cota_group_member (
   seq       INTEGER NOT NULL,                -- the order given: a job's canary is the first ones
   PRIMARY KEY (group_id, device_id)
 ) WITHOUT ROWID;
+-- v21: a device is in one group at a time (cota_fleet moves it). Not UNIQUE: devices put in two
+-- groups before the rule are resolved by a person on the Devices page, not by a migration.
+CREATE INDEX IF NOT EXISTS ix_group_member_device ON cota_group_member(device_id);
 
 -- A job: the commands, the devices, and the settings it runs with. Each device moves through the
 -- sequence on its own; a scheduler sends one command to every device ready for it in one call
@@ -538,6 +551,9 @@ CREATE TABLE IF NOT EXISTS cota_campaign (
                                              --      command sent before it, has no known time
   in_progress      INTEGER,                  -- v18: devices in progress at once; the rest wait
                                              --      'queued' in job order. NULL = all at once
+  paused_at        REAL,                     -- v20: epoch s, while paused — the clock is stopped
+  paused_seconds   REAL NOT NULL DEFAULT 0,  -- v20: time spent paused, added to the deadline
+  waits            TEXT,                     -- v22: JSON, the wait after each command (NULL: none)
   state            TEXT NOT NULL,            -- running | paused | done | cancelled
   control          TEXT,                     -- pause | cancel, asked by the page
   pause_reason     TEXT,
@@ -603,6 +619,7 @@ CREATE TABLE IF NOT EXISTS cota_saved_command (
   tags       TEXT NOT NULL DEFAULT '',         -- comma separated
   note       TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  wait_after_seconds INTEGER NOT NULL DEFAULT 0   -- v22: pause after it, before the next command
 );
 CREATE INDEX IF NOT EXISTS ix_cota_saved_command_val1 ON cota_saved_command(val1);

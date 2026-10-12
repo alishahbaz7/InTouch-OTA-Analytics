@@ -20,22 +20,31 @@
   {%- elif left < 3600 -%}in {{ left // 60 }}:{{ '%02d' % (left % 60) }}
   {%- else -%}in {{ left // 3600 }}:{{ '%02d' % (left % 3600 // 60) }}:{{ '%02d' % (left % 60) }}{%- endif -%}
 {%- endmacro -%}
+{#- A header that sorts the device table: the page reloads it in that order, filters kept. -#}
+{%- macro th_sort(key, label, cls='', tip='') -%}
+{%- set on = sort == key -%}
+{%- set next_dir = 'desc' if on and direction == 'asc' else 'asc' -%}
+<th class="sortable {{ cls }} {{ 'is-sorted' if on }}" aria-sort="{{ ('ascending' if direction == 'asc' else 'descending') if on else 'none' }}"
+    {%- if tip %} data-tip="{{ tip }}"{% endif %}>
+  <a href="/cota/jobs/{{ job.id }}?{{ {'state': state, 'q': q, 'sort': key, 'dir': next_dir} | urlencode }}">{{ label }}<span class="sort-ind {{ 'is-desc' if on and direction == 'desc' }}">{{ icon('chevron-down') }}</span></a></th>
+{%- endmacro -%}
 <span hidden id="job-clock" data-now="{{ now_epoch }}"></span>
 
 <section class="card">
   <h2><span data-tip="Each command, across every device in the job.">Command summary</span></h2>
   <div class="table-wrap">
-  <table class="job-grid">
-    <thead><tr><th>#</th><th>Command</th><th class="outcome-col">Outcome</th><th class="n">Answered</th>
-      <th class="n" title="Answered on the first attempt">First try</th>
-      <th class="n" title="From the first attempt to the answer — the middle device">Time to answer</th>
-      <th class="n">In flight</th><th class="n">Failed</th><th class="n">Expired</th>
-      <th class="n">Skipped</th><th class="n">Not sent yet</th></tr></thead>
+  <table class="job-grid data-grid">
+    <thead><tr><th class="fit">#</th><th>Command</th><th class="outcome-col fit">Outcome</th><th class="n fit">Answered</th>
+      <th class="n fit" data-tip="Answered on the first attempt">First try</th>
+      <th class="n fit" data-tip="From the first attempt to the answer — the middle device">Time to answer</th>
+      <th class="n fit">In progress</th><th class="n fit">Failed</th><th class="n fit">Expired</th>
+      <th class="n fit">Skipped</th><th class="n fit">Not sent yet</th></tr></thead>
     <tbody>
       {% for g in grid %}
       <tr>
         <td class="dim">{{ g.step + 1 }}</td>
-        <td><strong>{{ g.name }}</strong> <span class="mono dim small">{{ g.value[:16] }}{% if g.value | length > 16 %}…{% endif %}</span></td>
+        <td><strong>{{ g.name }}</strong> <span class="mono dim small">{{ g.value[:16] }}{% if g.value | length > 16 %}…{% endif %}</span>
+          {%- if job.wait_words[g.step] and not loop.last %} <span class="wait-chip" data-tip="Each device waits this long after this command before the next.">{{ icon('clock') }}{{ job.wait_words[g.step] }}</span>{% endif %}</td>
         <td class="outcome-col">{{ outcome_bar(g.segments, g.total) }}</td>
         <td class="n ok-text">{{ g.counts.get('done', 0) | comma }}</td>
         <td class="n">{{ g.first_attempt | comma }}</td>
@@ -58,26 +67,29 @@
     <span class="job-filters">
       {% for key, label in [('', 'All'), ('waiting', 'Waiting'), ('ready', 'Up next'), ('queued', 'In line'), ('done', 'Finished'),
                             ('failed', 'With a failure'), ('unreachable', 'Not reachable'), ('expired', 'Expired')] %}
-      <a href="/cota/jobs/{{ job.id }}?state={{ key }}&q={{ q | urlencode }}" class="{{ 'on' if state == key }}">{{ label }}</a>
+      <a href="/cota/jobs/{{ job.id }}?{{ {'state': key, 'q': q, 'sort': sort, 'dir': direction} | urlencode }}" class="{{ 'on' if state == key }}">{{ label }}</a>
       {% endfor %}
     </span>
     <form method="get" action="/cota/jobs/{{ job.id }}" class="inline-search">
       <input type="hidden" name="state" value="{{ state }}">
+      <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ direction }}">
       <input type="text" name="q" value="{{ q }}" placeholder="Device id" aria-label="Search devices">
       <button type="submit">Search</button>
     </form>
   </div>
   {% if devices %}
   {%- set total_steps = job.names | length -%}
-  <div class="table-wrap">
-  <table class="job-devices">
-    <thead><tr><th class="unfold-col"><span class="sr-only">Conversation</span></th>
-      <th class="n">S.No.</th><th class="n">Device ID</th><th>IMEI</th><th>State</th>
-      <th>Command</th><th class="n">Now at/Total</th><th class="n">Attempt</th>
-      <th title="What the job does next for this device, and when">Next</th>
-      <th class="n">Answered</th><th class="n">Failed</th>
-      <th class="n" title="From the first attempt to the answer — the middle of this device's commands">Time to answer</th>
-      <th>Last answer</th></tr></thead>
+  {#- A long list: it scrolls in its own frame, the header pinned (data-fit, base.html). -#}
+  <div class="table-wrap grid-scroll" data-fit data-fit-offset="215">
+  <table class="job-devices data-grid">
+    <thead><tr><th class="unfold-col fit"><span class="sr-only">Conversation</span></th>
+      {{ th_sort('serial', 'S.No.', 'n fit') }}{{ th_sort('id', 'Device ID', 'n fit') }}{{ th_sort('imei', 'IMEI', 'fit') }}
+      {{ th_sort('state', 'State', 'fit') }}{{ th_sort('command', 'Command', 'fit') }}
+      {{ th_sort('step', 'Now at/Total', 'n fit') }}{{ th_sort('attempt', 'Attempt', 'n fit') }}
+      <th class="fit" data-tip="What the job does next for this device, and when.">Next</th>
+      {{ th_sort('answered', 'Answered', 'n fit') }}{{ th_sort('failed', 'Failed', 'n fit') }}
+      {{ th_sort('time', 'Time to answer', 'n fit', "From the first attempt to the answer — the middle of this device's commands.") }}
+      {{ th_sort('last', 'Last answer') }}</tr></thead>
     <tbody>
       {% for dv in devices %}
       {%- set is_open = dv.device_id in opened -%}
@@ -125,10 +137,10 @@
                 <span class="dim">{{ s.step + 1 }}</span>
                 <strong>{{ s.name }}</strong>
                 <span class="mono dim small">{{ s.value[:24] }}{% if s.value | length > 24 %}…{% endif %}</span>
-                {#- A result stays 'queued' until it is judged: sent is in flight, unsent is not yet sent. -#}
-                <span class="pill pill-result-{{ s.state }}">{{ ('In flight' if s.attempts else 'Not sent yet') if s.state == 'queued' else words.get(s.state, s.state) }}</span>
-                {% if s.answered_attempt %}<span class="hint">attempt {{ s.answered_attempt }} carried the answer
-                  {%- if s.answer_seconds is not none %} · {{ took(s.answer_seconds) }} after attempt 1
+                {#- A result stays 'queued' until it is judged: sent is in progress, unsent is not yet sent. -#}
+                <span class="pill pill-result-{{ s.state }}">{{ ('In progress' if s.attempts else 'Not sent yet') if s.state == 'queued' else words.get(s.state, s.state) }}</span>
+                {% if s.answered_attempt %}<span class="hint"><span data-tip="Time to answer is counted from the first attempt.">answered on attempt {{ s.answered_attempt }}</span>
+                  {%- if s.answer_seconds is not none %} · {{ took(s.answer_seconds) }}
                   {%- else %} · <span data-tip="The job was paused while this command waited, so when the answer came is not known.">seen after a resume</span>{% endif %}</span>{% endif %}
               </div>
               {% if s.attempts %}
@@ -163,9 +175,9 @@
   </div>
   {% if pages > 1 %}
   <nav class="pager">
-    {% if page > 1 %}<a href="/cota/jobs/{{ job.id }}?state={{ state }}&q={{ q | urlencode }}&page={{ page - 1 }}">{{ icon('chevron-left') }}Previous</a>{% endif %}
+    {% if page > 1 %}<a href="/cota/jobs/{{ job.id }}?{{ view_query }}&page={{ page - 1 }}">{{ icon('chevron-left') }}Previous</a>{% endif %}
     <span class="pager-at">{{ page }} / {{ pages }}</span>
-    {% if page < pages %}<a href="/cota/jobs/{{ job.id }}?state={{ state }}&q={{ q | urlencode }}&page={{ page + 1 }}">Next{{ icon('chevron-right') }}</a>{% endif %}
+    {% if page < pages %}<a href="/cota/jobs/{{ job.id }}?{{ view_query }}&page={{ page + 1 }}">Next{{ icon('chevron-right') }}</a>{% endif %}
   </nav>
   {% endif %}
   {% else %}

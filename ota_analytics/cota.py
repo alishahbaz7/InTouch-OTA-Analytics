@@ -232,6 +232,34 @@ class MapResult:
     skipped: list[str] = field(default_factory=list)
 
 
+def put_device(conn, device_id: int, *, imei: str | None = None, device_type: int | None = None,
+               source: str = "added", imei_wins: bool = True) -> bool:
+    """Add a device to the Devices list, or fill in what is newly known about it; True when it
+    was new. The caller holds the transaction.
+
+    An IMEI from a person's own list (`imei_wins`) is current: it moves to this device from any
+    other. One from the cloud's records only fills a gap — what a person put there wins."""
+    now = _now()
+    row = conn.execute("SELECT imei FROM cota_device WHERE device_id = ?", (device_id,)).fetchone()
+    if imei:
+        holder = conn.execute("SELECT device_id FROM cota_device WHERE imei = ? AND device_id <> ?",
+                              (imei, device_id)).fetchone()
+        if holder and imei_wins:
+            conn.execute("UPDATE cota_device SET imei = NULL, updated_at = ? WHERE device_id = ?",
+                         (now, holder[0]))
+        elif holder or (row and row["imei"] and not imei_wins):
+            imei = None
+    if row:
+        conn.execute("UPDATE cota_device SET imei = COALESCE(?, imei), "
+                     "device_type = COALESCE(?, device_type), updated_at = ? WHERE device_id = ?",
+                     (imei, device_type, now, device_id))
+        return False
+    conn.execute("INSERT INTO cota_device (device_id, imei, device_type, source, added_at, updated_at) "
+                 "VALUES (?, ?, ?, ?, ?, ?)",
+                 (device_id, imei, device_type or DEFAULT_DEVICE_TYPE, source, now, now))
+    return True
+
+
 def import_device_map(conn, path: Path) -> MapResult:
     """Load IMEI → Device ID + Device Type from a sheet. Re-importing updates in place."""
     positions, rows = _read_sheet(path)
@@ -240,8 +268,6 @@ def import_device_map(conn, path: Path) -> MapResult:
     c_type = _column(positions, DEVICE_TYPE_HEADERS, "Device Type", path)
 
     result = MapResult()
-    now = _now()
-    known = {r[0] for r in conn.execute("SELECT imei FROM cota_device")}
     with conn:
         for number, row in enumerate(rows, start=2):
             imei = _imei(_cell(row, c_imei))
@@ -249,17 +275,11 @@ def import_device_map(conn, path: Path) -> MapResult:
             if not imei or device_id is None or device_type is None:
                 result.skipped.append(f"row {number}")
                 continue
-            conn.execute("""
-                INSERT INTO cota_device (imei, device_id, device_type, source, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(imei) DO UPDATE SET device_id = excluded.device_id,
-                    device_type = excluded.device_type, source = excluded.source,
-                    updated_at = excluded.updated_at
-            """, (imei, device_id, device_type, Path(path).name, now))
-            if imei in known:
-                result.updated += 1
-            else:
+            if put_device(conn, device_id, imei=imei, device_type=device_type,
+                          source=Path(path).name):
                 result.added += 1
+            else:
+                result.updated += 1
                 known.add(imei)
     return result
 
@@ -340,8 +360,8 @@ def plan(conn, path: Path, max_per_call: int = MAX_DEVICES_PER_CALL) -> Plan:
     the first sheet row they contain, so a device given two commands receives them in sheet order.
     """
     tasks, problems, duplicates = read_commands(path)
-    mapping = {r["imei"]: (r["device_id"], r["device_type"])
-               for r in conn.execute("SELECT imei, device_id, device_type FROM cota_device")}
+    mapping = {r["imei"]: (r["device_id"], r["device_type"]) for r in conn.execute(
+        "SELECT imei, device_id, device_type FROM cota_device WHERE imei IS NOT NULL")}
 
     groups: dict[tuple, list[PlannedTask]] = {}
     for task in tasks:
@@ -770,10 +790,14 @@ def device_type_for(conn, device_id: int) -> int | None:
 
 
 def imei_for(conn, device_id: int) -> str | None:
-    """From the device map — which the console also fills itself, from the cloud's records."""
-    row = conn.execute("SELECT imei FROM cota_device WHERE device_id = ? LIMIT 1",
-                       (device_id,)).fetchone()
-    return row["imei"] if row else None
+    """From the device map — which fills itself from the cloud's records — or, until it has,
+    from the newest cloud record for the device, which names its IMEI."""
+    row = conn.execute("SELECT imei FROM cota_device WHERE device_id = ?", (device_id,)).fetchone()
+    if row and row["imei"]:
+        return row["imei"]
+    rec = conn.execute("SELECT imei FROM cota_command WHERE device_id = ? AND imei <> '' "
+                       "ORDER BY last_seen_at DESC LIMIT 1", (device_id,)).fetchone()
+    return rec["imei"] if rec else None
 
 
 def console_send(conn, client, device_id: int, device_type: int, cmd_type: int,
@@ -1073,15 +1097,21 @@ def _match_records(conn, device_id: int) -> int:
 def _learn_imei(conn, device_id: int, imei: str) -> None:
     """Put the IMEI the cloud reported into the device map — unless the map already says
     something about this device or this IMEI, which a person put there and which wins."""
-    taken = conn.execute("SELECT 1 FROM cota_device WHERE device_id = ? OR imei = ?",
-                         (device_id, imei)).fetchone()
+    # A row whose device id is its own IMEI is a broken upload, not a person's entry: no cloud
+    # device id is an IMEI. The record knows the real id, so it repairs the row (08-10-2026).
     with conn:
-        if not taken:
-            conn.execute("""
-                INSERT INTO cota_device (imei, device_id, device_type, source, updated_at)
-                VALUES (?, ?, ?, 'cloud record', ?)
-            """, (imei, device_id, device_type_for(conn, device_id) or DEFAULT_DEVICE_TYPE,
-                  _now()))
+        conn.execute("""
+            UPDATE cota_device SET device_id = ?, source = 'cloud record', updated_at = ?
+            WHERE imei = ? AND CAST(device_id AS TEXT) = imei
+              AND NOT EXISTS (SELECT 1 FROM cota_device o WHERE o.device_id = ?)
+        """, (device_id, _now(), imei, device_id))
+    with conn:
+        # A device the cloud has records for is one of ours: listed, with its IMEI if nobody
+        # has said otherwise.
+        put_device(conn, device_id, imei=imei, source="cloud record", imei_wins=False,
+                   device_type=None if conn.execute("SELECT 1 FROM cota_device WHERE device_id = ?",
+                                                    (device_id,)).fetchone()
+                   else device_type_for(conn, device_id))
         # Commands sent before the IMEI was known get it too, so exports carry it.
         conn.execute("UPDATE cota_task SET imei = ? WHERE device_id = ? AND imei = ''",
                      (imei_for(conn, device_id) or imei, device_id))

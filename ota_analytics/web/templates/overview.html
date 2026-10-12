@@ -1,66 +1,44 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% import "_grid.html" as grid with context %}
+{% from "_icons.html" import icon %}
 {% block title %}Fleet Overview — OTA Analytics{% endblock %}
 
 {% block content %}
-{# One model selection drives every panel below. Empty = the whole fleet. A <details> dropdown
-   keeps it to a single line of chrome instead of an always-open list box. #}
+{# One model selection drives every panel below; empty means the whole fleet. The same list filter
+   as the Devices tables — every model with its count, All / None / Invert / Only. #}
 <div class="page-toolbar">
   <span class="hint">{{ kpis.devices_total | comma }} devices
-    {%- if selected_models %} in {{ selected_models | length }} of
-      {{ all_models | length }} models{% else %} · all models{% endif %}</span>
-
-  <details class="dropdown" id="model-picker">
-    <summary>
-      {%- if selected_models -%}
-        {{ selected_models[0] }}{% if selected_models | length > 1 %}
-          +{{ selected_models | length - 1 }}{% endif %}
-      {%- else -%}All models{%- endif -%}
-    </summary>
-    <form method="get" class="dropdown-panel">
-      <input type="hidden" name="window" value="{{ window }}">
-      <div class="dropdown-list">
-        {% for r in all_models %}
-        <label class="dropdown-item">
-          <input type="checkbox" name="model" value="{{ r.label }}"
-                 {{ 'checked' if r.label in selected_models }}>
-          <span>{{ r.label }}</span>
-          <em>{{ r.devices | comma }}</em>
-        </label>
-        {% endfor %}
-      </div>
-      <div class="dropdown-actions">
-        <a href="/?window={{ window }}">Clear</a>
-        <button type="submit">Apply</button>
-      </div>
-    </form>
-  </details>
+    {%- if selected_models %} in {{ selected_models | length }} of {{ all_models | length }} models{% endif %}</span>
+  <form method="get" id="model-form" class="toolbar-pick">
+    <input type="hidden" name="window" value="{{ window }}">
+    {% if viewing_history %}<input type="hidden" name="snapshot" value="{{ snapshot_id }}">{% endif %}
+    <span class="toolbar-label">Model</span>
+    {{ grid.pick('model', 'Model', model_choices.entries, model_choices.chosen, 'model-form') }}
+  </form>
 </div>
 
 <section class="card">
-  <h2>Last seen by hour
-    <span class="hint">past 24h · {{ hourly_total | comma }} devices ·
-      peak {{ hourly_peak.devices | comma }} at {{ hourly_peak.hour }}
-      {%- if hourly and hourly[-1].partial %} · final bar is a part-hour{% endif %}</span>
-  </h2>
+  <h2><span data-tip="Devices by the hour they last pinged, over the 24 hours before the snapshot. Peak {{ hourly_peak.devices | comma }} at {{ hourly_peak.hour }}.{% if hourly and hourly[-1].partial %} The final bar covers only part of an hour.{% endif %}">Last seen by hour</span>
+    <span class="hint">{{ hourly_total | comma }}</span></h2>
   {{ m.hour_chart(hourly) }}
 </section>
 
-{% set total = kpis.devices_total or 1 %}
-{% macro pct(n) %}{{ '%.1f%% of fleet' % (n / total * 100) }}{% endmacro %}
+{# Each tile leads with its share of the fleet and puts the count beside it (the user's order). #}
+{% set total = kpis.devices_total %}
 <div class="tiles">
   {{ m.tile('Total devices', kpis.devices_total | comma,
-            '%s online now (%.1f%%)' % (kpis.devices_online | comma, kpis.online_pct * 100)) }}
-  {{ m.tile('Task completed', kpis.devices_completed | comma,
-            pct(kpis.devices_completed), 'tone-green') }}
-  {{ m.tile('Task pending — Online', kpis.pending_reachable | comma,
-            pct(kpis.pending_reachable), 'tone-yellow') }}
-  {{ m.tile('Task pending — Offline', kpis.pending_waiting | comma,
-            pct(kpis.pending_waiting), 'tone-orange') }}
-  {{ m.tile('No pending task', kpis.devices_never_tasked | comma,
-            pct(kpis.devices_never_tasked), 'tone-white') }}
-  {{ m.tile('Offline more than 1 month', kpis.stale_30d | comma,
-            pct(kpis.stale_30d), 'tone-grey') }}
+            '%s online · %.0f%%' % (kpis.devices_online | comma, kpis.online_pct * 100), 'tone-white') }}
+  {{ m.tile('Task completed', kpis.devices_completed, tone='tone-green', total=total,
+            tip='Of the fleet.') }}
+  {{ m.tile('Task pending — Online', kpis.pending_reachable, tone='tone-yellow', total=total,
+            tip='Of the fleet: reachable within 24 hours and still not updated.') }}
+  {{ m.tile('Task pending — Offline', kpis.pending_waiting, tone='tone-orange', total=total,
+            tip='Of the fleet: parked until the device is switched on.') }}
+  {{ m.tile('No pending task', kpis.devices_never_tasked, tone='tone-white', total=total,
+            tip='Of the fleet: never targeted, which for an end-of-life model is correct.') }}
+  {{ m.tile('Offline over a month', kpis.stale_30d, tone='tone-grey', total=total,
+            tip='Of the fleet.') }}
 </div>
 
 <div class="glance-grid">
@@ -93,16 +71,16 @@
         <span class="arrow up">↑</span><span class="change-label">Firmware raised</span>
         <b>{{ change.upgrades | comma }}</b></a>
       <a class="change-row" href="{{ link }}"
-         title="Landed on the version it was told to install">
+         data-tip="Landed on the version it was told to install.">
         <span class="arrow down">↓</span><span class="change-label">Lowered — planned</span>
         <b>{{ change.planned_downgrades | comma }}</b></a>
       <a class="change-row {{ 'row-alert' if change.unplanned_downgrades }}" href="{{ link }}"
-         title="Went backwards with nothing targeting that version">
+         data-tip="Went backwards with nothing targeting that version.">
         <span class="arrow down">↓</span>
         <span class="change-label">Lowered — <strong>unplanned</strong></span>
         <b class="{{ 'alert-text' if change.unplanned_downgrades }}">{{ change.unplanned_downgrades | comma }}</b></a>
       <a class="change-row {{ 'row-alert' if change.fallbacks }}" href="{{ link }}"
-         title="Returned to its base firmware — the build it shipped with">
+         data-tip="Returned to its base firmware, the build it shipped with.">
         <span class="arrow down">↺</span><span class="change-label">Fell back to base</span>
         <b class="{{ 'alert-text' if change.fallbacks }}">{{ change.fallbacks | comma }}</b></a>
 
@@ -119,17 +97,17 @@
         <b>{{ kpis.devices_pending | comma }}</b></a>
     </div>
     {% if not change.moves %}
-    <p class="footnote">Nothing moved in {{ change.window_label | lower }}.</p>
+    <p class="empty-line">Nothing moved.</p>
     {% endif %}
   </section>
 </div>
 
 <div class="glance-grid">
   <section class="card">
-    <h2>Task status
-      <span class="hint">{{ kpis.devices_pending | comma }} pending ·
-        <a href="/pending{{ qs() }}">detail →</a></span>
-    </h2>
+    <div class="library-head">
+      <h2>Task status <span class="hint">{{ kpis.devices_pending | comma }} pending</span></h2>
+      <span class="library-actions"><a class="link-btn" href="/pending{{ qs() }}"><span>Pending</span>{{ icon('chevron-right') }}</a></span>
+    </div>
     {% set pending_total = kpis.devices_pending or 1 %}
     {% for b in pending %}
       {{ m.bar(b.label, b.devices, pending_total, b.tone) }}
@@ -137,9 +115,10 @@
   </section>
 
   <section class="card">
-    <h2>Last seen
-      <span class="hint">whole fleet · <a href="/reachability{{ qs() }}">detail →</a></span>
-    </h2>
+    <div class="library-head">
+      <h2>Last seen</h2>
+      <span class="library-actions"><a class="link-btn" href="/reachability{{ qs() }}"><span>Reachability</span>{{ icon('chevron-right') }}</a></span>
+    </div>
     {% for b in staleness %}
       {{ m.bar(b.bucket, b.devices, kpis.devices_total,
                'ok' if b.bucket == 'online now' else ('dim' if '90+' in b.bucket or b.bucket == 'never pinged' else 'neutral')) }}
@@ -148,8 +127,8 @@
 </div>
 
 <section class="card">
-  <h2>Task state by model
-    <span class="hint">every column is a link into the firmware view for that model</span></h2>
+  <h2><span data-tip="Each model links into the firmware view for that model.">Task state by model</span>
+    <span class="hint">{{ by_model | length }} models</span></h2>
   {# Grouped like the firmware table, and coloured like the tiles: the four task states are one
      subject, so they sit under one heading instead of reading as four unrelated columns. Each
      cell carries the colour its state has everywhere else, so the eye can find the yellow one —
@@ -165,22 +144,23 @@
 
      There is deliberately no Task figure under Devices — that number is Pending, and printing
      it twice under two headings would invite the reader to look for a difference. #}
-  <table class="grouped" id="model-states">
+  <div class="table-wrap grid-scroll">
+  <table class="grouped data-grid" id="model-states">
     <thead>
       <tr class="group-row">
-        <th rowspan="2">Model</th>
+        <th class="fit" rowspan="2">Model</th>
         <th class="n" colspan="2">Devices</th>
         <th class="n" colspan="3">Task state</th>
         <th class="n" colspan="3">Online</th>
         <th class="n" colspan="3">Offline</th>
-        <th class="n" rowspan="2">Activation-<br>Pending</th>
+        <th class="n fit" rowspan="2">Activation-<br>Pending</th>
         <th rowspan="2">Mix</th>
       </tr>
       <tr class="sub-row">
-        <th class="n">Count</th><th class="n">% of fleet</th>
-        <th class="n">Completed</th><th class="n">Pending</th><th class="n">No task</th>
-        <th class="n">Count</th><th class="n">% of model</th><th class="n">Task</th>
-        <th class="n">Count</th><th class="n">% of model</th><th class="n">Task</th>
+        <th class="n fit">Count</th><th class="n fit">% of fleet</th>
+        <th class="n fit">Completed</th><th class="n fit">Pending</th><th class="n fit">No task</th>
+        <th class="n fit">Count</th><th class="n fit">% of model</th><th class="n fit">Task</th>
+        <th class="n fit">Count</th><th class="n fit">% of model</th><th class="n fit">Task</th>
       </tr>
       <tr class="totals-row">
         <td>All models</td>
@@ -227,5 +207,6 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endblock %}

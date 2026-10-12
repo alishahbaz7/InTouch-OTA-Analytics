@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% from "_icons.html" import icon %}
+{% from "_cota_charts.html" import took, answer_hours, outcome_bar %}
+{% block title %}Overview — Intouch COTA{% endblock %}
+
+{% block content %}
+{% if not o %}
+<section class="card">
+  <h2>Today</h2>
+  <p class="hint">No commands sent today.</p>
+  <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
+</section>
+{% else %}
+{%- set hours_done = o.hours | selectattr('rate', 'ne', none) | list -%}
+{%- set best = (hours_done | sort(attribute='rate') | last) if hours_done else none -%}
+
+<section class="card">
+  <h2><span data-tip="Commands that finished in each hour today: answered in green, failed in red, the share answered above each column. The current hour is hatched — it is still filling. Point at a column for its figures.">Answer rate by hour</span></h2>
+  {{ answer_hours(o.hours) }}
+  <div class="chart-key">
+    <span class="chart-sum">{{ o.today.answered | comma }} answered · {{ o.today.failed | comma }} failed
+      {%- if best %} · best {{ best.rate }}% at {{ best.hour }}:00{% endif %}</span>
+    <span><i class="seg-ok"></i>Answered</span><span><i class="seg-bad"></i>Failed</span></div>
+</section>
+
+{% with t = o.today %}{% include "_cota_today_tiles.html" %}{% endwith %}
+
+<div class="glance-grid">
+  <section class="card">
+    <h2>Today at a glance</h2>
+    <div class="donuts donuts-stacked">
+      {{ m.donut('Commands', o.commands_donut, cap='commands') }}
+      {{ m.donut('Devices', o.devices_donut, cap='devices') }}
+    </div>
+  </section>
+
+  {%- set alerting = o.attention | selectattr('alert') | list %}
+  <section class="card {{ 'highlight' if alerting }}">
+    <h2>Needs attention <span class="hint">{{ alerting | length }}</span></h2>
+    <div class="change-rows">
+      {% for a in o.attention %}
+      {%- set tag = 'a' if a.href else 'div' %}
+      <{{ tag }} class="change-row {{ 'row-warn' if a.alert }}"{% if a.href %} href="{{ a.href }}"{% endif %}{% if a.tip %} data-tip="{{ a.tip }}"{% endif %}>
+        <span class="arrow">{{ a.icon }}</span>
+        <span class="change-label">{{ a.label }}{% if a.detail %} <span class="dim small">· {{ a.detail }}</span>{% endif %}</span>
+        <b class="{{ 'warn-text' if a.alert }}">{{ a.value | comma }}</b></{{ tag }}>
+      {% endfor %}
+      <div class="change-divider">Also today</div>
+      {% for a in o.also %}
+      {%- set tag = 'a' if a.href else 'div' %}
+      <{{ tag }} class="change-row"{% if a.href %} href="{{ a.href }}"{% endif %}>
+        <span class="arrow">{{ a.icon }}</span><span class="change-label">{{ a.label }}</span>
+        <b>{{ a.value | comma }}</b></{{ tag }}>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+
+{% if o.silent.online %}
+<section class="card highlight" id="online">
+  <h2><span data-tip="Never answered a command today, yet pinged the OTA platform in the last hour: powered and connected — the ones to chase.">Online but not answering</span>
+    <span class="hint">{{ o.silent.online | length }}</span></h2>
+  <div class="table-wrap">
+  <table class="data-grid">
+    <thead><tr><th class="n fit">Device ID</th><th class="fit">IMEI</th><th>Model</th><th class="fit">Firmware</th>
+      <th class="n fit">Last ping</th><th class="n fit">Failed today</th><th class="fit">Last sent</th><th class="fit"></th></tr></thead>
+    <tbody>
+      {% for d in o.silent.online %}
+      <tr>
+        <td class="n mono">{{ d.device_id }}</td>
+        <td class="mono">{{ d.imei }}</td>
+        <td>{{ d.model or '—' }}</td>
+        <td class="mono">{{ d.firmware or '—' }}</td>
+        <td class="n tone-yellow-text">{{ d.seen_minutes }} min ago</td>
+        <td class="n bad-text">{{ d.failed }}</td>
+        <td class="dim small">{{ (d.last_sent or '')[11:19] or '—' }}</td>
+        <td><a class="tool-btn btn-icon" href="/cota/console?device={{ d.device_id }}">{{ icon('message') }}<span>Configure</span></a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="card" id="commands">
+  <h2><span data-tip="Every command sent today, across all of today's jobs.">Commands today</span>
+    <span class="hint">{{ o.commands | length }}</span></h2>
+  <div class="table-wrap">
+  <table class="insight-commands data-grid">
+    <thead><tr><th class="unfold-col fit"></th><th>Command</th><th class="n fit">Devices</th><th class="fit">Outcome</th><th class="n fit">Answered</th>
+      <th class="n fit" data-tip="Of the answers, the share that came on the first attempt.">First try</th>
+      <th class="n fit">Typical</th><th class="n fit">Slowest</th><th class="fit">Main failure</th><th class="n fit">Wait</th>
+      <th class="fit" data-tip="Each command's answers by the firmware Web FOTA says the device runs. A build answering far less often than the command does overall is marked.">Firmware</th></tr></thead>
+    <tbody>
+      {% for c in o.commands %}
+      {%- set low = c.firmware | selectattr('low') | list %}
+      <tr class="fw-parent">
+        <td class="unfold-col"><button type="button" class="unfold-btn" data-fw-toggle="{{ loop.index }}"
+            aria-expanded="false" aria-label="Show {{ c.name }} by firmware">{{ icon('chevron-right') }}</button></td>
+        <td class="name-cell"><strong>{{ c.name }}</strong><div class="cmd-line mono">{{ c.value[:28] }}{% if c.value | length > 28 %}…{% endif %}</div></td>
+        <td class="n">{{ c.sent | comma }}</td>
+        <td class="outcome-col">{{ outcome_bar([{'label': 'Answered', 'value': c.answered, 'tone': 'ok'},
+                                                {'label': 'Failed', 'value': c.failed, 'tone': 'bad'}], c.sent) }}</td>
+        <td class="n"><strong>{{ c.answered_pct }}%</strong> <span class="dim">{{ c.answered | comma }}</span></td>
+        <td class="n">{{ (c.first_pct ~ '%') if c.first_pct is not none else '—' }}</td>
+        <td class="n {{ 'warn-text' if c.suggest_wait }}">{{ took(c.median) }}</td>
+        <td class="n dim">{{ took(c.slowest) }}</td>
+        <td class="dim">{% if c.main_failure %}{{ c.main_failure[0] }} <span class="small">· {{ c.main_failure[1] | comma }}</span>{% else %}—{% endif %}</td>
+        <td class="n">{% if c.suggest_wait %}<span class="pill pill-suggest" data-tip="Its typical answer takes {{ took(c.median) }}, longer than the {{ c.wait | int }} s wait, so most answers came only after a resend. A {{ c.suggest_wait }} s wait would catch them first time.">{{ c.wait | int }} s → {{ c.suggest_wait }} s</span>{% else %}<span class="dim">{{ c.wait | int }} s</span>{% endif %}</td>
+        <td>{{ c.firmware | length }} build{{ '' if c.firmware | length == 1 else 's' }}
+          {%- if low %} <span class="pill pill-warn">{{ low | length }} low</span>{% endif %}</td>
+      </tr>
+      <tr class="fw-detail" data-fw-for="{{ loop.index }}" hidden>
+        <td></td>
+        <td colspan="10">
+          <table class="fw-table data-grid">
+            <thead><tr><th>FW version</th><th class="n">Devices</th><th>Outcome</th><th class="n">Answered</th>
+              <th class="n">Failed</th><th class="n">Answer rate</th></tr></thead>
+            <tbody>
+              {% for f in c.firmware %}
+              <tr class="{{ 'row-alert' if f.low }}">
+                <td class="mono">{{ f.firmware or 'Not in Web FOTA' }}</td>
+                <td class="n">{{ f.sent | comma }}</td>
+                <td class="outcome-col">{{ outcome_bar([{'label': 'Answered', 'value': f.answered, 'tone': 'ok'},
+                                                        {'label': 'Failed', 'value': f.failed, 'tone': 'bad'}], f.sent) }}</td>
+                <td class="n">{{ f.answered | comma }}</td>
+                <td class="n {{ 'bad-text' if f.failed }}">{{ f.failed | comma }}</td>
+                <td class="n"><strong class="{{ 'bad-text' if f.low }}">{{ (f.pct ~ '%') if f.pct is not none else '—' }}</strong></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card" id="firmware">
+  <h2><span data-tip="Every device sent a command today, by its model and firmware in Web FOTA.">By firmware</span>
+    <span class="hint">{{ o.silent.firmware | length }}</span></h2>
+  <div class="table-wrap">
+  <table class="data-grid">
+    <thead><tr><th class="fit">Model</th><th class="fit">Firmware</th><th class="n fit">Devices</th><th>Answered</th>
+      <th class="n fit">Everything</th><th class="n fit">Some</th><th class="n fit">Nothing</th><th class="n fit">Answered any</th></tr></thead>
+    <tbody>
+      {% for f in o.silent.firmware %}
+      {%- set any = f.all + f.some %}
+      <tr class="{{ 'row-alert' if f.devices >= 2 and not any and f.none }}">
+        <td>{{ f.model }}</td>
+        <td class="mono">{{ f.firmware or '—' }}</td>
+        <td class="n">{{ f.devices | comma }}</td>
+        <td class="outcome-col">{{ outcome_bar([{'label': 'Answered everything', 'value': f.all, 'tone': 'ok'},
+                                                {'label': 'Answered some', 'value': f.some, 'tone': 'warn'},
+                                                {'label': 'Answered nothing', 'value': f.none, 'tone': 'neutral'}], f.devices) }}</td>
+        <td class="n">{{ f.all | comma }}</td>
+        <td class="n">{{ f.some | comma }}</td>
+        <td class="n {{ 'dim' if not f.none }}">{{ f.none | comma }}</td>
+        <td class="n"><strong>{{ '%.0f' % (any / f.devices * 100) if f.devices else 0 }}%</strong></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Commands today: a command unfolds into its answers by firmware.
+document.querySelectorAll('[data-fw-toggle]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var row = document.querySelector('[data-fw-for="' + b.getAttribute('data-fw-toggle') + '"]');
+    if (!row) return;
+    row.hidden = !row.hidden;
+    b.setAttribute('aria-expanded', row.hidden ? 'false' : 'true');
+    b.closest('tr').classList.toggle('is-open', !row.hidden);
+  });
+});
+</script>
+{% endblock %}

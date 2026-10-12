@@ -47,6 +47,37 @@ NOT_IN_CLOUD_SECONDS = 30           # the cloud lists a command within seconds o
 ANSWER_WAIT_SECONDS = 30            # per attempt — the user's rule (2026-10-07); was 120
 # After the device answered: the next command goes this soon (the user's rule, 2026-10-06).
 GAP_AFTER_ANSWER_SECONDS = 2
+
+# A wait after a command (the user, 10-10-2026): some commands take the device off the air for a
+# while — SET Force Sync Audio, a reboot — and the next one sent at once fails all three attempts.
+# The wait starts when the command ends, answered or not (an unanswered reboot may still have run).
+# Set on the saved command, changeable per job; a sequence uses the saved command's.
+WAIT_CHOICES = (0, 30, 60, 120, 180, 300, 600, 900, 1800)
+MAX_WAIT_SECONDS = 1800
+
+
+def parse_wait(text) -> int:
+    """Seconds from what a person typed or a file said: 180, "3m", "3 min", "90 s", "" → 0."""
+    import re as _re
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return 0
+    m = _re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?)?", raw)
+    if not m:
+        return 0
+    value = float(m.group(1)) * (60 if (m.group(2) or "s").startswith("m") else 1)
+    return int(max(0, min(MAX_WAIT_SECONDS, round(value))))
+
+
+def wait_words(seconds) -> str:
+    """'30 s', '3 min', '1 min 30 s' — or '' for none."""
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return ""
+    minutes, rest = divmod(seconds, 60)
+    if not minutes:
+        return f"{rest} s"
+    return f"{minutes} min" + (f" {rest} s" if rest else "")
 # Before resending, and before the next command after one that gave up. The 30 s answer wait is
 # already the gap (2026-10-07), so nothing is added; kept per kind so it can be put back.
 GUARD_SECONDS = {"get": 0, "set": 0, "clear": 0, "unknown": 0}
@@ -126,9 +157,13 @@ def create_run(conn, device_id: int, device_type: int, cmd_type: int, text: str)
             INSERT INTO cota_run (device_id, device_type, cmd_type, state, created_at)
             VALUES (?, ?, ?, 'running', ?)
         """, (device_id, device_type, cmd_type, _now())).lastrowid
+        # Each step keeps the wait its saved command carries, so a sequence pauses after a command
+        # that takes the device off the air, as a job does.
+        waits = cota.LIBRARY.get("waits", {})
         conn.executemany("""
-            INSERT INTO cota_run_step (run_id, seq, val1, kind, state) VALUES (?, ?, ?, ?, 'queued')
-        """, [(run_id, i, s["val1"], s["kind"]) for i, s in enumerate(steps, start=1)])
+            INSERT INTO cota_run_step (run_id, seq, val1, kind, state, wait_after_seconds)
+            VALUES (?, ?, ?, ?, 'queued', ?)
+        """, [(run_id, i, s["val1"], s["kind"], waits.get(s["val1"], 0)) for i, s in enumerate(steps, start=1)])
     return run_id
 
 
@@ -258,8 +293,8 @@ class Runner:
                 more = conn.execute("SELECT 1 FROM cota_run_step WHERE run_id = ? AND state = 'queued'",
                                     (self.run_id,)).fetchone()
                 if more:
-                    self._wait(GAP_AFTER_ANSWER_SECONDS if answered
-                               else GUARD_SECONDS.get(step["kind"], 0))
+                    gap = GAP_AFTER_ANSWER_SECONDS if answered else GUARD_SECONDS.get(step["kind"], 0)
+                    self._wait(max(gap, step["wait_after_seconds"] or 0))
             self._finish("done")
         except _Paused as why:
             with conn:

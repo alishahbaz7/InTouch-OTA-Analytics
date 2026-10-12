@@ -51,7 +51,7 @@ class CloudPreset:
 # `password`, the password sent as its MD5 hex digest — the same scheme as Web FOTA's login.
 PRESETS = {
     "intouch": CloudPreset(
-        "InTouch cloud — ctvms.mappls.com", cota.BASE_URL,
+        "CVTMS Cloud", cota.BASE_URL,
         login_url="https://ctvms.mappls.com/IntouchAdminApi/user/login",
         login_encoding="multipart", password_hash="md5",
         portal_url="https://ctvms.mappls.com/adminnextgen/#/login"),
@@ -264,8 +264,9 @@ def renew(conn: CotaConnection | None = None) -> bool:
 
 
 def sign_out(conn: CotaConnection) -> None:
+    """Drop the session — the token. A remembered password stays in the credential store, so the
+    next sign-in needs no typing (the user's call, 10-10-2026); forgetting it is its own action."""
     cota.forget_token()
-    forget_password(conn.username)
     conn.signed_in_at = ""
     conn.rejected_at, conn.rejected_status = "", 0
     save(conn)
@@ -303,6 +304,8 @@ def status(conn: CotaConnection | None = None) -> dict:
         "token_held": held,
         "token_from_env": from_env,
         "password_saved": bool(conn.username and load_password(conn.username)),
+        # A password from the environment cannot be forgotten from the page — it is set there.
+        "password_from_env": bool((os.environ.get(ENV_PASSWORD) or "").strip()),
         # A rejected token renews itself when this is true — the chip can say so.
         "renews": conn.method == "password" and bool(conn.username and load_password(conn.username))
                   and not from_env,

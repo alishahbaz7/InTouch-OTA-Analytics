@@ -213,7 +213,7 @@ and no login call has been captured yet. Until one is, the token is pasted in by
 | Tables (schema v10) | `cota_device`, `cota_job`, `cota_task`, `cota_poll` in `ota_analytics/schema.sql` | **In the repo** |
 | CLI | `cota …` subcommands in `ota_analytics/cli.py` | To do |
 | Tests | `tests/test_cota.py`, using a fake cloud that never touches the network | To do |
-| Dashboard | `/cota/console` (Configure: one device, send and see the reply), `/cota` (Jobs), `/cota/devices` (send one command, device map), `/cota/signin` | **Built in 2.0.0**: manual send goes through `manual_plan` → `create_job` → `send_job`, so it is recorded like a sheet job |
+| Dashboard | `/cota/overview`, `/cota/console` (Configure: one device, send and see the reply), `/cota` (Jobs), `/cota/commands`, `/cota/devices` (the Devices list: filters, groups, tags — `cota_fleet.py`), `/cota/signin` | **Built in 2.0.0–2.1.0**. The Devices page's one-command send was removed in 2.1.0 (Jobs and Configure cover it); `manual_plan` stays in `cota.py`, unused by the UI |
 
 Known cleanup in `cota.py`: a rejected token is detected by matching the message text
 (`"rejected the token" in str(exc)`). Give it its own exception class (`TokenRejected(CotaError)`)
@@ -222,7 +222,7 @@ and catch that instead.
 ### Data model
 
 ```
-cota_device  imei → device_id, device_type                (the map)
+cota_device  device_id → imei (NULL until known), device_type, tags, last job   (v21: the Devices list)
 cota_job     one row per job (name, source sheet, created_at)
 cota_task    one row per device × command
              state: planned → sent | send_failed;   unmapped (IMEI not in the map)
@@ -349,7 +349,7 @@ on `/cota/devices`.
 | Devices per send call | 200 — and never more | the user's rule, 2026-10-08: no call carries more than 200 devices, sends or checks |
 | Calls per second | 5 | sends and checks together; checks dominate (below) |
 | Wait for an answer, per attempt | 30 s | the user's rule (2026-10-07); then sent again, 3 attempts, then the next command |
-| Time limit for the whole job | 60 min | at the limit every device still in progress stops; replaced waiting 12 h for held commands |
+| Time limit for the whole job | its own max time | the longest it can take if no device answers (100 s a command at a 30 s wait) and a tenth more — confirmed before Start; type less to stop sooner. Must finish today; a pause stops the clock (10-10-2026, replacing a fixed 60 min) |
 | Canary | **off** (with the automatic stop) | was 1% of jobs over 20 devices, 1–20 |
 | Automatic stop | **off** — only 3 failed calls in a row, or an expired session, pause a job | the user's call, 2026-10-08 |
 
@@ -401,7 +401,8 @@ sends in the same job behaved the same. Readings still open: the device takes ~5
 each command (the leading one), or the cloud holds the newest command and hands it over when the
 device connects. 2.0.1 records which attempt carried each answer and the time from the first
 attempt (job page, export), and makes the answer wait a job setting. The same evening the user
-set the rule in the table above: 30 s per attempt, 3 attempts, held = no answer, and a time
+set the rule in the table above (and, since 10-10-2026, a command may carry a *wait after* it —
+Force Sync Audio, a reboot — before the next goes): 30 s per attempt, 3 attempts, held = no answer, and a time
 limit per job.
 
 **The command library (2.0.1):** the Commands page names parameters (`6C0A` → your name, for

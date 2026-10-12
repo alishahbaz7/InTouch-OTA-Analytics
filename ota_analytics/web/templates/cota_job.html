@@ -20,7 +20,11 @@
       time limit {{ job.time_limit | int }} min{% if job.live and job.deadline_clock %}, ends by {{ job.deadline_clock }} at the latest{% endif %}
     {%- endset %}
     <h2 data-tip="{{ settings | trim }}">#{{ job.id }} · {{ job.name }}</h2>
+    {%- if job.ended_by_limit %}
+    <span class="pill pill-job-limit" id="job-state">time limit</span>
+    {%- else %}
     <span class="pill pill-job-{{ job.state }}" id="job-state">{{ job.state }}</span>
+    {%- endif %}
     <span class="job-actions">
       <form method="post" action="/cota/jobs/{{ job.id }}/control" class="inline-form">
         {% if job.state == 'running' %}<button type="submit" name="action" value="pause" class="tool-btn">{{ icon('pause') }}<span>Pause</span></button>
@@ -29,6 +33,12 @@
                 data-confirm-action="Cancel job" data-name="#{{ job.id }} {{ job.name }}"
                 data-confirm="Cancel job {name}? Commands not sent yet are cancelled, and the job cannot be resumed.">{{ icon('x') }}<span>Cancel</span></button>{% endif %}
       </form>
+      {% if job.ended_by_limit %}
+      <a class="btn-primary btn-icon" href="/cota/jobs/new?from={{ job.id }}&which=rest"
+         data-tip="A new job for the devices its time limit stopped — mid-sequence or never started.">{{ icon('play') }}<span>Continue the rest — {{ job.unreached | comma }}</span></a>
+      {% endif %}
+      {% if job.live %}<button type="button" class="tool-btn notify-btn" id="notify-btn" hidden aria-pressed="false"
+              data-tip="A desktop notification when this job finishes, pauses or is cancelled — while this page is open.">{{ icon('bell') }}<span>Notify me</span></button>{% endif %}
       <a class="tool-btn" href="/cota/jobs/new?from={{ job.id }}" title="A new job with the same devices, commands and settings">{{ icon('copy') }}<span>Duplicate</span></a>
       {% if not job.live and job.results.get('done', 0) < job.total %}
       <a class="tool-btn" href="/cota/jobs/new?from={{ job.id }}&which=unfinished"
@@ -48,7 +58,7 @@
 </div>
 
 <div id="job-live" data-job="{{ job.id }}" data-state="{{ job.state }}"
-     data-query="state={{ state }}&q={{ q | urlencode }}&page={{ page }}">
+     data-query="{{ view_query }}&page={{ page }}">
   {% include "_cota_job_live.html" %}
 </div>
 {% endblock %}
@@ -68,11 +78,74 @@
   var title = bare.slice(dev.length);
   var timer = null;
   function url() { return base + '&open=' + Array.from(open).join(','); }
+
+  // Progress moves, it does not jump (the user, 10-10-2026): each bar segment glides from its
+  // old width to its new one, and each number marked data-tw counts to its new value. The
+  // running bar's stripes and sweep are phase-locked to the clock, so redrawing every 5 s does
+  // not restart them. Reduced motion: none of it.
+  var calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var progress = document.getElementById('job-progress');
+  function num(text) { return Number(String(text).replace(/,/g, '')); }
+  function countTo(el, from, to) {
+    var a = num(from), b = num(to);
+    if (!isFinite(a) || !isFinite(b) || a === b) return;
+    var places = (String(to).split('.')[1] || '').length, start = null;
+    function show(v) { return v.toLocaleString('en-US', { minimumFractionDigits: places, maximumFractionDigits: places }); }
+    function step(t) {
+      if (start === null) start = t;
+      var k = Math.min(1, (t - start) / 800);
+      k = 1 - Math.pow(1 - k, 3);
+      el.textContent = k < 1 ? show(a + (b - a) * k) : to;
+      if (k < 1) requestAnimationFrame(step);
+    }
+    el.textContent = show(a);
+    requestAnimationFrame(step);
+  }
+  function phase() {
+    var t = performance.now();
+    progress.querySelectorAll('.stack-big').forEach(function (bar) {
+      bar.style.setProperty('--flow-delay', -(t % 1000) + 'ms');
+      bar.style.setProperty('--sweep-delay', -(t % 2600) + 'ms');
+    });
+  }
+  function glide(widths, numbers) {
+    phase();
+    if (calm) return;
+    progress.querySelectorAll('.stack-big .stack-seg[data-key]').forEach(function (seg) {
+      var to = seg.style.width;
+      seg.style.transition = 'none';
+      seg.style.width = widths[seg.getAttribute('data-key')] || '0%';
+      void seg.offsetWidth;                         // the old width is drawn before the new one
+      seg.style.transition = '';
+      seg.style.width = to;
+    });
+    progress.querySelectorAll('[data-tw]').forEach(function (el) {
+      var key = el.getAttribute('data-tw');
+      countTo(el, key in numbers ? numbers[key] : '0', el.textContent);
+    });
+  }
+  function swapProgress(html) {
+    var widths = {}, numbers = {};
+    progress.querySelectorAll('.stack-big .stack-seg[data-key]').forEach(function (seg) {
+      widths[seg.getAttribute('data-key')] = seg.style.width;
+    });
+    progress.querySelectorAll('[data-tw]').forEach(function (el) {
+      numbers[el.getAttribute('data-tw')] = el.textContent;
+    });
+    progress.innerHTML = html;
+    glide(widths, numbers);
+  }
+  // Opening a running job: from nothing to where it is. A paused or finished one is drawn still.
+  if (progress.querySelector('.is-running')) { glide({}, {}); } else { phase(); }
+
   function redraw(then) {
     fetch(url(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok) return;
       live.innerHTML = d.html;
-      if (d.progress) document.getElementById('job-progress').innerHTML = d.progress;
+      if (window.resizableGrids) window.resizableGrids();
+      if (window.fitGrids) window.fitGrids();
+      if (d.progress) swapProgress(d.progress);
+      ring(d.state === 'running' ? d.percent : null);
       document.title = dev + (d.state === 'running' ? '(' + d.percent + '%) ' : '') + title;
       if (then) then(d);
     }).catch(function () {});
@@ -80,9 +153,66 @@
   function tick() {
     redraw(function (d) {
       if (d.state === 'running') { timer = setTimeout(tick, 5000); }
-      else { window.location.reload(); }
+      else { notifyEnd(d); setTimeout(function () { window.location.reload(); }, 400); }
     });
   }
+  // The tab shows how far a running job is: a ring drawn over the app's mark, so a job can be
+  // watched from another tab (the user, 10-10-2026). Finished or paused, the mark comes back.
+  var favicon = document.getElementById('favicon'), mark = favicon ? favicon.href : '';
+  function ring(pct) {
+    if (!favicon) return;
+    if (pct === null || pct === undefined) { favicon.href = mark; return; }
+    var c = document.createElement('canvas'); c.width = c.height = 64;
+    var g = c.getContext('2d'), a = Math.max(0, Math.min(100, pct)) / 100;
+    g.lineWidth = 9; g.lineCap = 'round';
+    g.strokeStyle = 'rgba(128,140,155,.45)'; g.beginPath(); g.arc(32, 32, 26, 0, Math.PI * 2); g.stroke();
+    g.strokeStyle = '#35c48a'; g.beginPath(); g.arc(32, 32, 26, -Math.PI / 2, -Math.PI / 2 + a * Math.PI * 2); g.stroke();
+    g.fillStyle = '#4d9dff'; g.beginPath(); g.arc(32, 32, 9, 0, Math.PI * 2); g.fill();
+    favicon.href = c.toDataURL('image/png');
+  }
+  if (live.getAttribute('data-state') === 'running') {
+    ring(Number((document.querySelector('[data-tw="pct"]') || {}).textContent) || 0);
+  }
+
+  // A desktop notification when the job ends — finished, paused or cancelled — if asked for here.
+  // The browser asks once; the choice is remembered (try/catch: private windows refuse storage).
+  var bell = document.getElementById('notify-btn');
+  function wanted() { try { return localStorage.getItem('ota-notify') !== '0'; } catch (e) { return true; } }
+  function drawBell() {
+    if (!bell) return;
+    var on = Notification.permission === 'granted' && wanted();
+    bell.setAttribute('aria-pressed', on ? 'true' : 'false');
+    bell.classList.toggle('is-on', on);
+    bell.disabled = Notification.permission === 'denied';
+    bell.querySelector('span').textContent = Notification.permission === 'denied' ? 'Notifications blocked'
+      : (on ? 'Notifications on' : 'Notify me');
+  }
+  if (bell && 'Notification' in window) {
+    bell.hidden = false; drawBell();
+    bell.addEventListener('click', function () {
+      if (Notification.permission === 'granted') {
+        try { localStorage.setItem('ota-notify', wanted() ? '0' : '1'); } catch (e) { /* not kept */ }
+        drawBell();
+      } else {
+        Notification.requestPermission().then(function () {
+          try { localStorage.setItem('ota-notify', '1'); } catch (e) { /* not kept */ }
+          drawBell();
+        });
+      }
+    });
+  }
+  function notifyEnd(d) {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !wanted()) return;
+    var said = { done: 'finished', paused: 'paused', cancelled: 'was cancelled' }[d.state] || d.state;
+    try {
+      new Notification('Job #' + live.getAttribute('data-job') + ' ' + said, {
+        body: d.name + ' — ' + d.answered.toLocaleString('en-US') + ' answered, ' +
+              d.failed.toLocaleString('en-US') + ' failed, of ' + d.total.toLocaleString('en-US') + ' device commands',
+        icon: mark, tag: 'cota-job-' + live.getAttribute('data-job')
+      });
+    } catch (e) { /* a browser without page notifications */ }
+  }
+
   live.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-unfold]');
     if (!btn) return;

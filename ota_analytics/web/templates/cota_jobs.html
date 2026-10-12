@@ -1,49 +1,18 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% from "_cota_charts.html" import took, outcome_bar, column_chart %}
+{% from "_cota_charts.html" import took, outcome_bar, answer_hours %}
 {% block title %}Jobs — Intouch COTA{% endblock %}
 
 {% block content %}
 {% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
 {% if live %}
-<div class="notice notice-warn">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }} —
-  <a href="/cota/jobs/{{ live.id }}">open it</a>. One job runs at a time.</div>
+<div class="notice notice-warn" data-tip="One job runs at a time.">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }}.
+  <a href="/cota/jobs/{{ live.id }}">Open it</a></div>
 {% endif %}
 
 {% if today %}
 {%- set t = today -%}
-{# Today at a glance — the COTA record holds only today, so this is every job there is. #}
-<div class="tiles">
-  <div class="tile tone-white">
-    <div class="tile-label">Jobs today</div>
-    <div class="tile-value">{{ t.jobs | comma }}</div>
-    <div class="tile-sub">{% if t.running or t.paused %}{{ t.running }} running · {{ t.paused }} paused{% else %}all finished{% endif %}</div>
-  </div>
-  <div class="tile tone-white" data-tip="Devices sent at least one command today.">
-    <div class="tile-label">Devices reached</div>
-    <div class="tile-value">{{ t.reached | comma }}</div>
-  </div>
-  <div class="tile tone-green">
-    <div class="tile-label">Commands answered</div>
-    {% if t.answered_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.answered_share }}%<span class="tile-count">{{ t.answered | comma }}</span></div>
-    {% else %}<div class="tile-value">{{ t.answered | comma }}</div>{% endif %}
-  </div>
-  <div class="tile tone-white">
-    <div class="tile-label">Time to answer</div>
-    <div class="tile-value">{{ took(t.median_answer) }}</div>
-    <div class="tile-sub">typical · slowest {{ took(t.slowest_answer) }}</div>
-  </div>
-  <div class="tile {{ 'tone-red' if t.failed else 'tone-grey' }}">
-    <div class="tile-label">Failed</div>
-    {% if t.failed_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.failed_share }}%<span class="tile-count">{{ t.failed | comma }}</span></div>
-    {% else %}<div class="tile-value">{{ t.failed | comma }}</div>{% endif %}
-  </div>
-  <div class="tile tone-grey">
-    <div class="tile-label">Cloud calls</div>
-    <div class="tile-value">{{ (t.send_calls + t.poll_calls) | comma }}</div>
-    <div class="tile-sub">{{ t.send_calls | comma }} sends · {{ t.poll_calls | comma }} checks</div>
-  </div>
-</div>
+{% with t = today %}{% include "_cota_today_tiles.html" %}{% endwith %}
 
 <div class="chart-grid dash-charts">
   <figure class="chart-card card">
@@ -59,9 +28,9 @@
     </div>
   </figure>
   <figure class="chart-card card">
-    <figcaption><span data-tip="Today, by the hour the answer came in. The current hour is green.">Answers per hour</span></figcaption>
-    {% if t.answered %}
-    {{ column_chart(t.per_hour, 'Answers per hour today', every=(1 if t.per_hour | length <= 12 else 2)) }}
+    <figcaption><span data-tip="Today, by the hour each command finished: answered in green, failed in red, the share answered above. The current hour is hatched.">Answers per hour</span></figcaption>
+    {% if t.answered and hours %}
+    {{ answer_hours(hours) }}
     {% else %}
     <p class="chart-empty">No answers yet today.</p>
     {% endif %}
@@ -76,10 +45,10 @@
   </div>
   {% if jobs %}
   <div class="table-wrap">
-  <table class="job-list">
-    <thead><tr><th>#</th><th>Name</th><th class="n">Devices</th><th>Commands</th><th>State</th>
-      <th>Progress</th><th class="n">Answered</th><th class="n">Failed</th><th class="n">Expired</th>
-      <th>Started</th><th class="n">Duration</th></tr></thead>
+  <table class="job-list data-grid">
+    <thead><tr><th class="fit">#</th><th class="fit">Name</th><th class="n fit">Devices</th><th>Commands</th><th class="fit">State</th>
+      <th class="fit">Progress</th><th class="n fit">Answered</th><th class="n fit">Failed</th><th class="n fit">Expired</th>
+      <th class="fit">Started</th><th class="n fit">Duration</th></tr></thead>
     <tbody>
       {% for j in jobs %}
       <tr>
@@ -91,7 +60,7 @@
             {%- for name in j.names %}{% if not loop.first %}{{ icon('chevron-right') }}{% endif %}<span>{{ name }}</span>{% endfor -%}
           </span>
         </td>
-        <td><span class="pill pill-job-{{ j.state }}">{{ j.state }}</span></td>
+        <td>{% if j.ended_by_limit %}<span class="pill pill-job-limit" data-tip="{{ j.pause_reason or '' }}">time limit</span>{% else %}<span class="pill pill-job-{{ j.state }}">{{ j.state }}</span>{% endif %}</td>
         <td>
           <span class="mini-progress" title="{{ j.finished | comma }} of {{ j.total | comma }} device commands finished">
             <span class="job-track"><span class="job-fill" style="width: {{ j.percent }}%"></span></span>
@@ -119,9 +88,10 @@
 {% if sends %}
 <section class="card">
   <h2><span data-tip="One command sent once, from the Devices page.">Single sends</span></h2>
-  <table>
-    <thead><tr><th>#</th><th>Name</th><th class="n">Devices</th><th class="n">Accepted</th>
-      <th class="n">Refused</th><th>Sent</th></tr></thead>
+  <div class="table-wrap">
+  <table class="data-grid">
+    <thead><tr><th class="fit">#</th><th>Name</th><th class="n fit">Devices</th><th class="n fit">Accepted</th>
+      <th class="n fit">Refused</th><th class="fit">Sent</th></tr></thead>
     <tbody>
       {% for s in sends %}
       <tr>
@@ -135,6 +105,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endif %}
 {% endblock %}

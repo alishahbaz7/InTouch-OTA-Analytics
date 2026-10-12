@@ -4,35 +4,41 @@
 
 {% block content %}
 <section class="card">
-  <h2>Groups
-    <span class="hint">the closest thing to a rollout cohort — many versions in one group means
-      a rollout still in progress, or one that stopped part-way</span>
-  </h2>
-  <table>
+  <h2><span data-tip="The closest thing to a rollout cohort. Many versions in one group means a rollout still in progress, or one that stopped part-way. Each name opens its devices.">Groups</span>
+    <span class="hint">{{ rows | length | comma }}</span></h2>
+  {% if rows %}
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
     <thead>
-      <tr><th>Group</th><th class="n">Devices</th><th class="n">Online</th>
-          <th class="n">Pending</th><th class="n">Pending — Online</th>
-          <th class="n">Versions</th><th>Reach</th></tr>
+      <tr><th class="n fit">S.No.</th><th class="fit">Group</th><th class="n fit">Devices</th><th class="n fit">Online</th>
+          <th class="n fit">Pending</th><th class="n fit">Pending — Online</th>
+          <th class="n fit">Versions</th><th>Reach</th></tr>
     </thead>
     <tbody>
       {% for r in rows %}
+      {% set rate = r.online / r.devices if r.devices else 0 %}
       <tr>
-        <td><a href="/devices?snapshot={{ snapshot_id }}&group={{ r.group_name | urlencode }}">{{ r.group_name }}</a></td>
+        <td class="n dim">{{ loop.index }}</td>
+        <td><a class="id-link" href="/devices?{{ {'group': r.group_name} | urlencode }}{{ '&snapshot=' ~ snapshot_id if viewing_history }}">{{ r.group_name }}</a></td>
         <td class="n">{{ r.devices | comma }}</td>
         <td class="n">{{ r.online | comma }}</td>
         <td class="n">{{ r.pending | comma }}</td>
-        <td class="n {{ 'alert-text' if r.pending_reachable }}">{{ r.pending_reachable | comma }}</td>
-        <td class="n {{ 'alert-text' if r.firmware_versions > 5 }}">{{ r.firmware_versions }}</td>
+        <td class="n {{ 'tone-yellow-text' if r.pending_reachable }}">{{ r.pending_reachable | comma }}</td>
+        <td class="n {{ 'tone-orange-text' if r.firmware_versions > 5 }}"{% if r.firmware_versions > 5 %} data-tip="More than five versions in one group."{% endif %}>{{ r.firmware_versions }}</td>
         <td class="barcell">
-          {% set rate = r.online / r.devices if r.devices else 0 %}
           <div class="bar-track slim">
             <div class="bar-fill {{ 'ok' if rate > 0.7 else ('warn' if rate > 0.25 else 'bad') }}"
                  style="width: {{ '%.2f' % (rate * 100) }}%"></div>
           </div>
+          <span class="pctlabel">{{ '%.0f' % (rate * 100) }}%</span>
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
+  {% else %}
+  <p class="empty-line">No groups in this snapshot.</p>
+  {% endif %}
 </section>
 {% endblock %}

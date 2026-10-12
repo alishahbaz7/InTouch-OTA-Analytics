@@ -73,7 +73,7 @@
         </span>
       </a>
     {% else %}
-      <p class="hint conv-empty">No devices yet — start a configuration above.</p>
+      <p class="hint conv-empty">No devices yet.</p>
     {% endfor %}
     </div>
   </aside>
@@ -89,7 +89,7 @@
           {# Model and type are locked defaults; this is where they change, on purpose. The
              inputs belong to the composer through form="composer", so they are sent with it. #}
           <details class="dropdown send-settings" id="send-settings">
-            <summary title="Model and command type for sending">Edit</summary>
+            <summary data-tip="Model and command type for sending.">Edit</summary>
             <div class="dropdown-panel settings-panel">
               <label>Model — deviceType
                 <input type="text" name="device_type" form="composer" class="mono"
@@ -101,29 +101,28 @@
             </div>
           </details>
           {%- if device.type != default_type or (d.get('cmd_type') and d.get('cmd_type') | int != default_cmd) %}
-          <span class="count-pill" title="Not the defaults">model {{ device.type }} · type {{ d.get('cmd_type') or default_cmd }}</span>
+          <span class="count-pill" data-tip="Not the defaults.">model {{ device.type }} · type {{ d.get('cmd_type') or default_cmd }}</span>
           {%- endif %}
         </div>
         {# The one fact worth keeping in view while the side panel is folded: can it answer? #}
         <button type="button" class="thread-status" data-open-tab="device"
-                title="What Web FOTA knows about this device">
+                data-tip="What Web FOTA knows about this device.">
           {%- if f %}<span class="dot state-{{ (f.status or 'unknown') | lower }}"></span>
             {{ f.status | status if f.status else 'Unknown' }} · last seen {{ device.seen_age or 'never' }}
           {%- elif device.imei %}<span class="dim">Not in Web FOTA</span>
-          {%- else %}<span class="dim">IMEI not known yet — no Web FOTA status</span>{% endif -%}
+          {%- else %}<span class="dim">IMEI not known</span>{% endif -%}
         </button>
       </div>
       <div class="thread-counts" id="thread-counts">{% include "_cota_counts.html" %}</div>
       <div class="thread-actions">
         <span class="hint check-status" id="check-status"
-              title="When this period was last loaded from the cloud">
+              data-tip="When this period was last loaded from the cloud.">
           {%- if thread.loaded %}Checked {{ thread.loaded.at[11:19] }}
           {%- else %}Not checked yet{% endif -%}</span>
         <button type="button" class="tool-btn refresh-btn" id="check-btn"
-                title="Check the cloud for answers now"
                 {{ 'disabled' if not cota_status.token_held }}>{{ icon('refresh') }}<span>Refresh</span></button>
         <details class="dropdown export console-export">
-          <summary class="tool-btn" title="Export this conversation">{{ icon('download') }}<span>Export</span></summary>
+          <summary class="tool-btn">{{ icon('download') }}<span>Export</span></summary>
           <div class="dropdown-panel">
             <a class="dropdown-item" href="/cota/console/export?{{ range_query }}&format=xlsx">
               <span>Excel workbook</span><em>.xlsx</em></a>
@@ -186,7 +185,7 @@
       <input type="hidden" name="cmd_type" value="{{ d.get('cmd_type') or default_cmd }}">
       <input type="hidden" name="from" value="{{ range_from }}">
       <textarea name="commands" class="mono sequence-text" rows="5" spellcheck="false"
-                placeholder="One command per line, sent in order — e.g.&#10;DAD76F4B&#10;DAD76C0A"
+                placeholder="DAD76F4B&#10;DAD76C0A"
                 {{ 'disabled' if run_live }}>{{ d.get('commands', '') }}</textarea>
       <div class="sequence-foot">
         {{ library_pick('sequence') }}
@@ -195,8 +194,7 @@
                 {{ 'disabled' if run_live or not cota_status.token_held }}>
           {{ icon('send') }}<span>Start sequence</span></button>
       </div>
-      {% if run_live %}<div class="notice notice-warn composer-signin">A sequence is
-        {{ run.state }} for this device — it finishes, or is cancelled, before another starts.</div>{% endif %}
+      {% if run_live %}<div class="notice notice-warn composer-signin">A sequence is {{ run.state }} for this device.</div>{% endif %}
     </form>
 
     <form method="post" action="/cota/console/send" class="composer" id="composer">
@@ -207,8 +205,7 @@
         <span class="recent-label">Recent</span>
         {% for r in recent %}
         <button type="button" class="chip" data-cmd="{{ r.cmd_type }}"
-                data-vals="{{ r.params | tojson | forceescape }}"
-                title="Fill the composer with this command">
+                data-vals="{{ r.params | tojson | forceescape }}">
           {{- r.cmd_type }} · {{ r.params.values() | join(' · ') -}}
         </button>
         {% endfor %}
@@ -228,19 +225,17 @@
          type 36 takes one value, and the exact request is in the Raw panel once sent. The send
          route still accepts val2…val9, so bringing them back is markup only. #}
       {% if not cota_status.token_held %}
-      <div class="notice notice-warn composer-signin">Not signed in to the cloud —
-        <a href="/cota/signin">Sign in</a> (top right) to send and check for answers.</div>
+      <div class="notice notice-warn composer-signin">Not signed in to the cloud. <a href="/cota/signin">Sign in</a></div>
       {% elif cota_status.rejected %}
-      <div class="notice notice-error composer-signin">The cloud rejected the token at
-        {{ cota_status.rejected_at[11:16] }} (HTTP {{ cota_status.rejected_status }}) —
-        <a href="/cota/signin">sign in again</a> with a fresh one from the portal.</div>
+      <div class="notice notice-error composer-signin">Session expired at
+        {{ cota_status.rejected_at[11:16] }} (HTTP {{ cota_status.rejected_status }}). <a href="/cota/signin">Sign in again</a></div>
       {% endif %}
     </form>
 
   {% else %}
     <div class="thread-intro">
       <h2>Configure a device</h2>
-      <p class="hint">Pick a device on the left, or start one with its device id or IMEI.</p>
+      <p class="hint">Choose a device, or start one by its id or IMEI.</p>
     </div>
   {% endif %}
   </section>
@@ -264,23 +259,17 @@
                 title="Fold the panel">{{ icon('chevrons-right') }}<span>Fold</span></button>
       </div>
       <div class="side-pane" data-pane="raw" id="raw-view">
-        <p class="hint raw-empty">Click a command or an answer to see its raw request and the
-          cloud's raw response.</p>
+        <p class="hint raw-empty">Select a command or an answer.</p>
       </div>
       <div class="side-pane" data-pane="device">
         <h3>From Web FOTA</h3>
         {% if f %}
-        <div class="fleet-state state-{{ (f.status or 'unknown') | lower }}">
+        <div class="fleet-state state-{{ (f.status or 'unknown') | lower }}"
+             data-tip="{% if f.status == 'Online' %}Reachable at the last fetch, so it can answer.{% elif f.status == 'Offline' %}Not reachable at the last fetch: a command waits in the cloud until the device next connects.{% else %}Never connected, so it cannot answer yet.{% endif %}">
           <span class="dot"></span><strong>{{ f.status | status if f.status else 'Unknown' }}</strong>
         </div>
         <div class="hint">last seen {{ device.seen_age or 'never' }}{% if f.seen_at %}
           · {{ f.seen_at[:16] }}{% endif %}</div>
-        <p class="card-note">
-          {% if f.status == 'Online' %}It was reachable at the last fetch, so it can answer.
-          {% elif f.status == 'Offline' %}It was not reachable at the last fetch. A command waits
-            in the cloud until the device next connects — expect no answer until then.
-          {% else %}It has never connected, so it cannot answer yet.{% endif %}
-        </p>
         <dl class="kv">
           <dt>Model</dt><dd>{{ f.device_model or '—' }}</dd>
           <dt>Firmware</dt><dd class="mono">{{ f.firmware or '—' }}</dd>
@@ -288,14 +277,12 @@
           <dt>HW</dt><dd class="mono">{{ f.hw_ver or '—' }}</dd>
           {% if f.vin %}<dt>VIN</dt><dd class="mono">{{ f.vin }}</dd>{% endif %}
         </dl>
-        <p class="footnote">As of the last fetch, {{ (f.last_checked_at or '')[:16] }}.</p>
+        <p class="footnote">Fetched {{ (f.last_checked_at or '')[:16] }}</p>
         {% elif device.imei %}
         <p class="card-note">Web FOTA has no record of IMEI <span class="mono">{{ device.imei }}</span>.</p>
         {% else %}
-        <p class="card-note">This device id is not in the device map, so its IMEI — and with it
-          what Web FOTA knows — cannot be looked up yet. The first answer from the cloud usually
-          tells us.</p>
-        <p class="footnote"><a href="/cota/devices">Load the device map</a> to see it now.</p>
+        <p class="card-note" data-tip="The IMEI links this device to Web FOTA. The first answer from the cloud usually carries it.">IMEI not known.</p>
+        <p class="footnote"><a href="/cota/devices">Load the device map</a></p>
         {% endif %}
       </div>
     </div>
@@ -524,7 +511,9 @@ document.querySelectorAll('.dt-field').forEach(function (field) {
         // The sign-in chip follows what the cloud just said about the token.
         var chip = document.getElementById('cota-signin-chip');
         if (d.cloud && chip) {
-          chip.className = chip.className.replace(/status-\w+/, 'status-' + d.cloud.level);
+          // Only the level class changes: /status-\w+/ also matched "status-chip" itself, and
+          // the chip lost its look after every check.
+          chip.className = chip.className.replace(/\bstatus-(?!chip\b)\w+/, 'status-' + d.cloud.level);
           chip.title = d.cloud.title;
           chip.querySelector('.status-text').textContent = d.cloud.label;
         }

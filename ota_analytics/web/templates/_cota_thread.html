@@ -20,8 +20,6 @@
 {% if not thread.entries %}
 <div class="thread-empty">
   <p><strong>No commands in this range.</strong></p>
-  <p class="hint">Send one below, widen the range above, or press ⟳ to ask the cloud what it
-    holds for this device.</p>
 </div>
 {% endif %}
 
@@ -134,7 +132,7 @@ answer no longer had it — deleted in the portal, most likely.">no longer in th
     <div class="pop-head"><span>Raw API response — getGPRSCommand record</span>
       {% if c.cloud %}<button type="button" class="copy-btn">Copy</button>{% endif %}</div>
     {% if c.cloud %}<pre class="pop-json">{{ c.cloud.pretty }}</pre>
-    {% else %}<p class="hint">The cloud has not returned a record for this command yet.</p>{% endif %}
+    {% else %}<p class="hint">No record yet.</p>{% endif %}
   </div>
 </template>
 {% endfor %}

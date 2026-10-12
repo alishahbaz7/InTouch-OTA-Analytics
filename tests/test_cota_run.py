@@ -176,6 +176,17 @@ def test_all_five_go_one_at_a_time_in_order_with_the_gaps(sim):
         assert earlier["finished_at"] <= later["started_at"]
 
 
+def test_a_sequence_waits_after_a_command_whose_saved_command_says_so(sim):
+    """10-10-2026: SET Force Sync Audio takes the device off the air for a while. Saved with a wait,
+    a sequence holds the next command back by it, as a job does."""
+    from ota_analytics import cota_library
+    cota_library.save_command(sim.conn, name="Sync", val1=SET_6C0A, wait_after_seconds=90)
+    view, device = sim(f"{SET_6C0A}\n{GET_FTP}")
+    times = [t for t, _ in device.sends]
+    assert view["state"] == "done" and times[1] - times[0] == 20 + 90       # answered, then 90 s
+    # (Without a saved wait it is 2 s: test_all_five_go_one_at_a_time_in_order_with_the_gaps.)
+
+
 # ── the failure cases ─────────────────────────────────────────────────────
 
 def test_api_not_working_is_retried_and_the_command_still_goes(sim):

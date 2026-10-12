@@ -3,20 +3,21 @@
 
 {% block content %}
 <section class="card">
-  <h2>Data quality
-    <span class="hint">recorded on every ingest — the numbers elsewhere are only as good as this</span>
-  </h2>
-  <table>
-    <thead><tr><th>Severity</th><th>Rule</th><th class="n">Devices</th>
-               <th>Meaning</th><th>Examples</th></tr></thead>
+  <h2><span data-tip="Recorded on every ingest; the numbers elsewhere are only as good as this. The platform stores no event log, so campaign success rates, failure codes, retry counts, durations and bandwidth cannot be computed.">Data quality</span>
+    <span class="hint">{{ issues | length }}</span></h2>
+  {% if issues %}
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
+    <thead><tr><th class="fit">Severity</th><th class="fit">Rule</th><th class="n fit">Devices</th>
+               <th>Meaning</th><th class="fit">Examples</th></tr></thead>
     <tbody>
       {% for i in issues %}
       <tr>
         <td><span class="sev sev-{{ i.severity }}">{{ i.severity }}</span></td>
         <td class="mono">{{ i.rule }}</td>
         <td class="n">{{ i.affected | comma }}</td>
-        <td style="white-space: normal">{{ i.detail }}</td>
-        <td class="dim small">
+        <td class="cell-wrap">{{ i.detail }}</td>
+        <td class="dim mono">
           {% set sample = i.sample | from_json %}
           {{ (sample[:2] | join(', '))[:60] if sample else '—' }}
         </td>
@@ -24,10 +25,9 @@
       {% endfor %}
     </tbody>
   </table>
-  <p class="footnote">
-    Not computable from this source: campaign success rates, failure codes, retry counts,
-    durations, bandwidth — the platform stores no event log. Everything here comes from fleet
-    snapshots and the differences between them.
-  </p>
+  </div>
+  {% else %}
+  <p class="empty-line">No issues in this snapshot.</p>
+  {% endif %}
 </section>
 {% endblock %}

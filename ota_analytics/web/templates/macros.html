@@ -1,9 +1,24 @@
 {# Reusable display components. No JavaScript — bars are CSS widths, gauges are inline SVG. #}
+{% from "_icons.html" import icon %}
 
-{% macro tile(label, value, sub=None, tone='') %}
+{# A share as the tiles print it: one decimal under 10%, where the decimal still says something
+   ("0.4%"), none above it ("62%"). #}
+{% macro share(value, total) -%}
+  {%- set p = (value / total * 100) if total else 0 -%}
+  {{ ('%.1f' % p) if p < 10 and p != 0 else ('%.0f' % p) }}%
+{%- endmacro %}
+
+{# `sub` is data or nothing; an explanation goes in `tip`, shown on hover (no help text printed).
+   With `total`, the tile leads with the share and puts the count beside it, smaller — the user's
+   order on every tile (percentage the focus, number secondary). #}
+{% macro tile(label, value, sub=None, tone='', tip='', total=None) %}
 <div class="tile {{ tone }}">
-  <div class="tile-label">{{ label }}</div>
+  <div class="tile-label"{% if tip %} data-tip="{{ tip }}"{% endif %}>{{ label }}</div>
+  {% if total is not none %}
+  <div class="tile-value">{{ share(value, total) }}<span class="tile-count">{{ '{:,}'.format(value) }}</span></div>
+  {% else %}
   <div class="tile-value">{{ value }}</div>
+  {% endif %}
   {% if sub %}<div class="tile-sub">{{ sub }}</div>{% endif %}
 </div>
 {% endmacro %}
@@ -83,7 +98,7 @@
 {% endmacro %}
 
 {# Donut chart. segments: [{label, value, tone}] — tone is a CSS class. #}
-{% macro donut(title, segments, subtitle='', note='') %}
+{% macro donut(title, segments, subtitle='', note='', cap='devices') %}
 {% set total = segments | sum(attribute='value') %}
 {% set circumference = 339.292 %}  {# 2 * pi * 54 #}
 <figure class="donut-fig">
@@ -105,7 +120,7 @@
         {% endif %}
       {% endfor %}
       <text x="70" y="68" class="donut-total">{{ '{:,}'.format(total) }}</text>
-      <text x="70" y="84" class="donut-cap">devices</text>
+      <text x="70" y="84" class="donut-cap">{{ cap }}</text>
     </svg>
     <ul class="donut-legend">
       {% for s in segments %}
@@ -194,14 +209,15 @@
   {%- endif -%}
 {% endmacro %}
 
-{# A sortable column header. Lifted out of devices.html so every table sorts the same way and
-   looks the same doing it — `th.sortable` / `.sorted` / `.sort-arrow` are already styled, and a
-   second table inventing its own markup is how two conventions end up on one screen.
+{# A sortable column header for a list that sorts one way per column (the fallbacks: newest,
+   most often, by model, by IMEI). Drawn like the data grid's own headers — the chevron on the
+   sorted column, pointing the way it sorts — so every table on every page sorts alike.
 
    `base` is the query string to preserve (without the sort key itself). #}
-{% macro sortable(base, key, label, current, numeric=false, param='sort') %}
-  <th class="sortable {{ 'n' if numeric }} {{ 'sorted' if current == key }}">
+{% macro sortable(base, key, label, current, numeric=false, param='sort', descending=true) %}
+  {%- set on = current == key -%}
+  <th class="sortable fit {{ 'n' if numeric }} {{ 'is-sorted' if on }}" aria-sort="{{ ('descending' if descending else 'ascending') if on else 'none' }}">
     <a href="?{{ base }}{{ '&' if base }}{{ param }}={{ key }}">
-      {{- label }}<span class="sort-arrow">{{ '▼' if current == key else '' }}</span></a>
+      {{- label }}<span class="sort-ind {{ 'is-desc' if descending }}">{{ icon('chevron-down') }}</span></a>
   </th>
 {% endmacro %}

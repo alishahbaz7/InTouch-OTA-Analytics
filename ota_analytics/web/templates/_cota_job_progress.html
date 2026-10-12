@@ -1,46 +1,65 @@
 {# A job's progress: why it is paused, the share finished, the outcome bar and the tiles. It sits
    in the job page's sticky top with the title and actions, and condenses when the page scrolls.
    Rendered with the page and again by /cota/jobs/<id>/status while the job runs. #}
-{% from "_cota_charts.html" import outcome_bar %}
+{% from "_cota_charts.html" import outcome_bar, took %}
 {%- set seg = {} -%}
 {%- for s in charts.outcomes %}{% set _ = seg.update({s.key: s.value}) %}{% endfor -%}
 {%- macro pct(value, total) -%}{{ '%.0f' % (value / total * 100) if total else 0 }}%{%- endmacro -%}
-{#- The share leads and the count follows, smaller (the user, 08-10-2026). -#}
-{%- macro value(n) -%}
-<div class="tile-value">{{ pct(n, job.total) }}<span class="tile-count">{{ n | comma }}</span></div>
+{#- The share leads and the count follows, smaller (the user, 08-10-2026). data-tw marks a
+    number the page counts to its new value on a redraw instead of jumping. -#}
+{%- macro value(n, key) -%}
+<div class="tile-value"><span data-tw="{{ key }}-pct">{{ '%.0f' % (n / job.total * 100) if job.total else 0 }}</span>%<span class="tile-count" data-tw="{{ key }}-n">{{ n | comma }}</span></div>
 {%- endmacro -%}
-{% if job.state == 'paused' and job.pause_reason %}
+{% if (job.state == 'paused' or job.ended_by_limit) and job.pause_reason %}
 <div class="notice notice-warn">{{ job.pause_reason }}</div>
 {% endif %}
 
-<section class="card job-progress-card">
+{#- While the job runs the bar moves (stripes, a sweep of light) and a dot pulses; paused or done,
+    it stands still (the user, 10-10-2026). -#}
+<section class="card job-progress-card {{ 'is-running' if job.state == 'running' }}">
   <div class="job-progress-head">
-    <span class="job-pct">{{ job.percent }}%</span>
-    <span class="hint">{{ job.finished | comma }} of {{ job.total | comma }} device commands finished</span>
+    {% if job.state == 'running' %}<span class="live-dot" aria-hidden="true"></span>{% endif %}
+    <span class="job-pct"><span data-tw="pct">{{ job.percent }}</span>%</span>
+    <span class="hint"><span data-tw="finished">{{ job.finished | comma }}</span> of {{ job.total | comma }} device commands finished</span>
     <span class="hint job-calls">{{ job.send_calls | comma }} send calls · {{ job.poll_calls | comma }} checks</span>
+  </div>
+  {#- The job's clock (the user, 09-10-2026): when it started, the most it can take, and the
+      most it has left — commands still to do × the most one command can take. -#}
+  {%- set t = times %}
+  <div class="job-times">
+    <span class="job-time"><em>Started</em><b>{{ t.started or '—' }}</b></span>
+    <span class="job-time" data-tip="The job's hard limit: the longest it can take if no device answers — three attempts of {{ job.answer_wait | int }} s per command, up to {{ took(t.per_command) }} each — and a tenth more. A pause stops the clock.">
+      <em>Max time</em><b>{{ took(t.max_seconds) }}</b>{% if t.max_capped %}<small>your limit · max time {{ took(t.worst_seconds) }}</small>{% endif %}</span>
+    {% if job.live %}
+    <span class="job-time" data-tip="The commands still to do, at the most each can take.{% if job.in_progress %} Devices in line take a slot as one frees.{% endif %}">
+      <em>Remaining</em><b>up to {{ took(t.remaining_seconds) }}</b>
+      {%- if t.ends_clock %}<small>{{ 'time limit at' if t.remaining_capped else 'by' }} {{ t.ends_clock }}</small>{% endif %}</span>
+    {% else %}
+    <span class="job-time"><em>Took</em><b>{{ took(job.duration_seconds) }}</b></span>
+    {% endif %}
   </div>
   {{ outcome_bar(charts.outcomes, job.total, big=true) }}
 
   <div class="tiles job-tiles">
     <div class="tile tone-green">
       <div class="tile-label">Answered</div>
-      {{ value(seg.get('done', 0)) }}
+      {{ value(seg.get('done', 0), 'done') }}
     </div>
     <div class="tile tone-warn" data-tip="A command is out; its answer is not in yet.">
       <div class="tile-label">Waiting for devices</div>
-      {{ value(seg.get('waiting', 0)) }}
+      {{ value(seg.get('waiting', 0), 'waiting') }}
     </div>
     <div class="tile {{ 'tone-red' if seg.get('failed') else 'tone-grey' }}" data-tip="No answer after 3 attempts.">
       <div class="tile-label">Failed</div>
-      {{ value(seg.get('failed', 0)) }}
+      {{ value(seg.get('failed', 0), 'failed') }}
     </div>
     <div class="tile tone-grey" data-tip="Stopped at the job's {{ job.time_limit | int }}-minute time limit.">
       <div class="tile-label">Expired</div>
-      {{ value(seg.get('expired', 0)) }}
+      {{ value(seg.get('expired', 0), 'expired') }}
     </div>
     <div class="tile muted-tile">
       <div class="tile-label">Not sent yet</div>
-      {{ value(seg.get('not_sent', 0)) }}
+      {{ value(seg.get('not_sent', 0), 'not_sent') }}
       {% if job.device_states.get('queued') %}<div class="tile-sub">{{ job.device_states.queued | comma }} device{{ '' if job.device_states.queued == 1 else 's' }} in line</div>
       {%- elif job.device_states.get('not_started') %}<div class="tile-sub">{{ job.device_states.not_started | comma }} device{{ '' if job.device_states.not_started == 1 else 's' }} not started</div>
       {%- elif job.canary_size and job.active_wave == 0 %}<div class="tile-sub">after the canary of {{ job.canary_size }}</div>{% endif %}

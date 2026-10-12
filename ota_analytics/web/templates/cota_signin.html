@@ -13,7 +13,7 @@
 
 <div class="choice-grid">
   <section class="card highlight">
-    <h2>Cloud sign-in <span class="hint">{{ clouds[connection.cloud][0] }}</span></h2>
+    <h2>Cloud sign-in</h2>
 
     {% if not is_local %}
     <div class="notice notice-error">
@@ -30,11 +30,6 @@
           {% endfor %}
         </select>
       </label>
-      <label>API URL
-        <input type="url" name="base_url" id="cota-base-url" value="{{ connection.base_url }}"
-               {{ 'readonly' if connection.cloud != 'custom' }}
-               placeholder="https://…/IntouchAdminApi/api">
-      </label>
 
       {# Two ways in, as on the FOTA connection: a token copied from the portal works today;
          username and password need the cloud's login call, which is not captured yet. #}
@@ -49,19 +44,14 @@
       </div>
 
       <div class="method-panel" data-method="token">
-        <label>{{ 'Replace token' if cota_status.token_held and not cota_status.token_from_env
-                  else 'Token' }}
+        <label><span data-tip="{% if portal_url %}Sign in at {{ portal_url }}, then open{% else %}In the portal, open{% endif %} DevTools → Network, select any API call and copy its Authorization header. “Bearer ” in front is fine. It stops working when that portal session ends.">{{ 'Replace token' if cota_status.token_held and not cota_status.token_from_env
+                  else 'Token' }}</span>
           {# type=password so it is not shoulder-surfed or kept in form history; never
              pre-filled — the value attribute is exactly where a secret must not appear. #}
           <input type="password" name="token" autocomplete="off" spellcheck="false"
-                 placeholder="{{ 'leave blank — a token is already held' if cota_status.token_held
-                                 else 'paste the Bearer token from the portal' }}">
+                 placeholder="{{ 'Token held' if cota_status.token_held else 'Bearer token' }}">
         </label>
-        <p class="footnote">{% if portal_url %}Sign in at the <a href="{{ portal_url }}"
-          target="_blank" rel="noopener">CTVMS portal</a>, then open{% else %}In the portal,
-          open{% endif %} DevTools → Network, select any API call and copy the
-          <code>Authorization</code> header. “Bearer ” in front is fine. It stops working when
-          that portal session ends.</p>
+        {% if portal_url %}<a class="field-hint" href="{{ portal_url }}" target="_blank" rel="noopener">Open the CTVMS portal ↗</a>{% endif %}
       </div>
 
       <div class="method-panel" data-method="password">
@@ -72,26 +62,34 @@
           </label>
           <label>{{ 'Change password' if cota_status.password_saved else 'Password' }}
             <input type="password" name="password" autocomplete="current-password"
-                   placeholder="{{ 'leave blank — already saved' if cota_status.password_saved else '' }}">
+                   placeholder="{{ 'Saved' if cota_status.password_saved else '' }}">
           </label>
         </div>
-        <label class="inline">
-          <input type="checkbox" name="remember" value="true"
-                 {{ 'checked' if cota_status.password_saved }}>
-          <span data-tip="Keeps the password in {{ credential_store }}, so an expired token renews itself.">Remember me</span>
-        </label>
-        {%- set preset = connection.cloud != 'custom' and connection.login_url %}
-        <details class="advanced" {{ 'open' if not connection.login_url }}>
-          <summary{% if preset %} data-tip="Set by the {{ clouds[connection.cloud][0] }} preset."{% endif %}>Sign-in details</summary>
-          {% if preset %}
-          <p class="footnote">Taken from the portal's own sign-in request: multipart form,
-            password sent as its MD5 hash. Locked for this cloud; choose “Other cloud” to change.</p>
-          {% else %}
-          <p class="footnote">Enter the address the portal's sign-in request goes to — not the
-            portal's page. Open the page, press F12 → Network → Fetch/XHR, sign in, and copy that
-            request's URL.</p>
+        <div class="remember-row">
+          <label class="inline">
+            <input type="checkbox" name="remember" value="true"
+                   {{ 'checked' if cota_status.password_saved }}>
+            <span data-tip="Keeps the password in {{ credential_store }} — never in a file or the database — so signing in, and renewing an expired session, needs no typing, even after signing out.">Remember me</span>
+          </label>
+          {% if cota_status.password_saved and not cota_status.password_from_env %}
+          <button type="submit" form="cota-forget" class="link-btn danger"
+                  data-confirm-action="Forget" data-name="{{ connection.username }}"
+                  data-confirm="Forget the saved password for {name}? You will type it at the next sign-in.">Forget saved password</button>
           {% endif %}
-          <label>Login URL
+        </div>
+      </div>
+
+      {#- How the cloud is reached: fixed for a known cloud, so folded away (the user, 10-10-2026). -#}
+      {%- set preset = connection.cloud != 'custom' and connection.login_url %}
+      <details class="advanced" {{ 'open' if connection.cloud == 'custom' and not (connection.base_url and connection.login_url) }}>
+        <summary{% if preset %} data-tip="Set by the {{ clouds[connection.cloud][0] }} preset."{% endif %}>Sign-in details</summary>
+        <label>API URL
+          <input type="url" name="base_url" id="cota-base-url" value="{{ connection.base_url }}"
+                 {{ 'readonly' if connection.cloud != 'custom' }}
+                 placeholder="https://…/IntouchAdminApi/api">
+        </label>
+        <div class="method-panel" data-method="password">
+          <label><span data-tip="{% if preset %}Taken from the portal's own sign-in request: multipart form, password sent as its MD5 hash. Locked for this cloud; choose “Other cloud” to change.{% else %}The address the portal's sign-in request goes to, not the portal's page: open the page, press F12 → Network → Fetch/XHR, sign in, and copy that request's URL.{% endif %}">Login URL</span>
             <input type="url" name="login_url" value="{{ connection.login_url }}"
                    {{ 'readonly' if preset }}
                    placeholder="https://…/login">
@@ -120,8 +118,8 @@
               <input type="text" name="pass_field" value="{{ connection.pass_field }}">
             </label>
           </div>
-        </details>
-      </div>
+        </div>
+      </details>
 
       <div class="form-actions">
         <button type="submit">Sign in</button>
@@ -129,10 +127,9 @@
         <button type="submit" form="cota-signout" class="ghost">Sign out</button>
         {% endif %}
       </div>
-      <p class="footnote">Tokens and passwords are kept in <strong>{{ credential_store }}</strong>
-        or the environment — never in this project's files, the database or a log.</p>
     </form>
     <form id="cota-signout" method="post" action="/cota/signout"></form>
+    <form id="cota-forget" method="post" action="/cota/signin/forget"></form>
   </section>
 
   <section class="card">
@@ -143,20 +140,10 @@
           {{ 'Signed in' if cota_status.token_held else 'Not signed in' }}</div></div>
       <div><div class="tile-label">Since</div>
         <div>{{ cota_status.signed_in_at or '—' }}</div></div>
-      <div><div class="tile-label">Token from</div>
+      <div{% if cota_status.token_from_env %} data-tip="{{ token_env }} wins over anything saved here; change it where the environment is set."{% endif %}><div class="tile-label">Token from</div>
         <div>{{ token_env if cota_status.token_from_env
                 else (credential_store if cota_status.token_held else '—') }}</div></div>
     </div>
-    <p class="mono small dim">{{ cota_status.base_url }}</p>
-    {% if cota_status.token_from_env %}
-    <p class="footnote">The token comes from <code>{{ token_env }}</code>, which wins over anything
-      saved here — change it where the environment is set.</p>
-    {% endif %}
-    <ul class="module-list">
-      <li>Nothing is sent to a device from this tab. Signing in only gets a token.</li>
-      <li>The cloud cannot tell us when a token expires. A send that is refused with HTTP 401
-        or 403 means: sign in again.</li>
-    </ul>
   </section>
 </div>
 {% endblock %}

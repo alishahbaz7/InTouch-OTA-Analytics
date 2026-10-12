@@ -234,7 +234,9 @@ the UI makes that visible, so it gets argued about instead of checked.
   derived table is rebuildable from the raw snapshots, and a snapshot is identified by
   `file_sha256`, so **same set of file hashes ⇒ same numbers, by construction.**
   `identity.fleet_digest()` hashes exactly that set, sorted, so ingest order cannot affect it.
-  It is in the footer of every page and on a `Source` sheet in every XLSX report.
+  It is on every page, in the card over the rail's version chip (hover, or double-click to
+  pin — moved out of the footer at the user's request, 10-10-2026), and on a `Source` sheet
+  in every XLSX report.
 - **A creation date is provenance, not a reconciliation key.** `db_id`, `created_at` and
   `instance_label` answer *whose* numbers these are; only the digest answers *do they match*.
   Do not present `created_at` as evidence of agreement.
@@ -342,15 +344,17 @@ time**. `config.CHANNEL` is `release` when frozen and `dev` from source, overrid
 
 The UI is three modules in one sidebar, modelled on the CAN utility's workbench
 (`D:\shahbaz\Miscellenious\Code\CAN utlity\web`): **Web FOTA** (everything that existed
-before 2.0), **Web COTA** (listed and marked *Soon* — not built) and **Intouch COTA** (Configure,
+before 2.0), **Web COTA** (listed and marked *Soon* — not built) and **Intouch COTA** (Overview, Configure,
 Jobs, Commands, Devices, Sign in).
 
-- **`nav.MODULES` is the only definition.** The sidebar, the top bar's title and description,
-  and the tests all read it. A page goes into the right module by its URL alone (`nav.state`),
+- **`nav.MODULES` is the only definition.** The sidebar, the top bar's title, the title's
+  hold-tip (the page description — never printed: the user counts it as help text) and the
+  tests all read it. A page goes into the right module by its URL alone (`nav.state`),
   so a route added later does not need to pass anything.
 - **FOTA's chips belong to FOTA.** The fetch/agent chips and *Update data* render only when
   `module == 'fota'`. On a COTA page they would claim a freshness unrelated to what is on
-  screen. The fleet digest stays in every footer anyway — `test_share_pages` holds that.
+  screen. The fleet digest is in the version card on every page — `test_share_pages` holds
+  that. COTA pages have no footer.
 - **A module's way to its connection page is in the top bar**, not the rail: FOTA's filled
   *Update data* button; COTA's "Cloud: …" status chip, which is the only way in — a separate
   *Cloud sign-in* button beside it was redundant and removed at the user's request.
@@ -360,7 +364,10 @@ Jobs, Commands, Devices, Sign in).
 - **COTA credentials follow the FOTA rules** (`cota_connection.py`): token and password in the
   credential store or the environment, never in `cota_connection.json` or a value attribute.
   The COTA password uses the account `cota-password:<user>`, so it can never overwrite FOTA's
-  password for the same username. The InTouch cloud's login is **known and locked in its preset**
+  password for the same username. **Signing out drops only the token**: a remembered password stays
+  in the store so the next sign-in needs no typing (the user, 10-10-2026); *Forget saved password*
+  (`/cota/signin/forget`, red, confirmed) removes it. The preset is labelled "CVTMS Cloud".
+  The InTouch cloud's login is **known and locked in its preset**
   (`cota_connection.PRESETS`): `POST IntouchAdminApi/user/login`, multipart, `username` + MD5 of
   the password, captured from the portal 2026-10-06. A posted login URL cannot override a known
   cloud's; only "Other cloud" takes one, and it is never guessed.
@@ -369,7 +376,7 @@ Jobs, Commands, Devices, Sign in).
   remembered password, `renew()` signs in again by itself and the step is repeated once: a check
   just asks again; a refused send (which never reached the device) is sent once more, with the
   refusal left on the record. Never over a token from `OTA_COTA_TOKEN`.
-- **Configure (`/cota/console`) is the first COTA page:** one device, one command, and its
+- **Configure (`/cota/console`) is the console page:** one device, one command, and its
   stages. A device's console is a job keyed `source_file = 'console:<id>'`, so sends and checks
   are ordinary tasks and polls. Send answers with a **303 redirect** — a refresh must never
   resend a command to a device.
@@ -387,9 +394,21 @@ Jobs, Commands, Devices, Sign in).
 - **A device's answer can contain secrets** — the live one carried an FTP password. It is stored
   in `cota_command` and shown to anyone who can open the console, viewers included. Never copy
   a real one into a test, a doc or a commit; the tests use a sanitized copy.
+- **A wait after a command** (the user, 10-10-2026): a command that takes the device off the air
+  (SET Force Sync Audio, a reboot) holds the next one back. It lives on the saved command
+  (`wait_after_seconds`, v22), is copied per step into a job (`cota_campaign.waits`, JSON — changeable
+  per job on New job) and into a sequence's steps (`cota_run_step.wait_after_seconds`). It starts
+  when the command **ends**, answered or not (`Scheduler._finish_step`: due = now + max(gap, wait)),
+  per device. The worst case adds every wait but the last (`waits_between`), so the hard limit and
+  *Remaining* hold; `next_action` names it ("Waits after …"). Choices are `cota_run.WAIT_CHOICES`.
 - **COTA timing is the user's rule (2026-10-07), for sequences and jobs alike: 30 s per attempt,
-  3 attempts, then the next command — every command over in ~90 s, and no job past its time
-  limit (60 min by default).** No answer in 30 s is no answer, whatever the cloud says it did
+  3 attempts, then the next command — every command over in ~90 s (≤ 100 s with a tick), and no
+  job past its time limit.** Since 10-10-2026 a job's limit is **its own max time**
+  (`max_time_minutes`: worst case at 100 s a command, devices in progress filling slots, and a
+  tenth more), confirmed in a pop-up before Start; a shorter one may be typed. Every job must
+  finish the day it starts (the record clears daily) — Start is held otherwise — and a pause
+  stops the clock (`paused_at`/`paused_seconds`, added to `deadline`). The fixed 60 min stays
+  only as the reading of jobs made before. No answer in 30 s is no answer, whatever the cloud says it did
   with the command: a command the cloud *holds* for a sleeping device is resent like any other.
   Waiting for held commands (up to 12 h) is what it replaced — a 2-device × 4-command job stayed
   open all day for one held command the cloud never handed over. Do not reintroduce a wait that
@@ -460,8 +479,10 @@ Jobs, Commands, Devices, Sign in).
   `deviceId` is not used at all (`cota.records_by_device`). A client without `responses_many`
   — every test fake but `Fleet` — checks one device per call.
 - **The COTA record lives for a day** (the user's rule). `purge_previous_days` runs once per
-  process, on the first COTA page: earlier days' jobs, sequences, sends and cloud records go;
-  groups and the device map stay. A session that runs past midnight keeps its day.
+  process, in `get_conn()` — before any page reads anything: earlier days' jobs, sequences,
+  sends and cloud records go; groups and the device map stay. A session that runs past midnight
+  keeps its day. It used to run inside `_cota_context`, *after* a page had computed its figures
+  in the call's arguments, so the first visit of a new day showed yesterday's jobs as today's.
 - **Device lists upload as the cloud's own format, `id,trackingCode`** — id required,
   trackingCode (IMEI) optional, a header row optional; `/cota/groups/template.csv` is the
   template both upload forms link. Tracking codes are learned into the device map.
@@ -491,14 +512,79 @@ Jobs, Commands, Devices, Sign in).
   "new" and refuse it as not an integer.
 - **New COTA controls draw icons through `_icons.html`'s `icon('name')`** — the icon test
   finds names by that exact call shape, so keep it single-argument.
+- **The Devices list is keyed by the cloud's device id** (v21, `db._rekey_cota_device`): it was
+  keyed by IMEI, so a device added by id alone could not be stored. `cota.put_device` is the one
+  way in — a person's IMEI moves to the device, the cloud's only fills a gap. A job, a group and a
+  cloud record each list the devices they name. **Every column filters and sorts in SQL**
+  (`cota_fleet._fleet_cte`, one CTE joined to Web FOTA's `device` and today's jobs) — 0.15 s on
+  23,105 devices; never page in Python.
+- **Every Intouch COTA table is a `.data-grid`** (the user, 10-10-2026; a test fails one without
+  it): header band, rows a shade apart, `.fit` on compact columns. A long one sits in
+  `.grid-scroll[data-fit]`, which `base.html` sizes to the window so its header stays pinned —
+  call `window.fitGrids()` after a redraw replaces it. List filters on Devices take several values
+  as repeated query keys (`cota_fleet.clean_filters` reads `getlist`; links are built in Python
+  with `urlencode(doseq=True)` — Jinja's `urlencode` cannot write them).
+- **A device may be in several groups — a warning, never a restriction** (the user, 10-10-2026,
+  replacing the one-group rule of the same morning). Add group and Add to group say which devices
+  are already in another group; they join as well unless unticked (`skip`), and "Take them out of
+  their other groups" (`transfer`) makes it a move. Take out of group, with a group in view,
+  removes the device from that group only. No notice for overlap — it is allowed — only the
+  "In several groups" filter. Do not bring back a uniqueness rule.
+- **A list filter offers only values some device has** (the user: "0 means it does not exist") —
+  plus any already ticked, so it can be unticked. The Group filter lists each group by its own
+  name only — never a merged "A + B" or "In several groups" (the user rejected both); a device in
+  two groups matches either name.
+- **Edit group** (`/cota/groups/{id}/edit`) renames and adds in bulk through the Add group dialog
+  (`data-edit-id`); a rename with no devices given skips the check.
+- **Every `.data-grid` column is resizable** (`base.html`, `window.resizableGrids`): the first
+  drag switches the table to `table-layout: fixed` at its current widths; double-click resets;
+  widths kept per page in localStorage. A redraw that replaces a table must call it again.
+- **A device's last job survives the day's purge**: `cota_campaign.keep_last_jobs` copies each
+  device's newest job (name, status, time) onto `cota_device` before `purge_previous_days` deletes
+  it; the list reads today's jobs first (`LAST_JOB_SQL`). One status vocabulary,
+  `cota_campaign.JOB_STATUSES`, for the column, the filter and the pills.
+- **No help text, anywhere, and every grey measured** (the user, 10-10-2026 — "I told you
+  thousand times"). Placeholders show a format or nothing; notices state the fact; empty states
+  are one line; explanations are `data-tip` hold-tips. Greys are WCAG AA on every surface
+  (`--muted` ≥ 4.8:1, `--dim` ≥ 7.3:1 in both themes); no text under ~11.5 px; labels `--dim`,
+  weight 600. The `utility-ui` skill has the sweep list — run it before showing a page.
+- **The Commands page is saved commands; one dialog adds and edits** (`cota_commands.html`).
+  `/cota/commands/describe` returns `reads_as`, `saved_as`, `parameter` and `parameter_name` per
+  line, and the dialog asks for a parameter name only when the parameter has none;
+  `cota_commands_save` saves it in the same submit. Parameter names fold below (`?names=1`
+  opens them).
+- **Job progress glides and counts** (`cota_job.html`): segments carry `data-key` and the big
+  bar keeps zero-width segments so they can move; numbers marked `data-tw` count up. Motion only
+  while running (`.is-running`), phase-locked by `--flow-delay` / `--sweep-delay` so the 5 s
+  redraw does not restart it.
 - **A user-supplied string never goes inside an inline script.** HTML-escaping does not protect
   it there: the attribute is decoded before the script runs. Put it in a `data-` attribute and
   read `this.dataset` (the group delete confirm does).
+- **The Overview (`/cota/overview`, `cota_insight.py`) is the module's first page** — today's
+  record plus Web FOTA's registry, read-only. The cross-module join is the point: a device that
+  never answers a command but pinged the OTA platform in the last hour is the COTA counterpart
+  of "Task pending — Online". Every figure there is one SQL pass over today's results
+  (`_devices_with_fota`) — never a query per device, a fleet job is 30,000 of them.
+- **A device id is never an IMEI.** Cloud ids are 1–5 digits; `looks_like_imei` refuses 14+
+  digits wherever ids are typed or uploaded, `read_csv_devices` never reads the IMEI column as
+  the id, and a map row whose id is its own IMEI is repaired from the cloud's records (v19,
+  `_learn_imei`) — on 08-10-2026 69 such rows hid every job device's IMEI. `imei_for` falls back
+  to the newest cloud record when the map has nothing.
 - **No help text on the page — the user's rule (2026-10-08).** A heading is its title and at
   most a count; a tile sub-line carries data or nothing. Explanations go in `data-tip`, which
   `base.html` shows only after the pointer rests on it for 5 s (`HOLD_MS`). The user's words:
   inline help "gives an AI-generated look". `test_cota_headings_carry_a_count_at_most_never_a_sentence`
   holds the COTA headings; tile captions and `opt` asides are not covered by it, so check them by eye.
+- **One design through the application** (the user, 12-10-2026: "implement the UI/UX through
+  the application"). Web FOTA follows the Intouch COTA design: every table in every template is a
+  `.data-grid` (`test_every_table_is_a_data_grid`); tiles lead with the share (`macros.tile(…,
+  total=…)`); Web FOTA's Devices is the COTA list — `fota_devices.py` filters, sorts and pages in
+  SQL over `metrics.at`, and both lists take `th_sort`, `pick` and `pager` from `_grid.html`
+  (imported `with context`: they read the page's `link()`, `sort`, `direction`, `filters`,
+  `opts`). The list filter's script is in `base.html`, once; a box names the form its values go
+  to (`data-form`), which is how the Overview/Firmware model slicer reuses it. A grouped header
+  (`table.grouped`) sits in a `.grid-scroll` frame so its tiers stick to it, and is left out of
+  column resizing — its first row spans columns.
 - **Delete, Remove and Cancel are red and confirm first** — the form carries `data-confirm`
   (with `{name}` from `data-name`) and optionally `data-confirm-action`; one listener in
   `base.html` opens the shared `<dialog>`. Do not write a confirm per page.
@@ -654,7 +740,7 @@ for. Advancing it is incremental: a fetch of a fixed fleet changes ~150 devices,
   slowness.** It returns the right answer, so nothing fails; it just costs a full fleet
   resolution. Three were found this way, all outside metrics.py and all on the request path:
   `rollup.fragmentation` (called by `kpis`, so every page with headline numbers), and the count
-  and the select inside `api._device_rows` — two resolutions per load, which is why `/devices`
+  and the select inside the device list (then `api._device_rows`, now `fota_devices.rows`) — two resolutions per load, which is why `/devices`
   took 41s. Grep for `device_state` outside metrics.py before assuming a page is slow for an
   interesting reason.
 
@@ -1023,6 +1109,9 @@ ota_analytics/
   cota_run.py    sequences: one device, commands one at a time
   cota_campaign.py    jobs: many devices × a sequence, the scheduler, groups, day retention
   cota_library.py     the command library: parameter names, saved commands, names as typed
+  cota_insight.py     the Overview: today's figures, and Web FOTA's view of the silent devices
+  cota_fleet.py       the Devices list: filter/sort/page in SQL, add, tags, groups (overlap allowed)
+  fota_devices.py     Web FOTA's Devices list: the same design — list filters with counts, in SQL
   scheduler.py   periodic fetch and rollup
   errors.py      failure log shown at /errors
   exports.py     XLSX report generation

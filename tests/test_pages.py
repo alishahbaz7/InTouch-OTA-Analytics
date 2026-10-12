@@ -99,7 +99,8 @@ def test_cota_sign_in_is_reached_from_its_status_chip(client, cota_env):
     body = client.get("/cota/signin").text
     rail = body[body.index('<aside class="rail"'):body.index("</aside>")]
     assert "/cota/signin" not in rail
-    assert 'id="cota-signin-btn"' not in body and ">Cloud sign-in<" not in body
+    assert 'id="cota-signin-btn"' not in body
+    assert not re.search(r">\s*Cloud sign-in\s*</(a|button)>", body)    # no button; the card heading may say it
     assert re.search(r'class="status-chip status-\w+ is-current"\s+href="/cota/signin"', body)
     assert "<h1>Sign in</h1>" in body and "<strong>Intouch COTA</strong>" in body
     jobs = client.get("/cota").text
@@ -147,6 +148,10 @@ def cota_env(tmp_path, monkeypatch):
 
     keyring = FakeKeyring()
     monkeypatch.setattr(sources, "_keyring", lambda: keyring)
+    # Jobs must finish the day they start, and these tests run on the real clock: pinned to ten
+    # hours left, a few-minute test job would otherwise be refused just before midnight.
+    from ota_analytics import cota_campaign
+    monkeypatch.setattr(cota_campaign, "minutes_left_today", lambda now=None: 600.0)
     monkeypatch.setattr(cota_connection, "SETTINGS_PATH", tmp_path / "cota_connection.json")
     monkeypatch.delenv(cota.ENV_TOKEN, raising=False)
     monkeypatch.delenv(cota_connection.ENV_PASSWORD, raising=False)
@@ -172,6 +177,35 @@ def test_a_pasted_token_is_kept_but_never_shown(client, cota_env):
     client.post("/cota/signout")
     assert not cota_env.store
     assert "Cloud: not signed in" in client.get("/cota").text
+
+
+def test_signing_out_keeps_a_remembered_password_and_forgetting_is_its_own_step(client, cota_env):
+    """10-10-2026: sign out, and the next sign-in still needs no typing; forgetting the password
+    is a red button that asks first."""
+    from ota_analytics import cota_connection
+    conn = cota_connection.load()
+    conn.method, conn.username = "password", "riya@example.com"
+    cota_connection.save(conn)
+    cota_connection.save_password("riya@example.com", "not-a-real-password")
+    cota_connection.use_token(conn, "a-token-long-enough-to-count")
+    body = client.post("/cota/signout").text
+    assert "Your password stays saved" in body and "not-a-real-password" not in body
+    assert "not-a-real-password" in cota_env.store.values()           # still in the store
+    assert "Cloud: not signed in" in client.get("/cota").text
+    page = re.sub(r"\s+", " ", client.get("/cota/signin").text)
+    assert 'placeholder="Saved"' in page and 'form="cota-forget"' in page
+    assert 'data-confirm="Forget the saved password for {name}?' in page
+    body = client.post("/cota/signin/forget").text
+    assert "The saved password was removed." in body and not cota_env.store
+
+
+def test_the_sign_in_page_keeps_only_what_is_needed(client, cota_env):
+    page = re.sub(r"\s+", " ", client.get("/cota/signin").text)
+    assert ">CVTMS Cloud</option>" in page and "InTouch cloud" not in page
+    assert "Tokens and passwords are kept in" not in page
+    assert "Nothing is sent to a device from this tab" not in page
+    assert "The cloud cannot tell us when a token expires" not in page
+    assert page.index("<summary") < page.index('name="base_url"')     # API URL is in the fold
 
 
 def test_a_token_from_the_environment_is_reported_as_such(client, cota_env, monkeypatch):
@@ -318,30 +352,6 @@ def test_a_custom_cloud_keeps_its_url_and_a_known_one_cannot_be_edited(client, c
     assert cota_connection.load().base_url == cota.BASE_URL
 
 
-def test_the_device_map_loads_from_a_csv_and_is_searchable(client, cota_env):
-    sheet = ("Device Unique No,Device ID,Device Type\n"
-             "865510083360422,14906,124\n"
-             "865510083360430,14907,124\n"
-             ",14908,124\n").encode()
-    body = client.post("/cota/devices/import",
-                       files={"file": ("map.csv", sheet, "text/csv")}).text
-    assert "2 added, 0 updated" in body and "1 skipped" in body
-    assert "865510083360422" in body
-
-    found = client.get("/cota/devices?q=0430").text
-    assert "865510083360430" in found and "865510083360422" not in found
-    assert "865510083360422" in client.get("/cota/devices?q=14906").text
-    mapped = re.search(r'Devices mapped</div>\s*<div class="tile-value">(\d+)',
-                       client.get("/cota/devices").text)
-    assert mapped and mapped.group(1) == "2"
-
-
-def test_a_device_map_that_is_not_a_sheet_is_refused(client, cota_env):
-    body = client.post("/cota/devices/import",
-                       files={"file": ("map.xlsx", b"<html>login</html>", "text/html")}).text
-    assert "notice-error" in body
-
-
 def test_the_cota_page_lists_jobs_from_this_install(client, cota_env):
     from ota_analytics import db
 
@@ -362,9 +372,11 @@ def test_the_model_picker_is_the_same_control_on_every_page(client):
     """
     for path in ("/", "/firmware"):
         body = client.get(path).text
-        assert 'id="model-picker"' in body, f"{path} has no model dropdown"
-        assert 'class="dropdown-list"' in body
-        assert 'type="checkbox" name="model"' in body
+        # The Devices tables' list filter (12-10-2026): every model with its count, applied
+        # through the page's own form.
+        assert 'id="model-form"' in body, f"{path} has no model filter"
+        assert 'data-multi="model" data-form="model-form"' in body
+        assert 'class="multi-count"' in body
         assert "ctrl+click" not in body, f"{path} still explains a multi-select"
         assert "<select name=\"model\" multiple" not in body
 
@@ -669,25 +681,23 @@ def test_each_group_in_the_model_table_reports_its_own_pending(client):
 
 # ─── the devices filter row ─────────────────────────────────────────────────
 
-def test_firmware_is_a_checkbox_list_of_versions_only(client):
-    """Several versions are usually interesting together — the ones a rollout moves between.
-
-    A single-choice select meant one page load per version. The device counts are gone from the
-    list because they were the widest thing in it and are already on the Firmware page.
-    """
+def test_every_column_with_known_values_filters_as_in_excel(client):
+    """Intouch COTA's Devices design on Web FOTA's list (12-10-2026): a list filter under each
+    such header — every value with its count, All / None / Invert / Only — and a typed filter
+    for the IMEI. Several versions are usually interesting together, so the firmware filter
+    takes any number of them."""
     flat = re.sub(r"\s+", " ", client.get("/devices").text)
-    assert 'id="firmware-picker"' in flat
-    assert 'id="firmware-all"' in flat            # a real toggle, not a reset link
-    assert 'type="checkbox" name="firmware"' in flat
+    for key in ("model", "firmware", "changed", "target", "config", "hw", "status",
+                "queue_state", "seen"):
+        assert f'data-multi="{key}"' in flat, f"no list filter for {key}"
+    assert 'name="q" form="filters"' in flat
     assert '<select name="firmware"' not in flat
-
-    picker = flat[flat.index('id="firmware-picker"'):]
-    picker = picker[:picker.index("</details>")]
-    versions = re.findall(r'name="firmware" value="([^"]+)"', picker)
-    assert versions, "no versions offered"
-    # Only the All row carries a count; the versions themselves are bare.
-    listing = picker[picker.index('class="dropdown-list"'):]
-    assert "<em>" not in listing
+    panel = flat[flat.index('data-multi="firmware"'):]
+    panel = panel[:panel.index('class="multi-foot"')]
+    assert re.findall(r'type="checkbox" value="([^"]+)"', panel), "no versions offered"
+    assert 'class="multi-count"' in panel
+    for word in ('data-pick="all"', 'data-pick="none"', 'data-pick="invert"', "data-only"):
+        assert word in panel
 
 
 def test_several_firmware_versions_can_be_selected_at_once(client):
@@ -726,7 +736,9 @@ def test_the_group_text_box_is_gone_but_the_link_still_works(client):
         filtered = client.get(f"/devices?group={name}")
         assert filtered.status_code == 200
         # And the filter survives paging, so it is carried in a hidden field.
-        assert f'name="group" value="{name}"' in re.sub(r"\s+", " ", filtered.text)
+        flat_filtered = re.sub(r"\s+", " ", filtered.text)
+        assert f'name="group" value="{name}"' in flat_filtered
+        assert 'class="group-chip"' in flat_filtered       # and it says which group is in view
 
 
 def test_an_imei_can_be_searched_by_any_part_of_it(client):
@@ -752,8 +764,6 @@ def test_an_imei_can_be_searched_by_any_part_of_it(client):
 
 # ─── Intouch COTA: sending one command from the Devices tab ────────────────
 
-PORTAL_COPY = ('^"^{^\\^"deviceType^\\^":^[124^],^\\^"deviceList^\\^":^[14906^],'
-               '^\\^"type^\\^":36,^\\^"val1^\\^":^\\^"DBD76B82D531^\\^"^}^"')
 
 
 class FakeCloud:
@@ -788,120 +798,6 @@ def cloud(monkeypatch, cota_env):
     return fake
 
 
-def _form(**over):
-    form = {"device_type": "124", "device_ids": "14906", "cmd_type": "36",
-            "val1": "DBD76B82D531"}
-    form.update(over)
-    return form
-
-
-def _preview(client, **over):
-    body = client.post("/cota/devices/send", data={**_form(**over), "action": "preview"}).text
-    digest = re.search(r'name="previewed" value="([0-9a-f]+)"', body)
-    return body, digest.group(1) if digest else None
-
-
-def test_the_portal_payload_as_copied_fills_the_form(client, cloud):
-    body = client.post("/cota/devices/send",
-                       data={"action": "read", "payload": PORTAL_COPY}).text
-    assert "Payload read into the form" in body
-    assert 'name="device_type" inputmode="numeric" class="mono"\n                   value="124"' in body
-    assert "14906</textarea>" in body
-    assert 'value="DBD76B82D531"' in body
-    assert cloud.sent == []
-
-
-def test_preview_shows_the_exact_request_and_sends_nothing(client, cloud):
-    body, digest = _preview(client, device_ids="14906, 14907 ,14908")
-    expected = json.dumps({"deviceType": [124], "deviceList": [14906, 14907, 14908],
-                           "type": 36, "val1": "DBD76B82D531"})
-    assert expected in html.unescape(body)
-    assert digest and "Send to 3 devices" in body
-    assert cloud.sent == []
-
-
-def test_send_needs_the_box_ticked(client, cloud):
-    _, digest = _preview(client)
-    body = client.post("/cota/devices/send",
-                       data={**_form(), "action": "send", "previewed": digest}).text
-    assert "Tick the box" in body
-    assert cloud.sent == []
-
-
-def test_send_refuses_a_form_that_changed_since_the_preview(client, cloud):
-    _, digest = _preview(client)
-    body = client.post("/cota/devices/send", data={
-        **_form(device_ids="14906, 99999"), "action": "send", "previewed": digest,
-        "confirm": "true"}).text
-    assert "changed since the preview" in body
-    assert cloud.sent == []
-
-
-def test_a_confirmed_send_goes_out_once_and_is_recorded_as_a_job(client, cloud):
-    from ota_analytics import db
-
-    _, digest = _preview(client, device_ids="14906,14907")
-    body = client.post("/cota/devices/send", data={
-        **_form(device_ids="14906,14907"), "action": "send", "previewed": digest,
-        "confirm": "true"}).text
-    assert cloud.sent == [{"deviceType": [124], "deviceList": [14906, 14907], "type": 36,
-                           "val1": "DBD76B82D531"}]
-    assert "Sent to 2 device(s) in 1 call(s)" in body and ">Accepted<" in body
-
-    states = [r[0] for r in db.connect().execute("SELECT state FROM cota_task")]
-    assert states == ["sent", "sent"]
-    assert "Command 36 → 2 devices" in client.get("/cota").text
-
-
-def test_a_long_list_is_split_into_calls_of_the_per_call_limit(client, cloud):
-    from ota_analytics import cota
-
-    ids = ",".join(str(14000 + n) for n in range(cota.MAX_DEVICES_PER_CALL + 3))
-    _, digest = _preview(client, device_ids=ids)
-    client.post("/cota/devices/send", data={**_form(device_ids=ids), "action": "send",
-                                            "previewed": digest, "confirm": "true"})
-    assert [len(b["deviceList"]) for b in cloud.sent] == [cota.MAX_DEVICES_PER_CALL, 3]
-
-
-def test_imeis_are_refused_as_device_ids(client, cloud):
-    body, digest = _preview(client, device_ids="865510083360422, abc")
-    assert "Not a device id: abc" in body and digest is None
-
-
-def test_sending_needs_a_cloud_sign_in(client, cloud):
-    from ota_analytics import cota
-
-    _, digest = _preview(client)
-    cota.forget_token()
-    body = client.post("/cota/devices/send", data={**_form(), "action": "send",
-                                                   "previewed": digest, "confirm": "true"}).text
-    assert "Not signed in to the cloud" in body
-    assert cloud.sent == []
-
-
-def test_a_rejected_token_is_reported_and_leaves_the_task_unsent(client, cloud):
-    from ota_analytics import cota, db
-
-    _, digest = _preview(client)
-    cloud.error = cota.CotaError("The cloud rejected the token (HTTP 401). It has most likely "
-                                 "expired.")
-    body = client.post("/cota/devices/send", data={**_form(), "action": "send",
-                                                   "previewed": digest, "confirm": "true"}).text
-    assert "rejected the token" in body
-    assert [r[0] for r in db.connect().execute("SELECT state FROM cota_task")] == ["planned"]
-
-
-def test_a_device_in_the_map_is_shown_with_its_imei(client, cloud):
-    from ota_analytics import db
-
-    conn = db.connect()
-    with conn:
-        conn.execute("INSERT INTO cota_device VALUES ('865510083360422', 14906, 124, 'x', 'now')")
-    body, _ = _preview(client, device_ids="14906, 14907")
-    assert "865510083360422" in body
-    assert "1 of these device ids is not" in body
-
-
 # ─── Intouch COTA: Configure — one device, one command, and its stages ─────
 
 def _console_send(client, **over):
@@ -912,9 +808,10 @@ def _console_send(client, **over):
 
 
 def _map(conn, imei="865510083360422", device_id=14906, device_type=124):
+    from ota_analytics import cota
+
     with conn:
-        conn.execute("INSERT INTO cota_device VALUES (?, ?, ?, 'map.csv', '2026-10-06 09:00:00')",
-                     (imei, device_id, device_type))
+        cota.put_device(conn, device_id, imei=imei, device_type=device_type, source="map.csv")
 
 
 def cloud_record(timestamp=None, **over):
@@ -1195,7 +1092,8 @@ def test_the_device_card_says_what_web_fota_knows(client, cloud):
 
 def test_a_device_not_in_the_map_says_why_there_is_no_card(client, cloud):
     body = client.get("/cota/console?device=777").text
-    assert "not in the device map" in body and "ID: 777" in body
+    assert "IMEI not known." in body and 'href="/cota/devices">Load the device map</a>' in body
+    assert "ID: 777" in body
 
 
 @pytest.mark.parametrize("text, reads", [
@@ -1544,7 +1442,7 @@ def test_a_rejected_token_turns_the_cloud_chip_red_at_once(client, real_client_c
     body = client.get("/cota/console?device=14906").text
     chip = _chip(body)
     assert "status-error" in chip and "Cloud: session expired" in chip and "HTTP 401" in chip
-    assert "sign in again" in body                               # the composer says it too
+    assert "Sign in again" in body                               # the composer says it too
     assert "rejected the saved token" in client.get("/cota/signin").text
 
 
@@ -1719,6 +1617,30 @@ def _job_preview(client, **form):
     return client.post("/cota/jobs/preview", data=data).text
 
 
+def test_a_wait_after_a_command_goes_from_the_library_through_the_plan_to_the_job(client, cloud,
+                                                                                no_job_threads):
+    """10-10-2026: SET Force Sync Audio takes the device off the air; the next command must wait.
+    Saved on the command, shown and changeable per line, counted in the plan, kept by the job."""
+    reply = client.post("/cota/commands/saved", data={"name": "Force Sync Audio", "val1": "DBD76F85D531",
+                                                      "wait_after": "180"}, follow_redirects=False)
+    assert reply.status_code == 303
+    library = re.sub(r"\s+", " ", client.get("/cota/commands").text)
+    assert "3 min</span>" in library and 'data-wait="180"' in library
+    sync, ftp = "DBD76F85D531", "DAD76F4B"
+    # The form sends one wait per line; without them the saved command's is the default.
+    default = re.sub(r"\s+", " ", _job_preview(client, devices="786", commands=f"{sync}\n{ftp}"))
+    assert 'name="waits" value="180,0"' in default and "then wait 3 min" in default
+    changed = re.sub(r"\s+", " ", client.post("/cota/jobs/preview", data={
+        "name": "Sync", "devices": "786", "commands": f"{sync}\n{ftp}", "waits": ["300", "0"]}).text)
+    assert 'name="waits" value="300,0"' in changed and 'data-waits="300,0"' in changed
+    client.post("/cota/jobs/start", data={"device_ids": "786", "commands": f"{sync}\n{ftp}", "waits": "300,0"})
+    assert db.connect().execute("SELECT waits FROM cota_campaign").fetchone()[0] == "[300, 0]"
+    page = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
+    assert "5 min</span>" in page                                     # on the command summary
+    again = client.get("/cota/jobs/new?from=1").text
+    assert 'data-waits="300,0"' in again                               # Duplicate keeps them
+
+
 def test_the_upload_template_is_the_clouds_own_device_list(client, cota_env):
     reply = client.get("/cota/groups/template.csv")
     assert reply.status_code == 200
@@ -1730,47 +1652,9 @@ def test_the_upload_template_is_the_clouds_own_device_list(client, cota_env):
 
 
 def test_both_upload_forms_offer_the_template(client, cota_env):
-    for path in ("/cota/jobs/new", "/cota/devices"):
-        body = client.get(path).text
-        assert 'href="/cota/groups/template.csv"' in body and "Download template" in body
-
-
-def test_a_group_from_the_template_learns_its_tracking_codes(client, cota_env):
-    from ota_analytics import cota_campaign
-
-    csv = "id,trackingCode\n14906,865510083360422\n786,\n14906,865510083360422\n"
-    body = client.post("/cota/groups", data={"name": "Desk"}, files=_csv_upload(csv)).text
-    assert "Group “Desk” saved with 2 devices (1 duplicate dropped)." in body
-    assert "1 tracking code added to the device map." in body
-    conn = db.connect()
-    assert cota_campaign.group_devices(conn, cota_campaign.groups(conn)[0]["id"]) == [14906, 786]
-    imei = conn.execute("SELECT imei FROM cota_device WHERE device_id = 14906").fetchone()[0]
-    assert imei == "865510083360422"
-    assert conn.execute("SELECT COUNT(*) FROM cota_device WHERE device_id = 786").fetchone()[0] == 0
-
-
-def test_a_csv_of_bare_ids_needs_no_header(client, cota_env):
-    body = client.post("/cota/groups", data={"name": "Bare"},
-                       files=_csv_upload("14906\n786\n")).text
-    assert "saved with 2 devices" in body
-
-
-def test_a_group_with_a_bad_id_is_not_saved_and_says_where(client, cota_env):
-    body = client.post("/cota/groups", data={"name": "Bad", "devices": "14906, 78x6"}).text
-    assert "Not saved" in body and "78x6" in body
-    assert db.connect().execute("SELECT COUNT(*) FROM cota_group").fetchone()[0] == 0
-
-
-def test_saving_a_group_again_replaces_it_and_delete_removes_it(client, cota_env):
-    client.post("/cota/groups", data={"name": "Desk", "devices": "14906, 786"})
-    client.post("/cota/groups", data={"name": "Desk", "devices": "786"})
-    conn = db.connect()
-    rows = conn.execute("SELECT g.id, COUNT(*) FROM cota_group g "
-                        "JOIN cota_group_member m ON m.group_id = g.id GROUP BY g.id").fetchall()
-    assert [r[1] for r in rows] == [1]
-    reply = client.post(f"/cota/groups/{rows[0][0]}/delete", follow_redirects=False)
-    assert reply.headers["location"] == "/cota/devices#groups"
-    assert conn.execute("SELECT COUNT(*) FROM cota_group_member").fetchone()[0] == 0
+    assert 'href="/cota/groups/template.csv"' in client.get("/cota/jobs/new").text
+    body = client.get("/cota/devices").text           # Add device: the same list, with tags
+    assert 'href="/cota/devices/template.csv"' in body and "Download template" in body
 
 
 def test_a_group_name_never_reaches_a_script_string(client, cota_env):
@@ -1829,12 +1713,12 @@ def test_starting_a_job_runs_it_in_the_background(client, cloud, no_job_threads)
     assert reply.status_code == 303 and reply.headers["location"] == "/cota/jobs/1"
     assert no_job_threads == [1] and cloud.sent == []              # started, not run inline
     body = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
-    assert "#1 · FTP check" in body and "0 of 2 device commands finished" in body
+    assert "#1 · FTP check" in body and '<span data-tw="finished">0</span> of 2 device commands finished' in body
     assert "GET FTP_SETTINGS" in body and "<span>Pause</span></button>" in body
     assert "/cota/jobs/1/export?format=csv" in body
     assert 'data-unfold="786"' in body                               # each device's conversation
     listing = client.get("/cota").text
-    assert 'href="/cota/jobs/1"' in listing and "One job runs at a time" in listing
+    assert 'href="/cota/jobs/1"' in listing and 'data-tip="One job runs at a time."' in listing
 
 
 def test_a_job_page_redraws_from_the_local_record_only(client, cloud, no_job_threads):
@@ -1851,7 +1735,7 @@ def test_devices_in_progress_go_from_the_form_to_the_job_and_a_batch_is_held_to_
         client, cloud, no_job_threads):
     ids = ", ".join(str(n) for n in range(1, 451))
     body = re.sub(r"\s+", " ", _job_preview(client, devices=ids, in_progress="150", batch_size="999"))
-    assert "150 at a time, the rest in line — 3 rounds" in body
+    assert "<em>At a time</em><b>150</b> <small>the rest in line — 3 rounds</small>" in body
     assert 'name="in_progress" value="150"' in body and 'name="batch_size" value="200"' in body
     reply = client.post("/cota/jobs/start", data={"device_ids": ids, "commands": "DAD76F4B",
                                                   "in_progress": "150", "batch_size": "200"},
@@ -1862,7 +1746,8 @@ def test_devices_in_progress_go_from_the_form_to_the_job_and_a_batch_is_held_to_
     page = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
     assert "150 at a time" in page and "300 devices in line" in page and ">In line</a>" in page
     # Each tile's share leads, its count beside it (the user, 08-10-2026): nothing sent yet.
-    assert '100%<span class="tile-count">450</span>' in page and '0%<span class="tile-count">0</span>' in page
+    assert '<span data-tw="not_sent-pct">100</span>%<span class="tile-count" data-tw="not_sent-n">450</span>' in page
+    assert '<span data-tw="failed-pct">0</span>%<span class="tile-count" data-tw="failed-n">0</span>' in page
     assert "on the first attempt</div>" not in page              # the tile's sub-line is gone
     # The title, actions and progress are the sticky top; the devices scroll under it.
     assert page.index('id="job-top"') < page.index('id="job-progress"') < page.index('id="job-live"')
@@ -1907,20 +1792,10 @@ def test_the_job_export_has_a_row_per_device_and_command(client, cloud, no_job_t
     reply = client.get("/cota/jobs/1/export?format=csv")
     assert reply.status_code == 200
     lines = reply.content.decode("utf-8-sig").splitlines()
-    assert lines[0].startswith("Device ID,IMEI,Step,Command")
+    assert lines[0].startswith("Device ID,IMEI,Device type,FW version,Step,Command")   # firmware: 10-10-2026
     assert len(lines) == 1 + 2 * 2
     xlsx = client.get("/cota/jobs/1/export?format=xlsx")
     assert xlsx.status_code == 200 and xlsx.content[:4] == b"PK\x03\x04"
-
-
-def test_a_single_send_from_devices_is_listed_on_jobs(client, cloud):
-    _, digest = _preview(client, device_ids="14906, 786")
-    client.post("/cota/devices/send", data={**_form(device_ids="14906, 786"), "action": "send",
-                                            "previewed": digest, "confirm": "true"})
-    assert len(cloud.sent) == 1
-    body = re.sub(r"\s+", " ", client.get("/cota").text)
-    assert "Single sends" in body
-    assert re.search(r'<td class="n">2</td> <td class="n ok-text">2</td>', body)
 
 
 # ─── 2.0.1: the jobs list, a new job, the job page, the command library ─────
@@ -1928,6 +1803,82 @@ def test_a_single_send_from_devices_is_listed_on_jobs(client, cloud):
 def _start_job(client, **over):
     data = {"name": "FTP check", "device_ids": "14906,786", "commands": "DAD76F4B\nDAD76C0A", **over}
     return client.post("/cota/jobs/start", data=data, follow_redirects=False)
+
+
+def test_a_job_shows_its_clock_and_start_says_how_long_it_can_take(client, cloud, no_job_threads):
+    """09-10-2026: start time, max time and remaining on the job; the max before Start."""
+    preview = re.sub(r"\s+", " ", _job_preview(client, devices="786, 14906", commands="DAD76F4B\nDAD76C0A"))
+    assert 'data-confirm-tone="go"' in preview and 'data-confirm-action="Start job"' in preview
+    # 2 commands × 100 s and a tenth: 4 min — the job's hard limit (10-10-2026).
+    # The confirmation is a formal summary: a sentence, then the figures as a table (10-10-2026).
+    assert 'data-confirm="2 commands will be sent to 2 devices, in the order listed."' in preview
+    summary = preview.split('<template id="start-summary">')[1].split("</template>")[0]
+    assert "<dt>Maximum duration</dt><dd>4 min</dd>" in summary and "<dt>Stops by</dt>" in summary
+    assert "<dt>Devices at a time</dt><dd>2</dd>" in summary and "<dt>Estimated duration</dt>" in summary
+    assert "<em>May take up to</em> <b>4 min</b> <small>hard stop · ends by " in preview
+    # The arithmetic is in the figure's hold-tip, not printed (10-10-2026).
+    assert ('data-tip="1 round × 2 commands × 1 min 40 s (30 s for an answer, up to 3 attempts) '
+            '= 3 min 20 s, + 10% → 4 min.') in preview
+    assert 'class="plan-max-sum"' not in preview and "Each command</dt>" not in preview
+    client.post("/cota/jobs/start", data={"device_ids": "786, 14906", "commands": "DAD76F4B\nDAD76C0A"})
+    assert db.connect().execute("SELECT validity_hours * 60 FROM cota_campaign").fetchone()[0] == 4
+    page = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
+    assert "<em>Started</em>" in page and "<em>Max time</em><b>4 min</b>" in page
+    assert "<em>Remaining</em><b>up to 3 min 20 s</b>" in page
+
+
+def test_a_job_its_time_limit_stopped_says_so_and_offers_the_rest(client, cloud, no_job_threads):
+    client.post("/cota/jobs/start", data={"device_ids": "1, 2, 3", "commands": "DAD76F4B"})
+    conn = db.connect()
+    with conn:                                     # the limit came: 1 finished, 1 mid-way, 1 never began
+        conn.execute("UPDATE cota_campaign SET state = 'done'")
+        conn.execute("UPDATE cota_campaign_device SET state = 'done' WHERE device_id = 1")
+        conn.execute("UPDATE cota_campaign_device SET state = 'expired' WHERE device_id = 2")
+        conn.execute("UPDATE cota_campaign_device SET state = 'not_started' WHERE device_id = 3")
+    page = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
+    assert ">time limit</span>" in page and ">done</span>" not in page
+    assert "Stopped at its 2-minute time limit — 1 mid-sequence and 1 not started." in page
+    assert 'href="/cota/jobs/new?from=1&which=rest"' in page and "Continue the rest — 2" in page
+    form = re.sub(r"\s+", " ", client.get("/cota/jobs/new?from=1&which=rest").text)
+    assert "the devices its time limit stopped (2)" in form
+    assert ">time limit</span>" in client.get("/cota").text
+
+
+def test_the_first_visit_of_a_new_day_never_shows_yesterdays_jobs(client, cota_env, monkeypatch):
+    """10-10-2026: the Overview computed its figures before the day's clearing ran, so the first
+    visit of a new day showed yesterday's jobs as today's, and the second showed nothing."""
+    from ota_analytics import cota_campaign
+    conn = db.connect()
+    cid = cota_campaign.create(conn, name="yesterday", device_ids=[5001], commands_text="DAD76F4B")
+    with conn:
+        conn.execute("UPDATE cota_campaign_result SET attempts = 1, state = 'done', outcome = 'answered'")
+        conn.execute("UPDATE cota_campaign SET created_at = '2026-01-01 10:00:00', state = 'done' WHERE id = ?", (cid,))
+    monkeypatch.setattr(cota_campaign, "_purged_this_process", False)   # a fresh process, a new day
+    assert "No commands sent today." in client.get("/cota/overview").text
+    assert 'href="/cota/jobs/1"' not in client.get("/cota").text
+
+
+def test_the_cota_overview_reads_the_day_and_asks_web_fota_about_the_silent(client, cota_env):
+    assert "No commands sent today." in client.get("/cota/overview").text
+    from ota_analytics import cota, cota_campaign
+    conn = db.connect()
+    cota_campaign.create(conn, name="t", device_ids=[5001, 5002], commands_text="DAD76F4B")
+    now = cota._now()
+    with conn:
+        conn.execute("UPDATE cota_campaign_result SET attempts = 1, state = 'done', outcome = 'answered', "
+                     "answered_attempt = 1, answer_seconds = 18, finished_at = ? WHERE device_id = 5001", (now,))
+        conn.execute("UPDATE cota_campaign_result SET attempts = 3, state = 'failed', "
+                     "outcome = 'not_delivered', finished_at = ? WHERE device_id = 5002", (now,))
+        # 5002's IMEI is a Web FOTA device of this fixture, last seen two hours ago.
+        cota.put_device(conn, 5002, imei="222", source="test")
+    body = re.sub(r"\s+", " ", client.get("/cota/overview").text)
+    for heading in ("Answer rate by hour", "Today at a glance", "Needs attention", "Commands today",
+                    "By firmware"):
+        assert heading in body
+    assert "Held by the cloud" in body
+    # Taken off at the user's request (10-10-2026).
+    assert "Never answered — last ping" not in body and "Why commands failed" not in body
+    assert 'href="/cota/overview"' in body                     # first in Intouch COTA's rail
 
 
 def test_jobs_opens_on_the_list_and_new_job_is_its_own_page(client, cota_env):
@@ -1956,13 +1907,28 @@ def test_a_job_page_goes_back_to_the_list_and_titles_its_progress(client, cloud,
 def test_the_device_table_uses_the_users_headers(client, cloud, no_job_threads):
     _start_job(client)
     body = re.sub(r"\s+", " ", client.get("/cota/jobs/1").text)
-    heads = re.findall(r"<th[^>]*>(.*?)</th>", body.split('class="job-devices"')[1].split("</thead>")[0])
+    heads = re.findall(r"<th[^>]*>(.*?)</th>", body.split('class="job-devices data-grid"')[1].split("</thead>")[0])
     labels = [re.sub(r"<[^>]+>", "", h).strip() for h in heads]
     assert labels == ["Conversation", "S.No.", "Device ID", "IMEI", "State", "Command",
                       "Now at/Total", "Attempt", "Next", "Answered", "Failed", "Time to answer",
                       "Last answer"]
-    row = body.split('class="job-devices"')[1].split("<tbody>")[1].split("</tr>")[0]
+    row = body.split('class="job-devices data-grid"')[1].split("<tbody>")[1].split("</tr>")[0]
     assert ">1</td>" in row and ">GET FTP_SETTINGS</td>" in row and ">1/2</td>" in row
+
+
+def test_the_job_device_table_sorts_on_its_columns(client, cloud, no_job_threads):
+    """10-10-2026: every header sorts but Next (worked out per row, live); the order survives the
+    live redraw, the filters and the pager."""
+    _start_job(client, device_ids="14906,786,5")
+    ids = lambda html: [int(x) for x in re.findall(r'data-unfold="(\d+)"', html)]
+    assert ids(client.get("/cota/jobs/1").text) == [14906, 786, 5]                  # job order
+    page = client.get("/cota/jobs/1?sort=id&dir=desc").text
+    assert ids(page) == [14906, 786, 5][::1] and ids(client.get("/cota/jobs/1?sort=id").text) == [5, 786, 14906]
+    assert 'aria-sort="ascending"' in client.get("/cota/jobs/1?sort=id").text
+    assert 'data-query="state=&amp;q=&amp;sort=id&amp;dir=desc&page=1"' in page
+    live = client.get("/cota/jobs/1/status?sort=id&dir=asc").json()["html"]
+    assert ids(live) == [5, 786, 14906]
+    assert 'href="/cota/jobs/1?state=waiting&amp;q=&amp;sort=id&amp;dir=desc"' in page   # filters keep it
 
 
 def test_a_device_unfolds_to_its_conversation_in_the_job(client, cloud, no_job_threads):
@@ -1986,14 +1952,39 @@ def test_the_answer_wait_and_time_limit_are_job_settings(client, cloud, no_job_t
     preview = client.post("/cota/jobs/preview", data={"devices": "786", "commands": "DAD76F4B",
                                                       "answer_wait_seconds": "40"}).text
     assert re.search(r'name="answer_wait_seconds"[^>]*value="40"', preview)
-    assert "40 s for an answer, up to 3 attempts" in preview and "stops at 60 min" in preview
+    assert "(40 s for an answer, up to 3 attempts)" in preview and "hard stop · ends by" in preview
+    # The fold is titled alone; a setting moved off its default is marked (10-10-2026).
+    assert ">Advanced settings</span> <span class=\"pill pill-changed\">Changed</span>" in preview
+    assert "pill-changed" not in client.get("/cota/jobs/new").text
 
 
 def test_a_plan_that_cannot_fit_its_time_limit_says_so(client, cloud, no_job_threads):
     ids = ", ".join(str(n) for n in range(100000, 101500))
     body = re.sub(r"\s+", " ", client.post("/cota/jobs/preview", data={
         "devices": ids, "commands": "DAD76F4B\nDAD76C0A\nDDD76D66", "time_limit_minutes": "5"}).text)
-    assert "longer than its 5-minute limit" in body and "Start job" in body
+    assert "Your 5-minute limit is shorter than this job's max time" in body and "Start job" in body
+
+
+def test_the_preview_says_how_long_it_may_take_and_the_sum_behind_it(client, cloud, no_job_threads):
+    """The user's example (10-10-2026): 2,000 devices × 6 commands, 200 at a time — 10 rounds ×
+    6 × 100 s = 100 min, and a tenth: 110 min, the job's hard stop instead of a fixed hour."""
+    ids = ", ".join(str(n) for n in range(100000, 102000))
+    body = re.sub(r"\s+", " ", client.post("/cota/jobs/preview", data={
+        "devices": ids, "commands": "\n".join(["DAD76F4B"] * 6)}).text)
+    assert "<em>May take up to</em> <b>1 h 50 min</b> <small>hard stop · ends by " in body
+    assert ("10 rounds × 6 commands × 1 min 40 s (30 s for an answer, up to 3 attempts) = 1 h 40 min, "
+            "+ 10% → 1 h 50 min.") in body
+    typed = re.sub(r"\s+", " ", client.post("/cota/jobs/preview", data={
+        "devices": ids, "commands": "\n".join(["DAD76F4B"] * 6), "time_limit_minutes": "60"}).text)
+    assert "<em>Stops at</em> <b>1 h</b> <small>your limit · its max time 1 h 50 min" in typed
+
+
+def test_a_job_that_cannot_finish_today_is_held_with_the_number_that_fits(client, cloud, no_job_threads):
+    ids = ", ".join(str(n) for n in range(100000, 130000))
+    body = re.sub(r"\s+", " ", client.post("/cota/jobs/preview", data={
+        "devices": ids, "commands": "\n".join(["DAD76F4B"] * 8)}).text)
+    assert "past the end of today" in body and "devices in progress at once" in body
+    assert "Start job —" not in body                           # held until it fits the day
 
 def test_a_refused_start_goes_back_to_the_form_as_it_was(client, cloud, no_job_threads):
     reply = _start_job(client, commands="DAD76F4B\nhello")
@@ -2026,13 +2017,16 @@ def test_typed_commands_are_named_by_this_install(client, cota_env):
 
 def test_the_command_library_names_commands_on_every_page(client, cloud, no_job_threads):
     body = client.post("/cota/commands/parameters", data={"code": "6c0a", "name": "TIMERS"}).text
-    assert "6C0A is now “TIMERS”" in body
+    assert "Parameter 6C0A is “TIMERS”." in body
     reply = client.post("/cota/commands/saved", data={"name": "Ignition timer 1 s",
                                                       "val1": "DBD76B82D531", "tags": "timers"},
                         follow_redirects=False)
     assert reply.status_code == 303
-    library = client.get("/cota/commands").text
-    assert "Ignition timer 1 s" in library and "SET 6B82" in library and "tag-chip" in library
+    library = re.sub(r"\s+", " ", client.get("/cota/commands").text)
+    assert "Ignition timer 1 s" in library and "tag-chip" in library
+    # An unnamed parameter shows by its code; the type has its own column.
+    assert '<td class="param-cell"><span class="mono">6B82</span></td>' in library
+    assert '<span class="pill pill-kind-set">SET</span>' in library
     preview = client.post("/cota/jobs/preview", data={"devices": "786",
                                                       "commands": "DAD76C0A\nDBD76B82D531"}).text
     assert "GET TIMERS" in preview and "Ignition timer 1 s" in preview
@@ -2080,6 +2074,7 @@ def test_by_command_is_now_the_command_summary(client, cloud, no_job_threads):
     _start_job(client)
     body = client.get("/cota/jobs/1").text
     assert "Command summary" in body and "By command" not in body
+    assert '<th class="n fit">In progress</th>' in body and "In flight" not in body     # the user's word, 10-10-2026
     assert body.count('<td class="outcome-col">') == 2              # one bar per command
 
 
@@ -2112,22 +2107,32 @@ def _source_state(body):
     """{source: (greyed, field disabled)} for the three device sources on the New job form."""
     out = {}
     for key, tag in (("group", "<select"), ("ids", "<textarea"), ("csv", '<input type="file"')):
-        head = re.search(r'<div class="source-option([^"]*)" data-source="%s">' % key, body)
+        head = re.search(r'<div class="source-option([^"]*)" data-source="%s"[^>]*>' % key, body)
         field = re.search(re.escape(tag) + r"[^>]*>", body[head.end():]).group(0)
         out[key] = ("is-off" in head.group(1), " disabled" in field)
     return out
 
 
+def _tab(body):
+    """Which device-source tab the New job form opens on."""
+    return re.search(r'data-tab="(\w+)" aria-selected="true"', body).group(1)
+
+
 def test_a_new_job_takes_devices_from_one_source_at_a_time(client, cloud, no_job_threads):
+    """Tabs (12-10-2026): only the chosen source is shown and sent — the others are hidden and
+    disabled — and the page comes back from a preview on the source that was used."""
     blank = client.get("/cota/jobs/new").text
-    assert _source_state(blank) == {"group": (False, False), "ids": (False, False), "csv": (False, False)}
+    assert _tab(blank) == "ids"                                     # no saved group yet
+    assert _source_state(blank) == {"group": (True, True), "ids": (False, False), "csv": (True, True)}
     client.post("/cota/groups", data={"name": "Desk", "devices": "14906, 786"})
     gid = db.connect().execute("SELECT id FROM cota_group").fetchone()[0]
+    assert _tab(client.get("/cota/jobs/new").text) == "group"       # groups first, once there are some
     by_group = client.post("/cota/jobs/preview", data={"group_id": str(gid), "commands": "DAD76F4B"}).text
+    assert _tab(by_group) == "group"
     assert _source_state(by_group) == {"group": (False, False), "ids": (True, True), "csv": (True, True)}
     by_ids = client.post("/cota/jobs/preview", data={"devices": "786", "commands": "DAD76F4B"}).text
+    assert _tab(by_ids) == "ids"
     assert _source_state(by_ids) == {"group": (True, True), "ids": (False, False), "csv": (True, True)}
-    assert re.search(r'data-clear="ids"\s*>Clear', by_ids)          # Clear shows on the one in use
 
 
 # ─── Commands: search, paging, folds, sharing (2.0.1) ───────────────────────
@@ -2144,7 +2149,18 @@ def test_the_library_is_searched_counted_and_numbered(client, cota_env):
     assert 'name="q"' in body and re.search(r'>Saved commands</span> <span class="hint">3</span>', body)
     found = re.sub(r"\s+", " ", client.get("/cota/commands?q=sos").text)
     assert '<span class="hint">1 of 3</span>' in found and "SOS off" in found and "Read FTP" not in found
-    assert re.search(r'<td class="n dim">1</td> <td class="name-cell"><strong>SOS off', found)  # S.No.
+    assert re.search(r'<td class="n dim">1</td> <td class="name-cell"><strong[^>]*>SOS off', found)  # S.No.
+
+
+def test_saved_commands_sort_on_every_header(client, cota_env):
+    for n, v in (("b Read FTP", "DAD76F4B"), ("a SOS off", "DDD76D66"), ("c Timers", "DBD76C0AD531")):
+        _save(client, n, v)
+    names = lambda q: re.findall(r'<td class="name-cell"><strong[^>]*>([^<]+)</strong>', client.get("/cota/commands?" + q).text)
+    assert names("") == ["b Read FTP", "c Timers", "a SOS off"]                 # GET, SET, CLR
+    assert names("csort=name") == ["a SOS off", "b Read FTP", "c Timers"]
+    assert names("csort=name&cdir=desc") == ["c Timers", "b Read FTP", "a SOS off"]
+    page = client.get("/cota/commands?csort=name&cdir=desc").text
+    assert 'aria-sort="descending"' in page and "csort=name&amp;cdir=desc" in page    # the pager keeps it
 
 
 def test_the_library_pages_at_5_20_or_50(client, cota_env):
@@ -2159,14 +2175,48 @@ def test_the_library_pages_at_5_20_or_50(client, cota_env):
     assert "1–20 of <strong>25</strong>" in flat("/cota/commands?csize=7")      # not a size: 20
 
 
-def test_the_add_forms_stay_folded_until_asked_for(client, cota_env):
+def test_one_dialog_adds_and_edits_and_parameter_names_fold_away(client, cota_env):
+    """10-10-2026: saved commands are the page; one Add command dialog, not two forms; parameter
+    names folded at the bottom, renamed or removed there."""
     body = client.get("/cota/commands").text
-    assert re.search(r'<div class="fold" id="param-form"\s+hidden>', body)
-    assert re.search(r'<div class="fold" id="cmd-form"\s+hidden>', body)
+    assert body.count("<button type=\"button\" class=\"btn-primary btn-icon\" data-add-command>") == 1 and 'id="param-form"' not in body
+    assert re.search(r'<dialog class="form-dialog" id="cmd-dialog"[^>]*\s>', body)       # closed
+    assert "data-autoopen" not in body.split('id="cmd-dialog"')[1].split(">")[0]
+    assert re.search(r'<details class="card fold-card" id="parameters"\s*>', body)    # folded
+    assert body.index('id="saved"') < body.index('id="parameters"')
     _save(client, "Read FTP", "DAD76F4B")
     cid = db.connect().execute("SELECT id FROM cota_saved_command").fetchone()[0]
     editing = client.get(f"/cota/commands?edit={cid}").text
-    assert re.search(r'<div class="fold" id="cmd-form"\s+>', editing)         # open, filled in
+    assert re.search(r'id="cmd-dialog"[^>]*data-autoopen', editing)                 # open, filled in
+    assert re.search(r'<details class="card fold-card" id="parameters"\s*open>',
+                     client.get("/cota/commands?names=1").text)
+
+
+def test_a_command_names_its_parameter_in_the_same_save(client, cota_env):
+    out = client.post("/cota/commands/describe", data={"text": "DBD76B82D531"}).json()["lines"][0]
+    assert (out["parameter"], out["parameter_name"], out["reads_as"]) == ("6B82", "", "SET 6B82")
+    reply = client.post("/cota/commands/saved", data={"name": "Ignition timer 1 s", "val1": "DBD76B82D531",
+                                                      "parameter_name": "IGN_TIMER"}, follow_redirects=False)
+    assert reply.status_code == 303
+    conn = db.connect()
+    assert conn.execute("SELECT name FROM cota_parameter WHERE code = '6B82'").fetchone()[0] == "IGN_TIMER"
+    named = client.post("/cota/commands/describe", data={"text": "DAD76B82"}).json()["lines"][0]
+    assert named["parameter_name"] == "IGN_TIMER" and named["saved_as"] == ""
+    again = client.post("/cota/commands/describe", data={"text": "DBD76B82D531"}).json()["lines"][0]
+    assert again["saved_as"] == "Ignition timer 1 s"
+    # A blank parameter name names nothing; a refused save keeps what was typed.
+    client.post("/cota/commands/saved", data={"name": "Get 6C0A", "val1": "DAD76C0A", "parameter_name": " "})
+    assert conn.execute("SELECT COUNT(*) FROM cota_parameter WHERE code = '6C0A'").fetchone()[0] == 0
+    refused = client.post("/cota/commands/saved", data={"name": "", "val1": "DAD76D00",
+                                                        "parameter_name": "X1"}).text
+    assert 'value="X1"' in refused
+
+
+def test_the_commands_page_carries_no_help_text(client, cota_env):
+    _save(client, "Read FTP", "DAD76F4B")
+    visible = re.sub(r'data-tip="[^"]*"', "", client.get("/cota/commands").text)
+    for phrase in ("used by", "every page and export", "Your names for", " · was "):
+        assert phrase not in visible, phrase
 
 
 def test_saving_a_command_already_saved_under_another_name_says_so(client, cota_env):
@@ -2182,7 +2232,7 @@ def test_the_library_exports_and_imports_through_a_preview(client, cota_env):
     exported = client.get("/cota/commands/export.csv")
     assert exported.status_code == 200 and "cota_commands" in exported.headers["content-disposition"]
     text = exported.content.decode("utf-8-sig")
-    assert text.splitlines()[0] == "kind,name,command,tags,note" and "command,Read FTP,DAD76F4B,read," in text
+    assert text.splitlines()[0] == "kind,name,command,tags,note,wait_after" and "command,Read FTP,DAD76F4B,read," in text
     assert client.get("/cota/commands/template.csv").content.decode("utf-8-sig").startswith("kind,name,command")
 
     upload = ("kind,name,command,tags,note\ncommand,SOS off,DDD76D66,alarm,\n"
@@ -2252,3 +2302,91 @@ def test_every_delete_and_cancel_asks_first_and_is_red(client, cloud, no_job_thr
             assert "danger" in button
         assert body.count("data-confirm=") >= len(destructive), path
     assert 'id="confirm-dialog"' in client.get("/cota/commands").text            # one dialog, in base
+
+
+# ─── one design through the application (12-10-2026) ─────────────────────────
+
+def _devices_total(body: str) -> int:
+    hint = re.search(r'<span class="hint">([\d,]+)', re.sub(r"\s+", " ", body))
+    return int(hint.group(1).replace(",", ""))
+
+
+def test_a_list_filter_takes_several_values_and_ors_them(client):
+    online = _devices_total(client.get("/devices?status=Online").text)
+    offline = _devices_total(client.get("/devices?status=Offline").text)
+    both = _devices_total(client.get("/devices?status=Online&status=Offline").text)
+    assert online and offline and both == online + offline
+
+
+def test_a_list_filter_offers_only_values_some_device_has(client):
+    """"0 means it does not exist" — the user. A status no device has is not offered."""
+    from ota_analytics import db, fota_devices, metrics
+
+    conn = db.connect()
+    sid = metrics.latest_snapshot_id(conn)
+    for key, values in fota_devices.options(conn, sid)["choices"].items():
+        assert all(n > 0 for _, _, n in values), key
+
+
+def test_a_pasted_imei_list_matches_exactly_those(client):
+    body = client.get("/devices?size=25").text
+    imeis = re.findall(r'class="mono">(\d+)<', body)[:3]
+    assert len(imeis) == 3
+    import urllib.parse
+    page = client.get("/devices?q=" + urllib.parse.quote("\n".join(imeis))).text
+    assert sorted(re.findall(r'class="mono">(\d+)<', page)) == sorted(imeis)
+
+
+def test_the_last_change_and_last_seen_filters_are_buckets_that_add_up(client):
+    from ota_analytics import db, fota_devices, metrics
+
+    conn = db.connect()
+    sid = metrics.latest_snapshot_id(conn)
+    total = fota_devices.rows(conn, sid, {})[1]
+    for key in ("seen", "changed"):
+        counts = {v: n for v, _, n in fota_devices.options(conn, sid)["choices"][key]}
+        assert sum(counts.values()) == total, key
+        for value, n in counts.items():
+            assert fota_devices.rows(conn, sid, {key: [value]})[1] == n, (key, value)
+
+
+def test_old_last_update_links_still_filter(client):
+    """?changed=24h came from the old filter bar and may be bookmarked."""
+    assert client.get("/devices?changed=24h").status_code == 200
+
+
+def test_the_devices_list_has_the_managed_list_head(client):
+    flat = re.sub(r"\s+", " ", client.get("/devices").text)
+    assert 'class="table-wrap grid-scroll" id="grid" data-fit' in flat
+    assert "Clear filters" not in flat                 # only while filtered
+    filtered = re.sub(r"\s+", " ", client.get("/devices?status=Online").text)
+    assert "Clear filters" in filtered
+    assert re.search(r'<span class="hint">[\d,]+ of [\d,]+</span>', filtered)
+    for fmt in ("xlsx", "csv", "txt"):
+        assert f"/devices/export?" in filtered and f"format={fmt}" in filtered
+
+
+def test_the_export_follows_the_list_filters(client):
+    import csv
+    import io
+
+    body = client.get("/devices/export?status=Online&status=Offline&format=csv").text
+    rows = list(csv.DictReader(io.StringIO(body.lstrip("\ufeff"))))
+    page_total = _devices_total(client.get("/devices?status=Online&status=Offline").text)
+    assert len(rows) == page_total
+
+
+def test_fota_tiles_lead_with_the_share(client):
+    """The user's order on every tile: the percentage the focus, the count beside it, smaller."""
+    for path in ("/", "/pending", "/changes?window=all"):
+        assert 'class="tile-count"' in client.get(path).text, path
+
+
+def test_clearing_the_error_log_is_red_and_confirmed(client):
+    from ota_analytics import db, errors
+
+    errors.record("page", RuntimeError("boom"), path="/x", conn=db.connect())
+    flat = re.sub(r"\s+", " ", client.get("/errors").text)
+    form = flat[flat.index('action="/errors/clear"') - 200:]
+    form = form[:form.index("</form>")]
+    assert "data-confirm=" in form and "danger" in form

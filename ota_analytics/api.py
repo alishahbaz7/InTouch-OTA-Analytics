@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
@@ -25,9 +25,9 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, bundle, config, cota, cota_campaign, cota_connection, cota_library,
-               cota_run, db, errors, exports, identity,
-               ingest, metrics, nav, normalize, progress, registry, rollup, scheduler, sources,
+from . import (auth, bundle, config, cota, cota_campaign, cota_connection, cota_fleet,
+               cota_insight, cota_library, cota_run, db, errors, exports, fota_devices,
+               identity, ingest, metrics, nav, normalize, progress, registry, rollup, scheduler, sources,
                startup)
 
 from . import __version__, build_info      # noqa: E402  (kept beside the app metadata)
@@ -43,6 +43,10 @@ templates = Jinja2Templates(directory=str(WEB / "templates"))
 
 def get_conn() -> sqlite3.Connection:
     conn = db.connect()
+    # The day's COTA record lives for the day: earlier days are cleared once per process, here,
+    # before any page reads anything. In _cota_context it ran after a page had already computed
+    # its figures — the first visit of a new day showed yesterday's jobs as today's.
+    cota_campaign.purge_previous_days(conn)
     # The command library's names, loaded once per database so that every page — and an export,
     # and the first page after a restart — names commands the user's way. Saving refreshes it.
     cota_library.ensure_loaded(conn)
@@ -163,6 +167,17 @@ templates.env.filters["comma"] = lambda v: f"{v:,}" if isinstance(v, (int, float
 templates.env.filters["from_json"] = lambda v: json.loads(v) if v else []
 # One mapping from stored status to the word on screen, so no template invents its own.
 templates.env.filters["status"] = normalize.status_label
+
+
+def _when(value) -> str:
+    """A stored time as the pages write it: DD-MM HH:MM — day first, the platform's order."""
+    text = str(value or "")
+    if len(text) < 16:
+        return text or "—"
+    return f"{text[8:10]}-{text[5:7]} {text[11:16]}"
+
+
+templates.env.filters["when"] = _when
 # The sidebar and the top bar title read one definition (nav.py).
 templates.env.globals["nav_modules"] = nav.MODULES
 templates.env.globals["nav_state"] = nav.state
@@ -307,12 +322,14 @@ def overview(request: Request, snapshot: int | None = None, window: str = "today
     change["window_label"] = registry.window_label(window)
 
     hourly = metrics.hourly_activity(conn, sid, models=selected)
+    all_models = metrics.task_state_by(conn, sid, "model")
     ctx.update(
         change=change,
         window=window,
         windows=registry.WINDOWS,
         selected_models=selected,
-        all_models=metrics.task_state_by(conn, sid, "model"),
+        all_models=all_models,
+        model_choices=_model_choices(all_models, selected),
         kpis=metrics.kpis(conn, sid, selected),
         pending=metrics.pending_by_reason(conn, sid, selected),
         by_model=metrics.task_state_by(conn, sid, "model", selected),
@@ -327,6 +344,12 @@ def overview(request: Request, snapshot: int | None = None, window: str = "today
     return templates.TemplateResponse(request, "overview.html", ctx)
 
 
+def _model_choices(models: list[dict], selected: list[str]) -> dict:
+    """The models as the shared list filter takes them: (value, label, devices)."""
+    return {"entries": [(r["label"], r["label"], r["devices"]) for r in models],
+            "chosen": selected}
+
+
 @app.get("/pending", response_class=HTMLResponse)
 def pending(request: Request, snapshot: int | None = None):
     conn = get_conn()
@@ -334,7 +357,8 @@ def pending(request: Request, snapshot: int | None = None):
     ctx.update(
         kpis=metrics.kpis(conn, ctx["snapshot_id"]),
         buckets=metrics.pending_by_reason(conn, ctx["snapshot_id"]),
-        pending_online=metrics.pending_online_devices(conn, ctx["snapshot_id"]),
+        # Every one of them: the list scrolls in its own frame, and these are the devices to chase.
+        pending_online=metrics.pending_online_devices(conn, ctx["snapshot_id"], limit=5000),
         stalled=registry.stalled_devices(conn) if ctx["multi_snapshot"] else [],
         stall_hours=config.STALL_HOURS,
     )
@@ -348,9 +372,11 @@ def firmware(request: Request, snapshot: int | None = None,
     ctx = page_context(conn, request, snapshot)
     selected = [m for m in model if m]
     mix = metrics.firmware_mix(conn, ctx["snapshot_id"], selected)
+    models = metrics.task_state_by(conn, ctx["snapshot_id"], "model")
     ctx.update(
         selected_models=selected,
-        models=metrics.task_state_by(conn, ctx["snapshot_id"], "model"),
+        models=models,
+        model_choices=_model_choices(models, selected),
         mix=mix,
         mix_total=sum(r["devices"] for r in mix),
         kpis=metrics.kpis(conn, ctx["snapshot_id"]),
@@ -372,11 +398,13 @@ def changes(request: Request, window: str = "today", page: int = 1, size: int = 
     """
     conn = get_conn()
     ctx = page_context(conn, request, None)
-    since = registry.window_since(window)
+    # Both ends of the window, for every figure on the page. "Yesterday" is the one with an end,
+    # and with the start alone its tiles and lists also counted today.
+    since, until = registry.window_range(window)
 
     # The total comes free: movement_summary already counts the moves in this window with the
     # same filter the list uses, so paging needs no second COUNT.
-    summary = registry.movement_summary(conn, since)
+    summary = registry.movement_summary(conn, since, until)
     size = size if size in PAGE_SIZES else DEFAULT_PAGE_SIZE
     pages = max(1, -(-(summary["moves"] or 0) // size))
     page = min(max(1, page), pages)
@@ -390,22 +418,23 @@ def changes(request: Request, window: str = "today", page: int = 1, size: int = 
         pages=pages,
         size=size,
         page_sizes=PAGE_SIZES,
-        moves=registry.firmware_moves(conn, since, limit=size, offset=(page - 1) * size),
+        moves=registry.firmware_moves(conn, since, until, limit=size, offset=(page - 1) * size),
         at_base=registry.at_base_firmware(conn),
         segments=registry.fallback_segments(conn),
         registry_summary=registry.summary(conn),
     )
 
-    # Fallbacks page independently of the moves list above. They are different questions asked
-    # on the same screen — "what moved in this window" and "what has ever gone backwards" — and
-    # sharing one page number would move both at once.
+    # Fallbacks page independently of the moves list above — sharing one page number would move
+    # both at once — but they follow the same window: with "Today" picked, the tile said 6 and
+    # the list showed 271, every fallback ever recorded (09-10-2026). The repeat table beside it
+    # stays all-time: "has done it more than once" is a question about history.
     fb_totals = registry.fallback_totals(conn)
     fb_size = fb_size if fb_size in PAGE_SIZES else 25
     fb_sort = fb_sort if fb_sort in registry.FALLBACK_SORTS else registry.DEFAULT_FALLBACK_SORT
     fb_min = 2 if fb_min and int(fb_min) > 1 else 1
 
     # The filtered total, so the pager counts what is actually on screen rather than everything.
-    fb_shown = registry.fallback_count(conn, min_times=fb_min, model=fb_model)
+    fb_shown = registry.fallback_count(conn, min_times=fb_min, model=fb_model, since=since, until=until)
     fb_pages = max(1, -(-fb_shown // fb_size))
     fb_page = min(max(1, fb_page), fb_pages)
     ctx.update(
@@ -417,12 +446,13 @@ def changes(request: Request, window: str = "today", page: int = 1, size: int = 
         fb_sort=fb_sort,
         fb_min=fb_min,
         fb_model=fb_model,
-        fb_models=registry.fallback_models(conn),
+        fb_models=registry.fallback_models(conn, since, until),
         fb_query="window=" + window + (f"&fb_sort={fb_sort}" if fb_sort != "when" else "")
                  + (f"&fb_min={fb_min}" if fb_min > 1 else "")
                  + (f"&fb_model={quote(fb_model)}" if fb_model else ""),
         fallbacks=registry.fallbacks(conn, limit=fb_size, offset=(fb_page - 1) * fb_size,
-                                     sort=fb_sort, min_times=fb_min, model=fb_model),
+                                     sort=fb_sort, min_times=fb_min, model=fb_model,
+                                     since=since, until=until),
         # The counter: devices that have done this more than once, worst first. A chronological
         # list cannot show this — a device reverting every few days is scattered down the page
         # as unrelated rows.
@@ -479,26 +509,14 @@ def _download(payload, fmt: str, stem: str):
 
 
 @app.get("/devices/export")
-def devices_export(
-    snapshot: int | None = None,
-    model: str | None = None,
-    firmware: list[str] = Query(default=[]),
-    status: str | None = None,
-    queue_state: str | None = None,
-    group: str | None = None,
-    changed: str | None = None,
-    fallback: str | None = None,
-    q: str = "",
-    sort: str = "seen",
-    dir: str = "desc",
-    format: str = "csv",
-):
+def devices_export(request: Request, snapshot: int | None = None, sort: str = "seen",
+                   dir: str = "desc", format: str = "csv"):
     """The filtered device list, as a file. Same rows as the page, without pagination."""
     conn = get_conn()
     snapshot_id = snapshot or metrics.latest_snapshot_id(conn)
-    rows, _ = _device_rows(conn, snapshot_id, model=model, firmware=firmware, status=status,
-                           queue_state=queue_state, group=group, changed=changed,
-                           fallback=fallback, search=q, sort=sort, dir=dir)
+    filters = fota_devices.clean_filters(request.query_params)
+    rows, _ = fota_devices.rows(conn, snapshot_id, filters, sort=sort,
+                                direction="asc" if dir == "asc" else "desc")
 
     # Spell the tag out in the file: a reader opening this in Excel should not have to know
     # what a 1 in a column called is_fallback means.
@@ -509,9 +527,7 @@ def devices_export(
                                    if row.get("update_firmware") not in (None, row.get("firmware"))
                                    else "FALLBACK — target is base")
 
-    slug = exports.describe({"m": model, "f": "-".join(firmware or []), "s": status,
-                             "q": queue_state, "g": group, "c": changed,
-                             "fb": fallback, "imei": q})
+    slug = fota_devices.describe(filters)
     stem = f"devices_{slug}" if slug else "devices"
 
     if format == "txt":
@@ -580,9 +596,7 @@ def web_cota(request: Request):
 
 def _cota_context(conn: sqlite3.Connection, request: Request, tab: str, **extra) -> dict:
     """What every Intouch COTA tab needs: the page frame, the tab, and the sign-in chip."""
-    # The day's COTA record lives for the day: a session started on a later day clears the
-    # earlier ones (once per process). Jobs left running by a restart come back paused.
-    cota_campaign.purge_previous_days(conn)
+    # Jobs left running by a restart come back paused. (Earlier days are cleared in get_conn.)
     cota_campaign.recover(conn)
     ctx = page_context(conn, request, None)
     ctx.update(tab=tab, cota_status=cota_connection.status(), **extra)
@@ -597,7 +611,8 @@ def _jobs_context(conn, request: Request, **extra) -> dict:
     sends = [j for j in cota.jobs(conn) if j["source_file"] != "campaign"
              and not (j["source_file"] or "").startswith("console:")]
     return _cota_context(conn, request, "jobs", jobs=cota_campaign.campaigns(conn), sends=sends,
-                         live=cota_campaign.active(conn), today=cota_campaign.today(conn), **extra)
+                         live=cota_campaign.active(conn), today=cota_campaign.today(conn),
+                         hours=cota_insight.by_hour(conn), **extra)
 
 
 JOB_FORM_FIELDS = ("name", "group_id", "devices", "commands", "batch_size", "rate_per_sec",
@@ -615,6 +630,7 @@ def _new_job_context(conn, request: Request, **extra) -> dict:
                                    "rate": cota_campaign.DEFAULT_RATE,
                                    "time_limit": cota_campaign.DEFAULT_TIME_LIMIT_MINUTES,
                                    "answer_wait": cota_campaign.DEFAULT_ANSWER_WAIT_SECONDS,
+                                   "wait_choices": ",".join(map(str, cota_run.WAIT_CHOICES)),
                                    "type": cota.DEFAULT_DEVICE_TYPE, "cmd": cota.DEFAULT_CMD_TYPE},
                          **extra)
 
@@ -624,6 +640,16 @@ def cota_jobs(request: Request):
     return templates.TemplateResponse(request, "cota_jobs.html", _jobs_context(get_conn(), request))
 
 
+@app.get("/cota/overview", response_class=HTMLResponse)
+def cota_overview(request: Request):
+    """Today's jobs at a glance: the record's own figures, and Web FOTA's view of the devices
+    that never answered. Reads only — no cloud call."""
+    conn = get_conn()
+    return templates.TemplateResponse(request, "cota_overview.html",
+                                      _cota_context(conn, request, "overview",
+                                                    o=cota_insight.overview(conn)))
+
+
 @app.get("/cota/jobs/new", response_class=HTMLResponse)
 def cota_job_new(request: Request, source: int = Query(0, alias="from"), which: str = "all",
                  commands: str = ""):
@@ -631,7 +657,7 @@ def cota_job_new(request: Request, source: int = Query(0, alias="from"), which: 
     command (Commands → New job). Declared before /cota/jobs/{job_id}, which would otherwise
     claim "new" and refuse it as not a number."""
     conn = get_conn()
-    draft = cota_campaign.draft_from(conn, source, which if which == "unfinished" else "all") \
+    draft = cota_campaign.draft_from(conn, source, which if which in ("unfinished", "rest") else "all") \
         if source else ({"commands": commands[:5000]} if commands.strip() else None)
     return templates.TemplateResponse(request, "cota_job_new.html",
                                       _new_job_context(conn, request, draft=draft))
@@ -665,11 +691,13 @@ async def cota_jobs_preview(request: Request):
             rate = max(0.1, float(draft["rate_per_sec"] or cota_campaign.DEFAULT_RATE))
         except ValueError:
             batch, rate = cota_campaign.DEFAULT_BATCH, cota_campaign.DEFAULT_RATE
+        waits = form.getlist("waits")
         the_plan = cota_campaign.plan(
             conn, ids, draft["commands"], batch_size=batch, rate_per_sec=rate,
             answer_wait_seconds=_number(draft["answer_wait_seconds"], float, None),
             time_limit_minutes=_number(draft["time_limit_minutes"], float, None),
-            in_progress=_number(draft["in_progress"], int, None))
+            in_progress=_number(draft["in_progress"], int, None), waits=waits or None)
+        draft["waits"] = ",".join(str(w) for w in the_plan["waits"])
         # What was planned is what starts: a batch over 200 comes back as 200, in the form too.
         draft["batch_size"] = str(the_plan["batch"])
         the_plan["problems"] = problems
@@ -692,14 +720,16 @@ def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Fo
                     commands: str = Form(""), batch_size: str = Form(""),
                     rate_per_sec: str = Form(""), time_limit_minutes: str = Form(""),
                     answer_wait_seconds: str = Form(""), in_progress: str = Form(""),
-                    device_type: str = Form(""), cmd_type: str = Form("")):
+                    device_type: str = Form(""), cmd_type: str = Form(""), waits: str = Form("")):
     conn = get_conn()
     ids, _, _ = cota_campaign.parse_device_ids(device_ids)
+    step_waits = [cota_run.parse_wait(w) for w in waits.split(",")] if waits.strip() else None
     # Refused, the page goes back to the form as it was — not to a list that has lost it.
     draft = {"name": name, "group_id": "", "devices": ", ".join(map(str, ids)),
              "commands": commands, "batch_size": batch_size, "rate_per_sec": rate_per_sec,
              "time_limit_minutes": time_limit_minutes, "answer_wait_seconds": answer_wait_seconds,
-             "in_progress": in_progress, "device_type": device_type, "cmd_type": cmd_type}
+             "in_progress": in_progress, "device_type": device_type, "cmd_type": cmd_type,
+             "waits": waits}
 
     def refused(message: str):
         return templates.TemplateResponse(request, "cota_job_new.html", _new_job_context(
@@ -716,7 +746,7 @@ def cota_jobs_start(request: Request, name: str = Form(""), device_ids: str = Fo
             rate_per_sec=_number(rate_per_sec, float, cota_campaign.DEFAULT_RATE),
             time_limit_minutes=_number(time_limit_minutes, float, None),
             answer_wait_seconds=_number(answer_wait_seconds, float, None),
-            in_progress=_number(in_progress, int, None))
+            in_progress=_number(in_progress, int, None), waits=step_waits)
     except cota_campaign.CampaignError as exc:
         return refused(str(exc))
     cota_campaign.start(cid)
@@ -733,18 +763,25 @@ def _open_devices(text: str) -> list[int]:
 
 
 def _job_context(conn, request: Request, job_id: int, state: str = "", q: str = "",
-                 page: int = 1, open_: str = "", **extra) -> dict | None:
+                 page: int = 1, open_: str = "", sort: str = "serial", direction: str = "asc",
+                 **extra) -> dict | None:
     job = cota_campaign.summary(conn, job_id)
     if not job:
         return None
     state = state if state in JOB_DEVICE_FILTERS else ""
-    rows, total = cota_campaign.device_rows(conn, job_id, state=state, search=q, page=page)
+    sort = sort if sort in cota_campaign.DEVICE_SORTS else "serial"
+    direction = "desc" if direction == "desc" else "asc"
+    rows, total = cota_campaign.device_rows(conn, job_id, state=state, search=q, page=page,
+                                            sort=sort, direction=direction)
     shown = {r["device_id"] for r in rows}
     opened = {d: cota_campaign.device_conversation(conn, job_id, d)
               for d in _open_devices(open_) if d in shown}
     return _cota_context(conn, request, "jobs", job=job, grid=cota_campaign.grid(conn, job_id),
+                         times=cota_campaign.timing(conn, job),
                          charts=cota_campaign.job_charts(conn, job_id, job),
                          devices=rows, devices_total=total, state=state, q=q,
+                         sort=sort, direction=direction,
+                         view_query=urlencode({"state": state, "q": q, "sort": sort, "dir": direction}),
                          page=max(1, page), pages=max(1, -(-total // 50)), opened=opened,
                          now_epoch=round(cota._parse(cota._now()).timestamp()),
                          stages=cota.STAGES, words=cota_campaign.RESULT_WORDS, **extra)
@@ -752,9 +789,9 @@ def _job_context(conn, request: Request, job_id: int, state: str = "", q: str = 
 
 @app.get("/cota/jobs/{job_id}", response_class=HTMLResponse)
 def cota_job(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1,
-             open_: str = Query("", alias="open")):
+             open_: str = Query("", alias="open"), sort: str = "serial", dir: str = "asc"):
     conn = get_conn()
-    ctx = _job_context(conn, request, job_id, state, q, page, open_)
+    ctx = _job_context(conn, request, job_id, state, q, page, open_, sort, dir)
     if ctx is None:
         return RedirectResponse("/cota", status_code=303)
     return templates.TemplateResponse(request, "cota_job.html", ctx)
@@ -762,14 +799,16 @@ def cota_job(request: Request, job_id: int, state: str = "", q: str = "", page: 
 
 @app.get("/cota/jobs/{job_id}/status")
 def cota_job_status(request: Request, job_id: int, state: str = "", q: str = "", page: int = 1,
-                    open_: str = Query("", alias="open")):
+                    open_: str = Query("", alias="open"), sort: str = "serial", dir: str = "asc"):
     """What the job page redraws every few seconds — this install's record only, no cloud call."""
     conn = get_conn()
-    ctx = _job_context(conn, request, job_id, state, q, page, open_)
+    ctx = _job_context(conn, request, job_id, state, q, page, open_, sort, dir)
     if ctx is None:
         return JSONResponse({"ok": False})
     job = ctx["job"]
     return JSONResponse({"ok": True, "state": job["state"], "percent": job["percent"],
+                         "name": job["name"], "answered": job["results"].get("done", 0),
+                         "failed": job["results"].get("failed", 0), "total": job["total"],
                          "progress": templates.get_template("_cota_job_progress.html").render(ctx),
                          "html": templates.get_template("_cota_job_live.html").render(ctx)})
 
@@ -830,41 +869,105 @@ def cota_job_export(job_id: int, format: str = "csv"):
         "Content-Disposition": f'attachment; filename="{exports.timestamped(stem, "csv")}"'})
 
 
-# ── groups, on the Devices page ──
+# ── groups, on the Devices page: one group per device (cota_fleet) ──
+
+def _selection(conn, ids: str, scope: str, query: str) -> list[int]:
+    """The devices an action is for: the ticked ones, or every device the page's filters match
+    ("Select all N matching")."""
+    if scope == "all":
+        return cota_fleet.matching_ids(conn, cota_fleet.clean_filters(parse_qs(query)))
+    return cota_campaign.parse_device_ids(ids)[0]
+
+
+def _group_source(conn, source: str, devices: str, tag: str, ids: str, scope: str,
+                  query: str) -> list[int]:
+    """The devices a new group is made of: typed ids, every device with a tag, or the page's
+    selection."""
+    if source == "tag":
+        if not tag.strip():
+            raise cota_fleet.FleetError("Choose a tag.")
+        return cota_fleet.tag_devices(conn, tag)
+    if source == "selection":
+        return _selection(conn, ids, scope, query)
+    found, problems, _ = cota_campaign.parse_device_ids(devices)
+    if problems:
+        raise cota_fleet.FleetError("; ".join(problems[:5]) + (" …" if len(problems) > 5 else ""))
+    return found
+
+
+@app.post("/cota/groups/check")
+def cota_groups_check(source: str = Form("ids"), devices: str = Form(""), tag: str = Form(""),
+                      ids: str = Form(""), scope: str = Form(""), query: str = Form(""),
+                      group_id: str = Form("")):
+    """What a new group, or a move, would do — the dialog shows it before anything changes."""
+    conn = get_conn()
+    try:
+        members = _group_source(conn, source, devices, tag, ids, scope, query)
+    except cota_fleet.FleetError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)})
+    if not members:
+        return JSONResponse({"ok": False, "message": "No devices." if source != "tag"
+                             else "No device has that tag."})
+    out = cota_fleet.check_group(conn, members, int(group_id) if group_id.isdigit() else None)
+    return JSONResponse({"ok": True, **out})
+
 
 @app.post("/cota/groups", response_class=HTMLResponse)
-async def cota_groups_save(request: Request):
-    form = await request.form()
-    upload = form.get("file")
-    content = await upload.read() if upload is not None and getattr(upload, "filename", "") else b""
-    name = str(form.get("name", ""))
+def cota_groups_create(request: Request, name: str = Form(""), source: str = Form("ids"),
+                       devices: str = Form(""), tag: str = Form(""), ids: str = Form(""),
+                       scope: str = Form(""), query: str = Form(""), skip: str = Form(""),
+                       transfer: bool = Form(False)):
+    conn = get_conn()
+    try:
+        members = _group_source(conn, source, devices, tag, ids, scope, query)
+        out = cota_fleet.create_group(conn, name, members,
+                                      set(cota_campaign.parse_device_ids(skip)[0]), transfer)
+    except cota_fleet.FleetError as exc:
+        draft = {"name": name, "source": source, "devices": devices, "tag": tag}
+        return templates.TemplateResponse(request, "cota_devices.html", _cota_devices_context(
+            conn, request, result={"level": "error", "message": str(exc)}, group_draft=draft))
+    return RedirectResponse(f"/cota/devices?group={out['group_id']}&note=grouped:{out['joined']}:"
+                            f"{out['left']}:{out['elsewhere']}:{int(out['transfer'])}", status_code=303)
 
-    def save():
-        conn = get_conn()
-        rows = []
-        if content:
-            rows, _ = cota_campaign.read_csv_devices(content)
-            text = "\n".join(d for d, _ in rows)
-        else:
-            text = str(form.get("devices", ""))
-        ids, problems, dupes = cota_campaign.parse_device_ids(text)
-        if problems:
-            return {"level": "error", "message": "Not saved — " + "; ".join(problems[:5])
-                    + (" …" if len(problems) > 5 else "")}
-        try:
-            cota_campaign.save_group(conn, name, ids)
-        except cota_campaign.CampaignError as exc:
-            return {"level": "error", "message": str(exc)}
-        learned = cota_campaign.learn_tracking_codes(conn, rows)
-        note = f" ({dupes} duplicate{'' if dupes == 1 else 's'} dropped)" if dupes else ""
-        mapped = (f" {learned:,} tracking code{'' if learned == 1 else 's'} added to the device "
-                  "map." if learned else "")
-        return {"level": "ok", "message": f"Group “{name.strip()}” saved with {len(ids):,} "
-                                          f"device{'' if len(ids) == 1 else 's'}{note}.{mapped}"}
 
-    result = await run_in_threadpool(save)
-    ctx = await run_in_threadpool(lambda: _cota_devices_context(get_conn(), request, result=result))
-    return templates.TemplateResponse(request, "cota_devices.html", ctx)
+@app.post("/cota/groups/{group_id}/rename", response_class=HTMLResponse)
+def cota_groups_rename(request: Request, group_id: int, name: str = Form("")):
+    conn = get_conn()
+    try:
+        cota_fleet.rename_group(conn, group_id, name)
+    except cota_fleet.FleetError as exc:
+        return templates.TemplateResponse(request, "cota_devices.html", _cota_devices_context(
+            conn, request, {"group": [str(group_id)]}, result={"level": "error", "message": str(exc)}))
+    return RedirectResponse(f"/cota/devices?group={group_id}&note=renamed", status_code=303)
+
+
+@app.post("/cota/groups/{group_id}/edit", response_class=HTMLResponse)
+def cota_groups_edit(request: Request, group_id: int, name: str = Form(""), source: str = Form("ids"),
+                     devices: str = Form(""), tag: str = Form(""), ids: str = Form(""),
+                     scope: str = Form(""), query: str = Form(""), skip: str = Form(""),
+                     transfer: bool = Form(False)):
+    """Edit group (the user, 10-10-2026): a new name, and devices added in bulk — 1,000+ pasted,
+    a tag, or the ticked rows — when picking them on the page is not practical. Either or both."""
+    conn = get_conn()
+    row = conn.execute("SELECT name FROM cota_group WHERE id = ?", (group_id,)).fetchone()
+    if not row:
+        return RedirectResponse("/cota/devices?note=none", status_code=303)
+    try:
+        wanted = bool(devices.strip()) if source == "ids" else (bool(tag.strip()) if source == "tag" else True)
+        members = _group_source(conn, source, devices, tag, ids, scope, query) if wanted else []
+        renamed = int(name.strip() != row["name"])
+        if renamed:
+            cota_fleet.rename_group(conn, group_id, name)
+        joining = [d for d in members if d not in set(cota_campaign.parse_device_ids(skip)[0])]
+        out = cota_fleet.add_to_group(conn, group_id, joining, transfer) if joining else \
+            {"devices": 0, "elsewhere": 0, "transfer": transfer}
+    except cota_fleet.FleetError as exc:
+        draft = {"edit_id": group_id, "name": name, "source": source, "devices": devices, "tag": tag}
+        return templates.TemplateResponse(request, "cota_devices.html", _cota_devices_context(
+            conn, request, {"group": [str(group_id)]}, result={"level": "error", "message": str(exc)},
+            group_draft=draft))
+    return RedirectResponse(f"/cota/devices?group={group_id}&note=edited:{out['devices']}:"
+                            f"{out['elsewhere']}:{int(out['transfer'])}:{renamed}", status_code=303)
 
 
 @app.get("/cota/groups/template.csv")
@@ -879,7 +982,7 @@ def cota_groups_template():
 def cota_groups_delete(request: Request, group_id: int):
     conn = get_conn()
     cota_campaign.delete_group(conn, group_id)
-    return RedirectResponse("/cota/devices#groups", status_code=303)
+    return RedirectResponse("/cota/devices?note=groupdeleted", status_code=303)
 
 
 # ─── Intouch COTA: the command library ──────────────────────────────────────
@@ -895,19 +998,42 @@ def _paged(rows: list, page: int, size: int) -> tuple[list, int, int, int]:
     return rows[(page - 1) * size: page * size], page, size, pages
 
 
+SAVED_SORTS = ("name", "parameter", "type", "tags")
+
+
+def _sort_saved(rows: list[dict], key: str, direction: str) -> list[dict]:
+    """Saved commands in a header's order; a row with nothing in that column goes last either way.
+    "type" is the library's own order — GET, SET, CLR, then by name."""
+    if key == "type":
+        return sorted(rows, key=lambda r: (cota_library._KIND_ORDER.get(r["kind"], 9), r["name"].lower()),
+                      reverse=direction == "desc")
+    value = {"name": lambda r: r["name"],
+             "parameter": lambda r: r["parameter_name"] or r["parameter"],
+             "tags": lambda r: r["tags"]}[key]
+    filled = sorted((r for r in rows if value(r)), key=lambda r: value(r).lower(),
+                    reverse=direction == "desc")
+    return filled + [r for r in rows if not value(r)]
+
+
 def _commands_context(conn, request: Request, q: str = "", tag: str = "", edit: int = 0,
                       ppage: int = 1, psize: int = 20, cpage: int = 1, csize: int = 20,
-                      **extra) -> dict:
+                      csort: str = "type", cdir: str = "asc", **extra) -> dict:
     all_saved = cota_library.commands(conn)
     editing = next((c for c in all_saved if c["id"] == edit), None) if edit else None
     params = cota_library.parameters(conn, q=q)
-    saved = cota_library.commands(conn, q=q, tag=tag)
+    csort = csort if csort in SAVED_SORTS else "type"
+    cdir = "desc" if cdir == "desc" else "asc"
+    saved = _sort_saved(cota_library.commands(conn, q=q, tag=tag), csort, cdir)
     param_rows, ppage, psize, ppages = _paged(params, ppage, psize)
     saved_rows, cpage, csize, cpages = _paged(saved, cpage, csize)
     # Each pager carries the search and the other pager's place, so moving one keeps the rest.
-    keep = {"q": q, "tag": tag}
-    p_base = urlencode({**keep, "cpage": cpage, "csize": csize})
+    keep = {"q": q, "tag": tag, "csort": csort, "cdir": cdir}
+    p_base = urlencode({**keep, "cpage": cpage, "csize": csize, "names": 1})
     c_base = urlencode({**keep, "ppage": ppage, "psize": psize})
+    # Parameter names are folded away; they open when asked for, after working on one, or when a
+    # search finds one.
+    extra.setdefault("names_open", bool(q and params) or bool(extra.get("param_draft")))
+    extra.setdefault("wait_choices", cota_run.WAIT_CHOICES)
     return _cota_context(conn, request, "commands",
                          parameters=param_rows, params_total=len(params),
                          params_all=len(cota_library.parameters(conn)),
@@ -917,13 +1043,14 @@ def _commands_context(conn, request: Request, q: str = "", tag: str = "", edit: 
                          cpage=cpage, csize=csize, cpages=cpages, c_base=c_base,
                          c_first=(cpage - 1) * csize, sizes=LIBRARY_PAGE_SIZES,
                          tags=cota_library.all_tags(conn), q=q, tag=tag, editing=editing,
+                         csort=csort, cdir=cdir,
                          **extra)
 
 
 @app.get("/cota/commands", response_class=HTMLResponse)
 def cota_commands(request: Request, q: str = "", tag: str = "", edit: int = 0, ppage: int = 1,
                   psize: int = 20, cpage: int = 1, csize: int = 20, saved: int = 0,
-                  imported: str = ""):
+                  imported: str = "", names: int = 0, csort: str = "type", cdir: str = "asc"):
     conn = get_conn()
     result = None
     if saved:
@@ -941,8 +1068,10 @@ def cota_commands(request: Request, q: str = "", tag: str = "", edit: int = 0, p
         result = {"level": "ok", "message": f"Imported: {counts['new']} new, {counts['updated']} "
                   f"updated, {counts['same']} already the same" + (
                       f", {counts['error']} left out with a problem." if counts["error"] else ".")}
-    return templates.TemplateResponse(request, "cota_commands.html", _commands_context(
-        conn, request, q, tag, edit, ppage, psize, cpage, csize, result=result))
+    ctx = _commands_context(conn, request, q, tag, edit, ppage, psize, cpage, csize, csort, cdir,
+                            result=result)
+    ctx["names_open"] = ctx["names_open"] or bool(names)
+    return templates.TemplateResponse(request, "cota_commands.html", ctx)
 
 
 @app.post("/cota/commands/parameters", response_class=HTMLResponse)
@@ -950,34 +1079,41 @@ def cota_commands_parameter(request: Request, code: str = Form(""), name: str = 
     conn = get_conn()
     try:
         saved = cota_library.save_parameter(conn, code, name)
-        result = {"level": "ok", "message": f"{saved} is now “{name.strip()}” — every GET, SET "
-                                            "and CLR of it reads by that name."}
+        result = {"level": "ok", "message": f"Parameter {saved} is “{name.strip()}”."}
         draft = None
     except cota_library.LibraryError as exc:
         result = {"level": "error", "message": str(exc)}
         draft = {"code": code, "name": name}
     return templates.TemplateResponse(request, "cota_commands.html",
                                       _commands_context(conn, request, result=result,
-                                                        param_draft=draft))
+                                                        param_draft=draft, names_open=True))
 
 
 @app.post("/cota/commands/parameters/{code}/delete")
 def cota_commands_parameter_delete(code: str):
     cota_library.delete_parameter(get_conn(), code)
-    return RedirectResponse("/cota/commands#parameters", status_code=303)
+    return RedirectResponse("/cota/commands?names=1#parameters", status_code=303)
 
 
 @app.post("/cota/commands/saved", response_class=HTMLResponse)
 def cota_commands_save(request: Request, command_id: str = Form(""), name: str = Form(""),
-                       val1: str = Form(""), tags: str = Form(""), note: str = Form("")):
+                       val1: str = Form(""), tags: str = Form(""), note: str = Form(""),
+                       parameter_name: str = Form(""), wait_after: str = Form("")):
+    """A saved command — and, in the same step, a name for its parameter when it has none yet
+    (the user, 10-10-2026: one dialog, not two forms)."""
     conn = get_conn()
     editing = int(command_id) if command_id.isdigit() else None
     try:
         saved = cota_library.save_command(conn, name=name, val1=val1, tags=tags, note=note,
-                                          command_id=editing)
+                                          command_id=editing,
+                                          wait_after_seconds=cota_run.parse_wait(wait_after))
+        code = cota_library.parameter_of("".join(val1.split()))
+        if code and parameter_name.strip():
+            cota_library.save_parameter(conn, code, parameter_name)
         return RedirectResponse(f"/cota/commands?saved={saved}#saved", status_code=303)
     except cota_library.LibraryError as exc:
-        draft = {"id": editing, "name": name, "val1": val1, "tags": tags, "note": note}
+        draft = {"id": editing, "name": name, "val1": val1, "tags": tags, "note": note,
+                 "parameter_name": parameter_name, "wait_after_seconds": cota_run.parse_wait(wait_after)}
         return templates.TemplateResponse(request, "cota_commands.html", _commands_context(
             conn, request, result={"level": "error", "message": str(exc)}, draft=draft))
 
@@ -1033,194 +1169,176 @@ def cota_commands_import_apply(content: str = Form("")):
     return RedirectResponse(f"/cota/commands?imported={done}", status_code=303)
 
 
-COTA_DEVICE_PAGE_SIZES = (25, 50, 100)
+def _plural(n: int, word: str) -> str:
+    return f"{n:,} {word}{'' if n == 1 else 's'}"
 
 
-def _cota_devices_context(conn, request: Request, q: str = "", page: int = 1, size: int = 50,
-                          **extra) -> dict:
-    size = size if size in COTA_DEVICE_PAGE_SIZES else 50
-    q = q.strip()
-    # Any part of an IMEI, or an exact cloud device id — the two numbers people hold.
-    where, params = ("WHERE imei LIKE ? OR CAST(device_id AS TEXT) = ?",
-                     (f"%{q}%", q)) if q else ("", ())
-    total = conn.execute(f"SELECT COUNT(*) FROM cota_device {where}", params).fetchone()[0]
-    pages = max(1, -(-total // size))
-    page = min(max(1, page), pages)
-    rows = [dict(r) for r in conn.execute(
-        f"SELECT imei, device_id, device_type, source, updated_at FROM cota_device {where} "
-        "ORDER BY imei LIMIT ? OFFSET ?", (*params, size, (page - 1) * size))]
-    by_type = [dict(r) for r in conn.execute(
-        "SELECT device_type, COUNT(*) AS devices FROM cota_device "
-        "GROUP BY device_type ORDER BY devices DESC")]
-    mapped = sum(r["devices"] for r in by_type)
-    extra.setdefault("groups", cota_campaign.groups(conn))
-    return _cota_context(conn, request, "devices", rows=rows, total=total, q=q, page=page,
-                         pages=pages, size=size, sizes=COTA_DEVICE_PAGE_SIZES,
-                         by_type=by_type, mapped=mapped,
-                         max_manual=cota.MAX_MANUAL_DEVICES, **extra)
+def _devices_note(note: str) -> dict | None:
+    """The notice after an action — the action redirects here, so a refresh repeats nothing."""
+    kind, _, rest = note.partition(":")
+    n = [int(x) if x.isdigit() else 0 for x in rest.split(":")] + [0, 0, 0]
+    if kind == "added":
+        text = f"{_plural(n[0], 'device')} added"
+        text += f" · {n[1]:,} already listed" if n[1] else ""
+        text += f" · {_plural(n[2], 'line')} left out with a problem" if n[2] else ""
+        return {"level": "warn" if n[2] else "ok", "message": text + "."}
+    messages = {
+        "grouped": f"Group created with {_plural(n[0], 'device')}"
+                   + (f" · {n[1]:,} left out" if n[1] else "")
+                   + ((f" · {n[2]:,} moved from another group" if n[3] else
+                       f" · {n[2]:,} also in another group") if n[2] else "") + ".",
+        "joined": f"{_plural(n[0], 'device')} in the group"
+                 + ((f" · {n[1]:,} moved from another group" if n[2] else
+                     f" · {n[1]:,} also in another group") if n[1] else "") + ".",
+        "ungrouped": f"{_plural(n[0], 'device')} taken out of the group.",
+        "tagged": f"Tag added to {_plural(n[0], 'device')}.",
+        "untagged": f"Tag removed from {_plural(n[0], 'device')}.",
+        "deleted": f"{_plural(n[0], 'device')} removed from the list.",
+        "renamed": "Group renamed.",
+        "edited": ("Group renamed" if n[3] else "Group saved")
+                  + (f" · {_plural(n[0], 'device')} added" if n[0] else "")
+                  + ((f" · {n[1]:,} moved from another group" if n[2] else
+                      f" · {n[1]:,} also in another group") if n[1] else "") + ".",
+        "groupdeleted": "Group deleted. Its devices are now in no group.",
+        "none": "No devices were selected.",
+    }
+    return {"level": "warn" if kind == "none" else "ok", "message": messages[kind]} if kind in messages else None
+
+
+def _cota_devices_context(conn, request: Request, filters: dict | None = None, sort: str = "id",
+                          direction: str = "asc", page: int = 1, size: int = 0, **extra) -> dict:
+    filters = filters or {}
+    sort = sort if sort in cota_fleet.SORTS else "id"
+    direction = "desc" if direction == "desc" else "asc"
+    listing = cota_fleet.list_devices(conn, filters, sort=sort, direction=direction, page=page,
+                                      size=size or cota_fleet.DEFAULT_PAGE_SIZE)
+    picked = filters.get("group") or []
+    group = conn.execute("SELECT id, name FROM cota_group WHERE id = ?", (int(picked[0]),)).fetchone() \
+        if len(picked) == 1 and picked[0].isdigit() else None
+    base = {**filters, "sort": sort, "dir": direction, "size": listing["size"]}
+
+    def link(extra: dict | None = None, path: str = "/cota/devices") -> str:
+        """This view's URL with `extra` changed — repeated keys for a filter's several values."""
+        return f"{path}?{urlencode({**base, **(extra or {})}, doseq=True)}"
+
+    return _cota_context(
+        conn, request, "devices", listing=listing, filters=filters, sort=sort, direction=direction,
+        opts=cota_fleet.options(conn),
+        group=dict(group) if group else None, sizes=cota_fleet.PAGE_SIZES, link=link,
+        filter_query=urlencode(filters, doseq=True), **extra)
 
 
 @app.get("/cota/devices", response_class=HTMLResponse)
-def cota_devices(request: Request, q: str = "", page: int = 1, size: int = 50):
-    ctx = _cota_devices_context(get_conn(), request, q, page, size)
-    return templates.TemplateResponse(request, "cota_devices.html", ctx)
-
-
-def _import_device_map(filename: str, content: bytes) -> dict:
-    """Runs in the threadpool. The connection is opened here because sqlite3 objects belong
-    to the thread that created them."""
-    # Only "is this really a sheet" is checked here. sources' CSV check insists on an IMEI
-    # column, which suits a snapshot but not a map headed "Device Unique No"; the COTA parser
-    # names any missing column itself.
-    is_csv = sources.looks_like_csv(filename, content)
-    head = content[:400].decode("utf-8", errors="replace").lower()
-    if not content.strip():
-        return {"level": "error", "message": "The uploaded file is empty."}
-    if "<html" in head or "<!doctype" in head:
-        return {"level": "error", "message": "The uploaded file is a web page, not a sheet."}
-    if not is_csv and not content.startswith(sources.XLSX_MAGIC):
-        return {"level": "error",
-                "message": "The uploaded file is not a spreadsheet or a CSV."}
-
-    # A scratch file, not the export folder: a device map is not a snapshot, and left where
-    # ingest-dir looks it would be ingested as one.
-    with tempfile.TemporaryDirectory() as scratch:
-        path = Path(scratch) / sources.safe_filename(filename, fallback_stem="device_map",
-                                                     suffix=".csv" if is_csv else ".xlsx")
-        path.write_bytes(content)
-        try:
-            result = cota.import_device_map(db.connect(), path)
-        except cota.CotaError as exc:
-            return {"level": "error", "message": str(exc)}
-
-    message = f"{result.added:,} added, {result.updated:,} updated"
-    if result.skipped:
-        shown = ", ".join(result.skipped[:5]) + (" …" if len(result.skipped) > 5 else "")
-        message += (f"; {len(result.skipped):,} skipped for a missing IMEI, device id or "
-                    f"type ({shown})")
-    return {"level": "warn" if result.skipped else "ok", "message": message + "."}
-
-
-@app.post("/cota/devices/import", response_class=HTMLResponse)
-async def cota_devices_import(request: Request, file: UploadFile = File(...)):
-    # async only to await the read; the import goes to the threadpool so it cannot stall the
-    # event loop (see "Two upload routes" in CLAUDE.md).
-    content = await file.read()
-    result = await run_in_threadpool(_import_device_map, file.filename or "", content)
-    ctx = await run_in_threadpool(lambda: _cota_devices_context(get_conn(), request,
-                                                                result=result))
-    return templates.TemplateResponse(request, "cota_devices.html", ctx)
-
-
-def _payload_digest(payloads: list[dict]) -> str:
-    """Ties a Send to the Preview it confirms: the same form must produce the same bodies."""
-    import hashlib
-
-    return hashlib.sha256(json.dumps(payloads, sort_keys=True).encode()).hexdigest()[:16]
-
-
-@app.post("/cota/devices/send", response_class=HTMLResponse)
-def cota_devices_send(
-    request: Request,
-    action: str = Form("preview"),         # read | preview | send
-    payload: str = Form(""),
-    device_type: str = Form(""),
-    device_ids: str = Form(""),
-    cmd_type: str = Form(""),
-    val1: str = Form(""), val2: str = Form(""), val3: str = Form(""),
-    val4: str = Form(""), val5: str = Form(""), val6: str = Form(""),
-    val7: str = Form(""), val8: str = Form(""), val9: str = Form(""),
-    previewed: str = Form(""),
-    confirm: bool = Form(False),
-):
-    """Send one command to devices typed in by id. Three explicit steps, because this writes
-    to real devices: read a pasted payload (no network), preview the exact bodies (no network),
-    then send — only with the box ticked, and only if the form still matches the preview."""
+def cota_devices(request: Request, sort: str = "id", dir: str = "asc", page: int = 1,
+                 size: int = 0, note: str = ""):
     conn = get_conn()
-    values = [val1, val2, val3, val4, val5, val6, val7, val8, val9]
-    cmd = {"payload": payload, "device_type": device_type.strip(),
-           "device_ids": device_ids.strip(), "cmd_type": cmd_type.strip(),
-           "values": [v.strip() for v in values]}
-    extra: dict = {"cmd": cmd}
+    filters = cota_fleet.clean_filters(request.query_params)
+    ctx = _cota_devices_context(conn, request, filters, sort, dir, page, size,
+                                result=_devices_note(note) if note else None)
+    return templates.TemplateResponse(request, "cota_devices.html", ctx)
 
-    def render(**more):
-        extra.update(more)
-        return templates.TemplateResponse(
-            request, "cota_devices.html", _cota_devices_context(conn, request, **extra))
 
-    try:
-        if action == "read":
-            read = cota.parse_portal_payload(payload)
-            cmd.update(device_type=str(read["device_type"]),
-                       device_ids=", ".join(str(i) for i in read["device_ids"]),
-                       cmd_type=str(read["cmd_type"]),
-                       values=[read["params"].get(f"val{n}", "") for n in range(1, 10)])
-            return render(result={"level": "ok", "message": "Payload read into the form. "
-                                  "Check it, then Preview."})
+@app.post("/cota/devices/add", response_class=HTMLResponse)
+async def cota_devices_add(request: Request):
+    """Devices by id — typed, pasted, or a CSV. Async only to await the file; the work goes to
+    the threadpool (see "Two upload routes" in CLAUDE.md)."""
+    form = await request.form()
+    upload = form.get("file")
+    content = await upload.read() if upload is not None and getattr(upload, "filename", "") else b""
+    text, tags = str(form.get("devices", "")), str(form.get("tags", ""))
 
-        ids, bad = cota.parse_device_ids(cmd["device_ids"])
-        if bad:
-            raise cota.CotaError(f"Not a device id: {', '.join(bad[:5])}. Device ids are the "
-                                 "cloud's numbers (e.g. 14906), not IMEIs.")
-        if not cmd["device_type"].isdigit() or not cmd["cmd_type"].isdigit():
-            raise cota.CotaError("Device model (type) and command type must be numbers.")
-        params = {f"val{n}": v for n, v in enumerate(cmd["values"], start=1) if v}
-        the_plan = cota.manual_plan(conn, int(cmd["device_type"]), ids, int(cmd["cmd_type"]),
-                                    params)
-        payloads = cota.plan_payloads(the_plan)
-        digest = _payload_digest(payloads)
-        preview = {"payloads": [json.dumps(p) for p in payloads], "digest": digest,
-                   "devices": [{"device_id": t.device_id, "imei": t.imei}
-                               for t in the_plan.tasks],
-                   "count": len(the_plan.tasks),
-                   "unknown": sum(1 for t in the_plan.tasks if not t.imei)}
-
-        if action != "send":
-            return render(preview=preview)
-        if previewed != digest:
-            return render(preview=preview, result={
-                "level": "warn", "message": "The form changed since the preview. Check the "
-                                            "new preview below, then send again."})
-        if not confirm:
-            return render(preview=preview, result={
-                "level": "warn", "message": "Tick the box to confirm before sending."})
-        if not cota.load_token():
-            return render(preview=preview, result={
-                "level": "error", "message": "Not signed in to the cloud — use Sign in, top "
-                                             "right, then send again."})
-
-        job_id = cota.create_job(conn, the_plan, source_file="typed in",
-                                 name=f"Command {cmd['cmd_type']} → "
-                                      f"{len(the_plan.tasks)} device"
-                                      f"{'' if len(the_plan.tasks) == 1 else 's'}")
-        client = cota_connection.client()
+    def run():
+        conn = get_conn()
         try:
-            sent = cota.send_job(conn, job_id, client)
-            stopped = None
-        except cota.CotaError as exc:
-            sent, stopped = None, str(exc)
-        finally:
-            client.close()
-        calls = [dict(r) for r in conn.execute("""
-            SELECT batch_no, COUNT(*) AS devices, MAX(state) AS state,
-                   MAX(http_status) AS http_status, MAX(send_reply) AS send_reply,
-                   MAX(error) AS error
-            FROM cota_task WHERE job_id = ? GROUP BY batch_no ORDER BY batch_no
-        """, (job_id,))]
-        if stopped:
-            result = {"level": "error", "message": stopped}
-        elif sent.failed:
-            result = {"level": "error",
-                      "message": f"{sent.failed} of {sent.sent + sent.failed} device(s) were "
-                                 f"not accepted by the cloud — see the reply below."}
-        else:
-            result = {"level": "ok",
-                      "message": f"Sent to {sent.sent} device(s) in {sent.calls} call(s). "
-                                 "The cloud accepted it; the device's own reply comes later."}
-        return render(result=result, sent={"job_id": job_id, "calls": calls},
-                      cmd={**cmd, "device_ids": ""})
-    except cota.CotaError as exc:
-        return render(result={"level": "error", "message": str(exc)})
+            if content:
+                out = cota_fleet.import_devices(conn, content)
+                if tags.strip():
+                    cota_fleet.add_tags(conn, [r[0] for r in cota_fleet.read_device_file(content)[0]], tags)
+            else:
+                out = cota_fleet.add_devices(conn, text, tags)
+        except cota_fleet.FleetError as exc:
+            return _cota_devices_context(conn, request, result={"level": "error", "message": str(exc)},
+                                         add_draft={"devices": text, "tags": tags})
+        return f"added:{out['added']}:{out['existing']}:{len(out.get('problems', []))}"
+
+    out = await run_in_threadpool(run)
+    if isinstance(out, str):
+        return RedirectResponse(f"/cota/devices?sort=added&dir=desc&note={out}", status_code=303)
+    return templates.TemplateResponse(request, "cota_devices.html", out)
+
+
+def _back_to_devices(back: str, note: str) -> RedirectResponse:
+    """Back to the page as it was — filters, sort and page — with the action's notice. Only ever
+    to the Devices page: `back` comes from the form."""
+    parts = urlsplit(back or "")
+    if parts.path != "/cota/devices" or parts.netloc:
+        parts = urlsplit("/cota/devices")
+    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "note"] + [("note", note)]
+    return RedirectResponse(f"/cota/devices?{urlencode(query)}", status_code=303)
+
+
+@app.post("/cota/devices/action", response_class=HTMLResponse)
+def cota_devices_action(request: Request, action: str = Form(""), ids: str = Form(""),
+                        scope: str = Form(""), query: str = Form(""), group_id: str = Form(""),
+                        tag: str = Form(""), back: str = Form(""), transfer: bool = Form(False),
+                        from_group: str = Form("")):
+    """What the selection bar does to the ticked devices — or to every device the filters match."""
+    conn = get_conn()
+    selected = _selection(conn, ids, scope, query)
+    if not selected:
+        return _back_to_devices(back, "none")
+    try:
+        if action in ("add", "move") and group_id.isdigit():
+            out = cota_fleet.add_to_group(conn, int(group_id), selected, transfer or action == "move")
+            return _back_to_devices(back, f"joined:{out['devices']}:{out['elsewhere']}:{int(out['transfer'])}")
+        if action == "ungroup":
+            gone = cota_fleet.remove_from_groups(conn, selected,
+                                                 int(from_group) if from_group.isdigit() else None)
+            return _back_to_devices(back, f"ungrouped:{gone}")
+        if action == "tag":
+            return _back_to_devices(back, f"tagged:{cota_fleet.add_tags(conn, selected, tag)}")
+        if action == "untag":
+            return _back_to_devices(back, f"untagged:{cota_fleet.remove_tags(conn, selected, tag)}")
+        if action == "delete":
+            return _back_to_devices(back, f"deleted:{cota_fleet.delete_devices(conn, selected)}")
+        if action == "newjob":
+            return templates.TemplateResponse(request, "cota_job_new.html", _new_job_context(
+                conn, request, draft={"devices": ", ".join(str(d) for d in selected)}))
+        if action == "export":
+            wanted = set(selected)
+            rows = [r for r in cota_fleet.export_rows(conn, {}) if r["device_id"] in wanted]
+            return _devices_file(rows, "csv")
+    except cota_fleet.FleetError as exc:
+        return templates.TemplateResponse(request, "cota_devices.html", _cota_devices_context(
+            conn, request, result={"level": "error", "message": str(exc)}))
+    return _back_to_devices(back, "none")
+
+
+def _devices_file(rows: list[dict], format: str) -> Response:
+    stem = "cota_devices"
+    if format == "xlsx":
+        return Response(content=exports.to_xlsx(rows, cota_fleet.EXPORT_COLUMNS, sheet_name="Devices"),
+                        media_type=EXPORT_MEDIA["xlsx"], headers={
+                            "Content-Disposition": f'attachment; filename="{exports.timestamped(stem, "xlsx")}"'})
+    body = "\ufeff" + exports.to_csv(rows, cota_fleet.EXPORT_COLUMNS)
+    return Response(content=body.encode("utf-8"), media_type=EXPORT_MEDIA["csv"], headers={
+        "Content-Disposition": f'attachment; filename="{exports.timestamped(stem, "csv")}"'})
+
+
+@app.get("/cota/devices/export")
+def cota_devices_export(request: Request, format: str = "csv", sort: str = "id", dir: str = "asc"):
+    """Every device the filters match, sorted as on screen."""
+    conn = get_conn()
+    filters = cota_fleet.clean_filters(request.query_params)
+    return _devices_file(cota_fleet.export_rows(conn, filters, sort=sort, direction=dir), format)
+
+
+@app.get("/cota/devices/template.csv")
+def cota_devices_template():
+    """Add device's file format: the cloud's device list, with tags."""
+    return Response(content=("\ufeff" + cota_fleet.TEMPLATE_CSV).encode("utf-8"),
+                    media_type=EXPORT_MEDIA["csv"],
+                    headers={"Content-Disposition": 'attachment; filename="cota_add_devices_template.csv"'})
 
 
 # ─── Intouch COTA: Configure — one device, one command, and what it said ────
@@ -1628,10 +1746,21 @@ def cota_signin_submit(
 
 @app.post("/cota/signout", response_class=HTMLResponse)
 def cota_signout(request: Request):
-    cota_connection.sign_out(cota_connection.load())
+    conn = cota_connection.load()
+    cota_connection.sign_out(conn)
+    kept = bool(conn.username and cota_connection.load_password(conn.username))
     return templates.TemplateResponse(request, "cota_signin.html", _cota_signin_context(
-        request, result={"level": "ok", "message": "Signed out — the token and any saved COTA "
-                                                   "password were removed."}))
+        request, result={"level": "ok", "message": "Signed out. Your password stays saved — press "
+                                                   "Sign in to sign in again." if kept else "Signed out."}))
+
+
+@app.post("/cota/signin/forget", response_class=HTMLResponse)
+def cota_forget_password(request: Request):
+    """Remove the remembered password from the credential store — sign-out keeps it."""
+    conn = cota_connection.load()
+    cota_connection.forget_password(conn.username)
+    return templates.TemplateResponse(request, "cota_signin.html", _cota_signin_context(
+        request, result={"level": "ok", "message": "The saved password was removed."}))
 
 
 @app.get("/errors", response_class=HTMLResponse)
@@ -1648,7 +1777,7 @@ def error_log_clear(request: Request):
     removed = errors.clear(conn)
     ctx = page_context(conn, request, None)
     ctx.update(entries=[], log_path=str(errors.LOG_PATH),
-               notice=f"Cleared {removed} recorded error(s). The text log is untouched.")
+               notice=f"Cleared {removed} recorded error{'' if removed == 1 else 's'}.")
     return templates.TemplateResponse(request, "errors.html", ctx)
 
 
@@ -1661,192 +1790,50 @@ def quality(request: Request, snapshot: int | None = None):
 
 
 @app.get("/devices", response_class=HTMLResponse)
-def devices(
-    request: Request,
-    snapshot: int | None = None,
-    model: str | None = None,
-    firmware: list[str] = Query(default=[]),
-    status: str | None = None,
-    queue_state: str | None = None,
-    group: str | None = None,
-    changed: str | None = None,
-    fallback: str | None = None,
-    q: str = "",
-    # Literals, not the constants below: default arguments are evaluated when the function is
-    # defined, and those are declared further down the module.
-    sort: str = "seen",
-    dir: str = "desc",
-    page: int = 1,
-    page_size: int = 100,
-):
+def devices(request: Request, snapshot: int | None = None, sort: str = "seen", dir: str = "desc",
+            page: int = 1, size: int = 0, page_size: int = 0):
+    """Every device of the snapshot — the Intouch COTA Devices list's design (10-10-2026): each
+    column filtered as in Excel and sorted from its header, the view kept in the URL."""
     conn = get_conn()
     ctx = page_context(conn, request, snapshot)
-    rows, total = _device_rows(
-        conn, ctx["snapshot_id"], model=model, firmware=firmware, status=status,
-        queue_state=queue_state, group=group, changed=changed, fallback=fallback, search=q,
-        sort=sort, dir=dir, limit=page_size, offset=(page - 1) * page_size)
+    sid = ctx["snapshot_id"]
+    filters = fota_devices.clean_filters(request.query_params)
+    sort = sort if sort in fota_devices.SORTABLE else fota_devices.DEFAULT_SORT
+    direction = "asc" if dir == "asc" else "desc"
+    size = size or page_size
+    size = size if size in fota_devices.PAGE_SIZES else fota_devices.DEFAULT_PAGE_SIZE
+    page = max(1, page)
+    rows, total = fota_devices.rows(conn, sid, filters, sort=sort, direction=direction,
+                                    limit=size, offset=(page - 1) * size)
+    pages = max(1, -(-total // size))
+    if page > pages:                     # past the end: the last page, not an empty one
+        page = pages
+        rows, total = fota_devices.rows(conn, sid, filters, sort=sort, direction=direction,
+                                        limit=size, offset=(page - 1) * size)
 
-    selected_firmware = [v for v in (firmware or []) if v]
-    active_filters = {"model": model, "firmware": selected_firmware, "status": status,
-                      "queue_state": queue_state, "group": group, "changed": changed,
-                      "fallback": fallback, "q": q}
-    # urlencode with doseq, because a multi-select repeats its key: firmware=a&firmware=b. Hand
-    # rolling that produced firmware=['a',%20'b'] and silently matched nothing.
-    pairs = [(k, v) for k, v in active_filters.items() if v]
-    if ctx["snapshot_id"]:
-        pairs.insert(0, ("snapshot", ctx["snapshot_id"]))
-    query = urlencode(pairs, doseq=True)
+    # A snapshot in the URL pins every link to it, so it is carried only while viewing history.
+    base = {**({"snapshot": sid} if ctx["viewing_history"] else {}), **filters,
+            "sort": sort, "dir": direction, "size": size}
 
-    ctx.update(
-        rows=rows, total=total, page=page, page_size=page_size,
-        pages=max(1, -(-total // page_size)),
-        filters=active_filters,
-        change_windows=CHANGE_WINDOWS,
-        sort=sort if sort in SORTABLE else DEFAULT_SORT,
-        dir="asc" if dir == "asc" else "desc",
-        base_query=query,
-        models=metrics.task_state_by(conn, ctx["snapshot_id"], "model"),
-        # Firmware values present in this snapshot, so the filter is a pick-list rather than
-        # something to type exactly right.
-        firmwares=[dict(r) for r in conn.execute(metrics.at(conn, ctx["snapshot_id"], """
-            SELECT firmware AS label, COUNT(*) AS devices FROM device_state
-            WHERE snapshot_id = ? AND firmware IS NOT NULL
-            GROUP BY firmware ORDER BY devices DESC
-        """), (ctx["snapshot_id"],))],
-    )
+    def link(extra: dict | None = None, path: str = "/devices") -> str:
+        """This view's URL with `extra` changed — repeated keys for a filter's several values."""
+        merged = {k: v for k, v in {**base, **(extra or {})}.items() if v not in (None, "", [])}
+        return f"{path}?{urlencode(merged, doseq=True)}"
+
+    keep = {k: v for k, v in base.items() if k not in filters}
+    ctx.update(rows=rows, total=total, page=page, pages=pages, size=size,
+               clear_link=f"/devices?{urlencode(keep, doseq=True)}", keep=keep,
+               first=(page - 1) * size, sizes=fota_devices.PAGE_SIZES, filters=filters,
+               sort=sort, direction=direction, link=link,
+               opts=fota_devices.options(conn, sid) if sid else {"choices": {}, "all": 0},
+               fallbacks=fota_devices.FALLBACKS, task_labels=fota_devices.TASK_LABELS)
     return templates.TemplateResponse(request, "devices.html", ctx)
-
-
-# Sortable columns, whitelisted so a query param can never reach the ORDER BY as raw SQL.
-SORTABLE = {
-    "imei": "d.imei",
-    "model": "d.device_model",
-    "firmware": "d.firmware",
-    "changed": "r.last_fw_change_at",
-    "target": "d.update_firmware",
-    "config": "d.configuration",
-    "hw": "d.hw_ver",
-    "status": "d.status",
-    "task": "d.queue_state",
-    "seen": "d.seen_at",
-    "checked": "r.last_checked_at",
-}
-# Most recently seen first: the devices that just reported are the ones worth looking at.
-DEFAULT_SORT, DEFAULT_DIR = "seen", "desc"
-
-
-def _order_by(sort: str, direction: str) -> str:
-    column = SORTABLE.get(sort, SORTABLE[DEFAULT_SORT])
-    descending = direction != "asc"
-    # Missing values sort last either way — a device that has never reported should not head
-    # the list just because its timestamp is NULL.
-    return f"{column} IS NULL, {column} {'DESC' if descending else 'ASC'}, d.imei"
 
 
 # Rows per page. Offered rather than fixed because the useful number depends on the job:
 # 25 to read carefully, 100 to scan for a pattern.
 PAGE_SIZES = (25, 50, 100)
 DEFAULT_PAGE_SIZE = 50
-
-
-# Filter presets for "last update". Values are SQL fragments over the registry row.
-CHANGE_WINDOWS = [
-    ("1h", "changed in the last hour"),
-    ("24h", "changed in the last 24 hours"),
-    ("7d", "changed in the last 7 days"),
-    ("30d", "changed in the last 30 days"),
-    ("never", "never changed"),
-]
-
-
-def _device_rows(conn, snapshot_id, *, model=None, firmware=None, status=None,
-                 queue_state=None, group=None, changed=None, fallback=None, search="",
-                 sort="seen", dir="desc", limit=None, offset=0):
-    """The device list behind both the page and its export.
-
-    Shared deliberately: an export that returned a different set from the table above it would
-    send someone to act on the wrong devices.
-    """
-    where, params = _device_filters(snapshot_id, model, firmware, status, queue_state,
-                                    group, search)
-    join = ("JOIN device_group g ON g.snapshot_id = d.snapshot_id AND g.imei = d.imei"
-            if group else "")
-    join += " LEFT JOIN device r ON r.imei = d.imei"
-    if changed:
-        where += " AND " + _changed_clause(changed)
-
-    # The fallback tag, from the single shared definition: task completed, sitting on base.
-    rule = metrics.fallback_rule("d")
-    tag_sql = f"CASE WHEN {rule} THEN 1 ELSE 0 END AS is_fallback"
-
-    if fallback == "yes":
-        where += f" AND ({rule})"
-    elif fallback == "missed":
-        where += f" AND ({rule}) AND {metrics.missed_target_rule('d')}"
-
-    # Both statements go through metrics.at, like every other per-snapshot read. Left pointing
-    # at the view they cost a full fleet resolution each, and this function runs two of them per
-    # page load — which is why /devices took 41s on the 245-snapshot database while pages that
-    # used the resolved copy took under a second.
-    total = conn.execute(metrics.at(
-        conn, snapshot_id,
-        f"SELECT COUNT(*) FROM device_state d {join} WHERE {where}"), params).fetchone()[0]
-
-    sql = metrics.at(conn, snapshot_id, f"""
-        SELECT d.imei, d.device_model, d.firmware, d.hw_ver, d.status, d.queue_state, d.queue,
-               d.seen_at, d.seen_age_hours, d.configuration, d.groups_raw, d.vin, d.iccid,
-               d.update_firmware, d.base_firmware,
-               {tag_sql},
-               r.prev_firmware, r.last_changed_at, r.last_fw_change_at, r.last_checked_at,
-               r.changes AS change_count
-        FROM device_state d {join} WHERE {where}
-        ORDER BY {_order_by(sort, dir)}
-    """)
-    if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params = [*params, limit, offset]
-    return [dict(r) for r in conn.execute(sql, params)], total
-
-
-def _changed_clause(window: str) -> str:
-    if window == "never":
-        return "r.last_changed_at IS NULL"
-    hours = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}.get(window)
-    if not hours:
-        return "1 = 1"
-    return (f"r.last_changed_at >= datetime('now', 'localtime', '-{hours} hours')")
-
-
-def _device_filters(snapshot_id, model, firmware, status, queue_state, group, search=""):
-    """WHERE fragment and parameters for the device list.
-
-    `firmware` is a list: several versions are usually interesting together — the ones a rollout
-    is moving between — and picking them one at a time meant reloading the page per version.
-    """
-    clauses = ["d.snapshot_id = ?"]
-    params: list = [snapshot_id]
-
-    for column, value in (("d.device_model", model), ("d.status", status),
-                          ("d.queue_state", queue_state), ("g.group_name", group)):
-        if value:
-            clauses.append(f"{column} = ?")
-            params.append(value)
-
-    versions = [v for v in (firmware or []) if v]
-    if versions:
-        clauses.append(f"d.firmware IN ({','.join('?' * len(versions))})")
-        params.extend(versions)
-
-    # Digits only: an IMEI is a number, and the platform is pasted from lists that carry commas,
-    # quotes and stray spaces. Stripping them means a paste works without being tidied first.
-    digits = "".join(c for c in str(search or "") if c.isdigit())
-    if digits:
-        # Substring rather than prefix: the last few digits are what people read off a label,
-        # and LIKE cannot use the index either way on a middle match.
-        clauses.append("d.imei LIKE ?")
-        params.append(f"%{digits}%")
-
-    return " AND ".join(clauses), params
 
 
 # ─── updating the data ──────────────────────────────────────────────────────

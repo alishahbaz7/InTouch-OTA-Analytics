@@ -58,7 +58,7 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 927 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 983 tests
 ```
 
 **Running the release and a development copy together.** The packaged release serves on
@@ -138,7 +138,7 @@ have been doing. `--allow-interleave` does it properly, but rebuilds everything 
 ```
 
 Produces `dist\InTouchOTA-Analytics-v<version>.zip` (~27 MB), which unpacks to a folder of the
-same name, e.g. `InTouchOTA-Analytics-v1.9.1\`. The recipient unpacks it anywhere and runs
+same name, e.g. `InTouchOTA-Analytics-v2.1.0\`. The recipient unpacks it anywhere and runs
 `InTouchOTA-Analytics.exe` — no Python, no install. It is the only executable in the release.
 
 **The app is portable: its database lives in a `data` folder beside the .exe.** Copy the folder

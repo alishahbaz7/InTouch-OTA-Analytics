@@ -30,6 +30,28 @@ def test_a_parameter_says_how_many_saved_commands_use_it(conn):
     assert [p["code"] for p in cota_library.parameters(conn, q="tim")] == ["6C0A"]
 
 
+def test_a_saved_command_carries_its_wait_everywhere(conn, tmp_path):
+    """10-10-2026: a command that takes the device off the air (SET Force Sync Audio) carries a wait
+    before the next — in the library, in its file, and as the default wherever it is used."""
+    from ota_analytics import cota, cota_run
+    sync = cota_library.save_command(conn, name="Force Sync Audio", val1="DBD76F85D531",
+                                     wait_after_seconds=180)
+    assert cota.LIBRARY["waits"] == {"DBD76F85D531": 180}
+    assert cota_library.describe_lines("DBD76F85D531\nDAD76F4B")[0]["wait_after"] == 180
+    cota_library.save_command(conn, name="Force Sync Audio", val1="DBD76F85D531", command_id=sync)
+    assert cota.LIBRARY["waits"]["DBD76F85D531"] == 180          # an edit without a wait keeps it
+    exported = cota_library.export_csv(conn)
+    assert "command,Force Sync Audio,DBD76F85D531,,,180" in exported
+    theirs = db.connect(tmp_path / "theirs.db")
+    cota_library.apply_import(theirs, exported.encode("utf-8"))
+    assert theirs.execute("SELECT wait_after_seconds FROM cota_saved_command").fetchone()[0] == 180
+    plain = "kind,name,command\ncommand,Force Sync Audio,DBD76F85D531\n"   # no column: kept as is
+    assert cota_library.plan_import(theirs, plain.encode())["counts"]["same"] == 1
+    assert [cota_run.parse_wait(x) for x in ("3m", "3 min", "90 s", "120", "", "x", "99m")] == [
+        180, 180, 90, 120, 0, 0, 1800]
+    assert cota_run.wait_words(180) == "3 min" and cota_run.wait_words(90) == "1 min 30 s"
+
+
 def test_the_same_command_under_another_name_is_found(conn):
     _seed(conn)
     other = cota_library.save_command(conn, name="Clear SOS", val1=CLR_SOS)
@@ -40,8 +62,8 @@ def test_the_same_command_under_another_name_is_found(conn):
 def test_an_export_loads_into_another_install_unchanged(conn, tmp_path):
     _seed(conn)
     exported = cota_library.export_csv(conn)
-    assert exported.splitlines()[0] == "kind,name,command,tags,note"
-    assert "parameter,TIMERS,6C0A,," in exported and "6F4B" not in exported.split("command,")[0]
+    assert exported.splitlines()[0] == "kind,name,command,tags,note,wait_after"
+    assert "parameter,TIMERS,6C0A,,," in exported and "6F4B" not in exported.split("command,")[0]
     theirs = db.connect(tmp_path / "theirs.db")
     plan = cota_library.plan_import(theirs, exported.encode("utf-8"))
     assert plan["counts"] == {"new": 4, "updated": 0, "same": 0, "error": 0}

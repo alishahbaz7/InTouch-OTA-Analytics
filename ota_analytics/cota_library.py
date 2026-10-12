@@ -39,9 +39,12 @@ def refresh(conn) -> None:
     parameters = {r["code"]: r["name"] for r in conn.execute("SELECT code, name FROM cota_parameter")}
     # Two saved names for one command: the first saved names it everywhere — newest read first,
     # so the oldest is the one left standing. Not whichever row the database returned last.
-    commands = {r["val1"]: r["name"] for r in conn.execute(
-        "SELECT val1, name FROM cota_saved_command ORDER BY id DESC")}
-    cota.LIBRARY = {"parameters": parameters, "commands": commands}
+    commands, waits = {}, {}
+    for r in conn.execute("SELECT val1, name, wait_after_seconds FROM cota_saved_command ORDER BY id DESC"):
+        commands[r["val1"]] = r["name"]
+        waits[r["val1"]] = r["wait_after_seconds"] or 0
+    waits = {k: v for k, v in waits.items() if v}
+    cota.LIBRARY = {"parameters": parameters, "commands": commands, "waits": waits}
     _loaded_from = _database_of(conn)
 
 
@@ -59,18 +62,20 @@ def _database_of(conn) -> str:
 # ── parameters ──────────────────────────────────────────────────────────────────────────────
 
 def parameters(conn, *, q: str = "") -> list[dict]:
-    """The user's names and the built-ins they have not renamed, by code — each with how many
-    saved commands use it, so a rename says what it will affect."""
+    """The user's names, the built-ins they have not renamed, and every parameter a saved command
+    uses without a name yet (name ''), by code — each with how many saved commands use it."""
     mine = {r["code"]: dict(r) for r in conn.execute(
         "SELECT code, name, updated_at FROM cota_parameter")}
     used: dict[str, int] = {}
     for (value,) in conn.execute("SELECT val1 FROM cota_saved_command"):
-        if len(value) >= 8 and value[2:4] == "D7":
-            used[value[4:8]] = used.get(value[4:8], 0) + 1
+        code = parameter_of(value)
+        if code:
+            used[code] = used.get(code, 0) + 1
     rows = []
-    for code in sorted(set(mine) | set(cota.COMMAND_PARAMETERS)):
+    for code in sorted(set(mine) | set(cota.COMMAND_PARAMETERS) | set(used)):
         own = mine.get(code)
-        rows.append({"code": code, "name": own["name"] if own else cota.COMMAND_PARAMETERS[code],
+        rows.append({"code": code,
+                     "name": own["name"] if own else cota.COMMAND_PARAMETERS.get(code, ""),
                      "builtin": cota.COMMAND_PARAMETERS.get(code), "own": bool(own),
                      "updated_at": own["updated_at"] if own else "", "used_by": used.get(code, 0)})
     if q.strip():
@@ -121,6 +126,10 @@ def commands(conn, *, q: str = "", tag: str = "") -> list[dict]:
         row["tag_list"] = [t for t in (x.strip() for x in row["tags"].split(",")) if t]
         row["kind"] = cota_run.classify(row["val1"])[0]
         row["reads_as"] = _built_in_reading(row["val1"])
+        row["wait_words"] = cota_run.wait_words(row.get("wait_after_seconds"))
+        row["parameter"] = parameter_of(row["val1"])
+        row["parameter_name"] = (cota.LIBRARY.get("parameters", {}).get(row["parameter"])
+                                 or cota.COMMAND_PARAMETERS.get(row["parameter"], "")) if row["parameter"] else ""
         rows.append(row)
     if tag:
         rows = [r for r in rows if tag.lower() in (t.lower() for t in r["tag_list"])]
@@ -156,7 +165,8 @@ def all_tags(conn) -> list[str]:
 
 
 def save_command(conn, *, name: str, val1: str, tags: str = "", note: str = "",
-                 command_id: int | None = None) -> int:
+                 command_id: int | None = None, wait_after_seconds: int | None = None) -> int:
+    """`wait_after_seconds` None keeps what an edited command had (0 for a new one)."""
     name = (name or "").strip()
     value = "".join((val1 or "").split()).upper()
     if not name:
@@ -171,18 +181,21 @@ def save_command(conn, *, name: str, val1: str, tags: str = "", note: str = "",
                          (name, command_id)).fetchone()
     if clash:
         raise LibraryError(f"A saved command is already called “{name}”.")
+    wait = None if wait_after_seconds is None else max(0, min(cota_run.MAX_WAIT_SECONDS, int(wait_after_seconds)))
     with conn:
         if command_id:
             conn.execute("""
-                UPDATE cota_saved_command SET name = ?, val1 = ?, tags = ?, note = ?, updated_at = ?
+                UPDATE cota_saved_command SET name = ?, val1 = ?, tags = ?, note = ?, updated_at = ?,
+                       wait_after_seconds = COALESCE(?, wait_after_seconds)
                 WHERE id = ?
-            """, (name, value, clean_tags(tags), (note or "").strip(), now, command_id))
+            """, (name, value, clean_tags(tags), (note or "").strip(), now, wait, command_id))
             saved = command_id
         else:
             saved = conn.execute("""
-                INSERT INTO cota_saved_command (name, val1, tags, note, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (name, value, clean_tags(tags), (note or "").strip(), now, now)).lastrowid
+                INSERT INTO cota_saved_command (name, val1, tags, note, created_at, updated_at,
+                                                wait_after_seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (name, value, clean_tags(tags), (note or "").strip(), now, now, wait or 0)).lastrowid
     refresh(conn)
     return saved
 
@@ -201,14 +214,32 @@ def _built_in_reading(val1: str) -> str:
     return f"{cota.COMMAND_OPERATIONS[value[:2]]} {cota.parameter_name(value[4:8])}"
 
 
+def parameter_of(val1: str) -> str:
+    """The four hex digits after D7 — the parameter a GET, SET or CLR is about — or ''."""
+    value = (val1 or "").upper()
+    return value[4:8] if len(value) >= 8 and value[2:4] == "D7" and _CODE.match(value[4:8]) else ""
+
+
 def describe_lines(text: str) -> list[dict]:
     """Each line of a command box with its name and any problem — what the page shows as it is
-    typed. Same parser as a job and a sequence, so the preview cannot disagree with them."""
+    typed. Same parser as a job and a sequence, so the preview cannot disagree with them. Each
+    line also carries its parameter and that parameter's name, if it has one, so the Add command
+    dialog can ask for a name in place (the user, 10-10-2026)."""
+    names = cota.LIBRARY.get("parameters", {})
+    saved = cota.LIBRARY.get("commands", {})
+    waits = cota.LIBRARY.get("waits", {})
     out = []
     for step in cota_run.parse_lines(text):
+        ok = not step["problem"]
+        code = parameter_of(step["val1"]) if ok else ""
         out.append({"line": step["line"], "val1": step["val1"], "kind": step["kind"],
                     "problem": step["problem"] or "",
-                    "name": "" if step["problem"] else (cota.describe_command(step["val1"]) or "")})
+                    "name": (cota.describe_command(step["val1"]) or "") if ok else "",
+                    "reads_as": _built_in_reading(step["val1"]) if ok else "",
+                    "saved_as": saved.get(step["val1"].upper(), "") if ok else "",
+                    "wait_after": waits.get(step["val1"].upper(), 0) if ok else 0,
+                    "parameter": code,
+                    "parameter_name": (names.get(code) or cota.COMMAND_PARAMETERS.get(code, "")) if code else ""})
     return out
 
 
@@ -216,20 +247,20 @@ def describe_lines(text: str) -> list[dict]:
 # A file a colleague can open in Excel, and load into their own install. Import only adds and
 # updates — it never deletes — so loading someone's file cannot wipe your own names.
 
-CSV_COLUMNS = ["kind", "name", "command", "tags", "note"]
-TEMPLATE_CSV = ("kind,name,command,tags,note\n"
-                "parameter,TIMERS,6C0A,,\n"
-                "command,Read FTP settings,DAD76F4B,read,What the device sends its files to\n"
-                "command,Clear SOS,DDD76D66,alarm,\n")
+CSV_COLUMNS = ["kind", "name", "command", "tags", "note", "wait_after"]
+TEMPLATE_CSV = ("kind,name,command,tags,note,wait_after\n"
+                "parameter,TIMERS,6C0A,,,\n"
+                "command,Read FTP settings,DAD76F4B,read,What the device sends its files to,\n"
+                "command,Force Sync Audio,DBD76F85D531,audio,The device goes off the air for a while,3m\n")
 _KINDS = {"parameter": "parameter", "param": "parameter", "command": "command", "cmd": "command"}
 
 
 def export_rows(conn) -> list[dict]:
     """Your parameter names (built-ins only when you renamed them) and every saved command."""
-    rows = [{"kind": "parameter", "name": r["name"], "command": r["code"], "tags": "", "note": ""}
-            for r in conn.execute("SELECT code, name FROM cota_parameter ORDER BY code")]
+    rows = [{"kind": "parameter", "name": r["name"], "command": r["code"], "tags": "", "note": "",
+             "wait_after": ""} for r in conn.execute("SELECT code, name FROM cota_parameter ORDER BY code")]
     rows += [{"kind": "command", "name": c["name"], "command": c["val1"], "tags": c["tags"],
-              "note": c["note"]} for c in commands(conn)]
+              "note": c["note"], "wait_after": c.get("wait_after_seconds") or ""} for c in commands(conn)]
     return rows
 
 
@@ -266,6 +297,8 @@ def plan_import(conn, content: bytes) -> dict:
         name, value = row.get("name", ""), "".join(row.get("command", "").split()).upper()
         entry = {"line": line, "kind": kind or row.get("kind", ""), "name": name, "command": value,
                  "tags": clean_tags(row.get("tags", "")), "note": row.get("note", ""),
+                 # A file without the column keeps each command's wait as it is.
+                 "wait_after": cota_run.parse_wait(row["wait_after"]) if "wait_after" in header else None,
                  "action": "error", "detail": ""}
         if not kind:
             entry["detail"] = "kind must be parameter or command"
@@ -290,7 +323,10 @@ def plan_import(conn, content: bytes) -> dict:
                 old = saved[name]
                 changes = [what for what, a, b in (("command", old["val1"], value),
                                                    ("tags", old["tags"], entry["tags"]),
-                                                   ("note", old["note"], entry["note"])) if a != b]
+                                                   ("note", old["note"], entry["note"]),
+                                                   ("wait", old["wait_after_seconds"] or 0,
+                                                    entry["wait_after"] if entry["wait_after"] is not None
+                                                    else old["wait_after_seconds"] or 0)) if a != b]
                 entry.update(action="update" if changes else "same",
                              detail=("changes " + ", ".join(changes)) if changes else "")
         rows.append(entry)
@@ -313,6 +349,6 @@ def apply_import(conn, content: bytes) -> dict:
             save_parameter(conn, r["command"], r["name"])
         else:
             save_command(conn, name=r["name"], val1=r["command"], tags=r["tags"], note=r["note"],
-                         command_id=saved_ids.get(r["name"]))
+                         command_id=saved_ids.get(r["name"]), wait_after_seconds=r["wait_after"])
     refresh(conn)
     return planned.get("counts", {})

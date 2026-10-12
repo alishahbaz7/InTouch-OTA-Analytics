@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% from "_icons.html" import icon %}
 {% block title %}Pending — OTA Analytics{% endblock %}
 
 {% block content %}
@@ -7,19 +8,19 @@
   {# Same names and same colours as the overview tiles. A pending task is parked, not
      failed, so neither pending state is coloured like a fault — yellow for the one that
      is reachable and worth chasing, orange for the one that is simply switched off. #}
-  {{ m.tile('Task pending — total', kpis.devices_pending | comma, 'all reasons') }}
-  {{ m.tile('Task pending — Online', kpis.pending_reachable | comma,
-            'reachable, not updated', 'tone-yellow') }}
-  {{ m.tile('Task pending — Offline', kpis.pending_waiting | comma,
-            'waiting for power-on', 'tone-orange') }}
-  {{ m.tile('Outstanding tasks', kpis.pending_tasks_total | comma, 'queue depth') }}
+  {{ m.tile('Task pending', kpis.devices_pending, tone='tone-white', total=kpis.devices_total,
+            tip='Of the fleet: devices with a task pending, for any reason.') }}
+  {{ m.tile('Task pending — Online', kpis.pending_reachable, tone='tone-yellow', total=kpis.devices_pending,
+            tip='Of the pending devices: reachable within 24 hours and still not updated.') }}
+  {{ m.tile('Task pending — Offline', kpis.pending_waiting, tone='tone-orange', total=kpis.devices_pending,
+            tip='Of the pending devices: parked until the device is switched on.') }}
+  {{ m.tile('Outstanding tasks', kpis.pending_tasks_total | comma, tone='tone-grey',
+            tip='Total tasks queued across all pending devices.') }}
 </div>
 
 <section class="card">
-  <h2>Task status
-    <span class="hint">a pending task is parked until the device returns — the top row is the
-      exception: powered, connected, still not updated</span>
-  </h2>
+  <h2><span data-tip="A pending task is parked until the device returns. The top row is the exception: powered, connected, still not updated.">Task status</span>
+    <span class="hint">{{ kpis.devices_pending | comma }}</span></h2>
   {% set total = kpis.devices_pending or 1 %}
   {% for b in buckets %}
     {{ m.bar(b.label, b.devices, total, b.tone) }}
@@ -27,76 +28,77 @@
 </section>
 
 <section class="card highlight">
-  <h2>Task pending — Online <span class="hint">{{ pending_online | length }} devices · online within 24h
-    with a task outstanding</span>
+  <div class="library-head">
+    <h2><span data-tip="Online within 24 hours with a task outstanding — the devices to chase.">Task pending — Online</span>
+      <span class="hint">{% if pending_online | length < kpis.pending_reachable %}{{ pending_online | length | comma }} of {% endif %}{{ kpis.pending_reachable | comma }}</span></h2>
     {% if pending_online %}
-    <details class="dropdown export">
-      <summary><span class="dl-icon">⤓</span> Download</summary>
-      <div class="dropdown-panel">
-        <a class="dropdown-item" href="/pending/export?format=xlsx">
-          <span>Excel workbook</span><em>.xlsx</em></a>
-        <a class="dropdown-item" href="/pending/export?format=csv">
-          <span>CSV</span><em>.csv</em></a>
-        <a class="dropdown-item" href="/pending/export?format=txt">
-          <span>IMEI list — to paste into the platform</span><em>.txt</em></a>
-      </div>
-    </details>
+    <span class="library-actions">
+      <details class="dropdown">
+        <summary class="tool-btn">{{ icon('download') }}<span>Export</span></summary>
+        <div class="dropdown-panel export-panel">
+          <a class="dropdown-item" href="/pending/export?format=xlsx"><span>Excel workbook</span><em>.xlsx</em></a>
+          <a class="dropdown-item" href="/pending/export?format=csv"><span>CSV</span><em>.csv</em></a>
+          <a class="dropdown-item" href="/pending/export?format=txt"><span data-tip="One IMEI per line, to paste into the platform.">IMEI list</span><em>.txt</em></a>
+        </div>
+      </details>
+    </span>
     {% endif %}
-  </h2>
+  </div>
   {% if pending_online %}
-  <table>
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
     <thead>
-      <tr><th>IMEI</th><th>Model</th><th>Firmware</th><th>HW</th>
-          <th class="n">Tasks</th><th>Last seen</th><th>Groups</th></tr>
+      <tr><th class="n fit">S.No.</th><th class="fit">IMEI</th><th class="fit">Model</th><th class="fit">Firmware</th>
+          <th class="fit">HW</th><th class="n fit">Tasks</th><th class="fit">Last seen</th><th>Groups</th></tr>
     </thead>
     <tbody>
       {% for d in pending_online %}
       <tr>
+        <td class="n dim">{{ loop.index }}</td>
         <td class="mono">{{ d.imei }}</td>
         <td>{{ d.device_model or '—' }}</td>
         <td>{{ d.firmware or '—' }}</td>
         <td class="dim">{{ d.hw_ver or '—' }}</td>
         <td class="n">{{ d.pending_tasks }}</td>
         <td>{{ m.dark_days(d.seen_age_hours) }}</td>
-        <td class="dim small">{{ (d.groups_raw or '—')[:44] }}</td>
+        <td class="dim cell-clip" title="{{ d.groups_raw or '' }}">{{ d.groups_raw or '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
-  <p class="empty">No reachable device is currently carrying a pending task.</p>
+  <p class="empty-line">No reachable device has a pending task.</p>
   {% endif %}
 </section>
 
 {% if multi_snapshot %}
 <section class="card">
-  <h2>Pending a long time, firmware unchanged
-    <span class="hint">{{ stalled | length }} · pending for over
-      {{ stall_hours }} hours with no firmware move since</span>
-  </h2>
+  <h2><span data-tip="Pending for over {{ stall_hours }} hours with no firmware move since. The 200 longest-pending are listed.">Pending a long time, firmware unchanged</span>
+    <span class="hint">{% if stalled | length > 200 %}200 of {% endif %}{{ stalled | length | comma }}</span></h2>
   {% if stalled %}
-  <table>
-    <thead><tr><th>IMEI</th><th>Model</th><th>Firmware</th>
-               <th class="n">Pending for</th><th>Since</th><th>Last checked</th></tr></thead>
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
+    <thead><tr><th class="n fit">S.No.</th><th class="fit">IMEI</th><th class="fit">Model</th><th class="fit">Firmware</th>
+               <th class="n fit">Pending for</th><th class="fit">Since</th><th>Last checked</th></tr></thead>
     <tbody>
       {% for d in stalled[:200] %}
       <tr>
+        <td class="n dim">{{ loop.index }}</td>
         <td class="mono">{{ d.imei }}</td><td>{{ d.device_model or '—' }}</td>
         <td>{{ d.firmware or '—' }}</td>
         {# Days once it runs past a couple, because "1,417 hours" is not a duration anyone reads. #}
         <td class="n">{{ '%.0f days' % (d.pending_hours / 24) if d.pending_hours >= 48
                          else '%.0f hrs' % d.pending_hours }}</td>
-        <td class="dim">{{ d.pending_since[:16] }}</td>
-        <td class="dim">{{ d.last_seen_pending[:16] }}</td>
+        <td class="dim">{{ d.pending_since | when }}</td>
+        <td class="dim">{{ d.last_seen_pending | when }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-  {% if stalled | length > 200 %}
-  <p class="dim">Showing the 200 longest-pending of {{ stalled | length | comma }}.</p>
-  {% endif %}
+  </div>
   {% else %}
-  <p class="empty">No device has been pending that long without its firmware moving.</p>
+  <p class="empty-line">No device has been pending that long without its firmware moving.</p>
   {% endif %}
 </section>
 {% endif %}

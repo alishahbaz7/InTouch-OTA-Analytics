@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 22
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -55,10 +55,22 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "resumed_at": "REAL",
         # v18: how many devices a job keeps in progress at once (NULL: all of them).
         "in_progress": "INTEGER",
+        # v20: a pause stops a job's clock — its limit is its max time, and a pause must not eat it.
+        "paused_at": "REAL",
+        "paused_seconds": "REAL NOT NULL DEFAULT 0",
+        # v22: the wait after each command, JSON, one per command (NULL: none).
+        "waits": "TEXT",
     },
     "cota_campaign_result": {
         "answer_seconds": "REAL",
         "answered_attempt": "INTEGER",
+    },
+    # v22: a wait after a command — on the saved command, per job step, per sequence step.
+    "cota_saved_command": {
+        "wait_after_seconds": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "cota_run_step": {
+        "wait_after_seconds": "INTEGER NOT NULL DEFAULT 0",
     },
     "device_transition": {
         "from_configuration": "TEXT",
@@ -126,6 +138,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         for name, decl in columns.items():
             if name not in present:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+    # Before the script, which indexes the new shape of cota_device.
+    _rekey_cota_device(conn)
 
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -205,6 +220,20 @@ def migrate(conn: sqlite3.Connection) -> None:
         # having had them.
         conn.execute("ANALYZE")
 
+    if current < 19:
+        # v19: a device-list upload on 08-10-2026 stored 69 devices with their IMEI as the device
+        # id too (the id column defaulted onto the IMEI column). The cloud's own records pair each
+        # device id with its IMEI, so they put the right id back. No cloud id is an IMEI, so such
+        # a row is never "a person's entry" to keep.
+        conn.execute("""
+            UPDATE cota_device SET source = 'cloud record',
+                   device_id = (SELECT m.device_id FROM cota_command m WHERE m.imei = cota_device.imei
+                                ORDER BY m.last_seen_at DESC LIMIT 1)
+            WHERE CAST(device_id AS TEXT) = imei
+              AND EXISTS (SELECT 1 FROM cota_command m WHERE m.imei = cota_device.imei
+                          AND NOT EXISTS (SELECT 1 FROM cota_device o WHERE o.device_id = m.device_id))
+        """)
+
     if current < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -212,6 +241,42 @@ def migrate(conn: sqlite3.Connection) -> None:
     # a database created by a test or by an older version being upgraded in place.
     identity.ensure(conn)
     conn.commit()
+
+
+def _rekey_cota_device(conn: sqlite3.Connection) -> None:
+    """v21: cota_device was keyed by IMEI, so a device added by its cloud id alone could not be
+    stored. Rebuild it keyed by device id, keeping every row; ids were unique on the live data
+    (23,103 of 23,103), and should two rows share one, the newest wins. Group members missing
+    from it (2 on the live data) are added, so a device in a group is always in the list."""
+    columns = {r["name"]: r["pk"] for r in conn.execute("PRAGMA table_info(cota_device)")}
+    if not columns or columns.get("imei") != 1:
+        return                                  # a new database, or already rebuilt
+    now = conn.execute("SELECT strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')").fetchone()[0]
+    conn.execute("""
+        CREATE TABLE cota_device_v21 (
+          device_id INTEGER PRIMARY KEY, imei TEXT, device_type INTEGER NOT NULL,
+          tags TEXT NOT NULL DEFAULT '', source TEXT, added_at TEXT, updated_at TEXT NOT NULL,
+          last_job_name TEXT, last_job_status TEXT, last_job_at TEXT)
+    """)
+    conn.execute("""
+        INSERT INTO cota_device_v21 (device_id, imei, device_type, source, added_at, updated_at)
+        SELECT device_id, imei, device_type, source, updated_at, MAX(updated_at)
+        FROM cota_device GROUP BY device_id
+    """)
+    conn.execute("DROP TABLE cota_device")
+    conn.execute("ALTER TABLE cota_device_v21 RENAME TO cota_device")
+    # One IMEI, one device: keep it on the newest row (the schema then indexes it as unique).
+    conn.execute("""
+        UPDATE cota_device SET imei = NULL
+        WHERE imei IS NOT NULL AND device_id NOT IN (
+            SELECT device_id FROM (SELECT device_id, MAX(updated_at) FROM cota_device
+                                   WHERE imei IS NOT NULL GROUP BY imei))
+    """)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'cota_group_member'").fetchone():
+        conn.execute("""
+            INSERT OR IGNORE INTO cota_device (device_id, device_type, source, added_at, updated_at)
+            SELECT DISTINCT device_id, 124, 'group', ?, ? FROM cota_group_member
+        """, (now, now))
 
 
 def refresh_statistics(conn: sqlite3.Connection) -> None:

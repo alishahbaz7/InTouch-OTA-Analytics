@@ -5,10 +5,309 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
-## 2.0.2 — in development
+## 2.1.0 — 2026-10-12
+
+Built on 2.0.2 from the user's reviews of 9–12 Oct 2026 and the field jobs that a fixed hour cut
+short. A minor version, for new capability: a Devices list to manage the Intouch COTA fleet, an
+Overview of the day, a wait after a command, a job's own max time as its limit — and one design
+through the whole application, Web FOTA included.
+
+### One design through the application (12 Oct 2026)
+
+Web FOTA's pages now follow the design the user approved on Intouch COTA, so the utility reads as
+one product rather than two styles side by side.
+
+- **Every table is a data grid** — Overview, Devices, Pending, Firmware, Changes, Groups,
+  Reachability, Data quality, Error log and Update data's history: header band, rows a shade
+  apart, fitted columns, resizable by dragging a header's edge, long lists pinned in a frame
+  sized to the window. A test now fails any table in any template without it.
+- **Devices is rebuilt on the Intouch COTA list:** every column sorts from its header (a chevron
+  on the sorted one) and filters under it — the IMEI by part of one number or a pasted list,
+  every other column with a known set of values as in Excel (each value with its count, All /
+  None / Invert / Only, several values at once). *Last change* and *Last seen* filter by
+  disjoint periods; old `?changed=24h` links still work. Fallback and *Missed target* are pills
+  in the head, a group from the Groups page is a chip with a ×, *Clear filters* appears while
+  filtered, and Export (Excel, CSV, IMEI list) carries the view. The list's SQL moved from
+  `api.py` to `fota_devices.py`; filters, sort and paging stay in SQL (0.4 s of queries on
+  36,147 devices, counts included).
+- **The model slicer on Overview and Firmware is the same list filter.**
+- **Tiles lead with the share and put the count beside it**, as on COTA — of the fleet on
+  Overview, of the pending devices on Pending, of the moves on Changes, of the fleet with a
+  target on Firmware. Red only for a fault that is there: an unplanned downgrade, a fallback,
+  off target — grey at zero.
+- **One way to sort, filter and page:** `_grid.html` holds the header sort, the list filter and
+  the pager for both Devices lists, and the filter's script lives once, in the base page.
+- **Pending lists every device that is online with a task pending** (it stopped at 200 while the
+  tile said 249). A pending task's pill is orange, never the error red.
+- **Changes:** Fallbacks full width (it was too wide to share a row), Export as on every page,
+  the pager under its table, dates day first.
+- **No help text:** "detail →" links became the page's name with a chevron; "Showing the worst
+  25 of 61" and the like moved into the heading's count; the Update page's notices state the
+  fact (directions in the hold-tip) and the saved password's box reads *Saved*; the footer says
+  *Single snapshot* and nothing more.
+- **Clearing the error log is red and confirmed.**
+- **New job, redesigned** (the user: "aesthetically more professional"): sections with a rule
+  between, each its name and a live count on one line ("Devices 2 devices", "Commands 2 commands")
+  over its fields. The device source is **three tabs — Saved group, Device IDs, CSV file** — and
+  only the chosen one is shown and sent, replacing three stacked boxes that greyed each other out
+  under "…or" labels; the page comes back from a preview on the tab that was used. The CSV is a
+  proper file picker showing the file's name, *Download template* beside it; *From library* sits
+  on the Commands line; "one per line, sent in order" moved into the label's hold-tip; *Advanced
+  settings* has an icon and a turning chevron; *Preview plan* sits at the foot on the right.
+
+### A wait after a command (10 Oct 2026)
+
+Some commands take the device off the air for a while — *SET Force Sync Audio*, a reboot — and the
+next command, sent two seconds later, failed all three attempts while the device was away.
+
+- **A saved command can carry a wait** (*Wait after* in its dialog: 30 s to 30 min), shown in a
+  new column on Commands and kept in the library's file (`wait_after`).
+- **New job** gives every command line its own wait, pre-filled from the library and changeable
+  for that job; the plan shows it beside the command, the Start summary lists it, and Duplicate
+  keeps it. **Configure's sequences** use the saved command's wait.
+- **Each device waits on its own clock, from when the command ends** — answered, or after its
+  third attempt, since an unanswered reboot may still have run. The *Next* column says it:
+  "Waits after SET Force Sync Audio · in 2:41 · 18:06:10". A waiting device keeps its place in
+  progress.
+- **The waits count in the time limit:** the plan's *May take up to*, the job's hard stop and its
+  *Remaining* include them, and the finish-today check holds.
+- A rerun, the rest of a job and a copy are named after the job they came from — "Rerun of #2 Set
+  FTP Test".
+
+### Every Intouch COTA table, one design (10 Oct 2026)
+
+- **The data grid** — the Devices list's table design on every table in Intouch COTA: Overview,
+  Jobs, a job's command summary and devices, Commands. A solid header band with bright bold titles
+  and a firm line under it; rows a shade apart, a hover band; columns that fit their content, the
+  free-text column taking what is left.
+- **Long tables keep their header in view:** Devices, a job's devices and Saved commands scroll
+  inside a frame sized to the window, with the header rows pinned.
+- **A job's device table sorts** on every column but *Next* (worked out live per row), across all
+  its devices, not just the page shown; the order survives the live redraw, the filters and the
+  pager. **Saved commands sort** on every header too.
+- **Excel-style filters on Devices:** each list column opens a panel of every value with its
+  device count — All, None, Invert, *Only* beside each value, a search box for long lists — and
+  applies any number of values at once. Device ID and IMEI take a pasted list. "Select all
+  matching" honours every filter.
+- **A running job shows in the browser tab** — a progress ring over the app's mark (now every
+  page's tab icon) — and **Notify me** sends a desktop notification when the job finishes, pauses
+  or is cancelled, with its answered and failed counts.
+- The Jobs list's *Answers per hour* is the same 24-hour timeline as the Overview's.
+- A command sent and not yet judged reads **In progress** (it said "In flight") — in the command
+  summary, its outcome bar and a device's unfolded commands.
+- Dropdown lists are readable on every page: options always take the theme's solid colours (an
+  active filter's see-through tint drew the list pale, with light text on it).
+
+### Devices: one list to manage the fleet (10 Oct 2026)
+
+The page is rebuilt to the user's design, for handing the utility over. *Send a command*, *Load the
+device map* and *Groups* are gone from it; what is left is one table, **Devices**.
+
+- **Columns:** a tick box, S.No., Device ID, IMEI, Device type (the model in Web FOTA), Group,
+  Last job, Last job status, FW version and FOTA last seen (from Web FOTA), and Tags.
+- **Every column sorts and filters**, on the server, so a 23,000-device list answers in a fraction
+  of a second; the view — filters, sort, page, page size — is the URL. A filter row under the
+  headers; *Clear filters*; 25, 50, 100 or 200 per page; *Export* of the whole view to Excel or CSV.
+- **Add device:** a Device ID, or many pasted, with tags; or the cloud's own device list as a CSV
+  (`id, trackingCode, tags`, with a template). Adding a device already listed only adds the tags.
+- **Several tags per device**, shown as chips; a chip filters the list by itself.
+- **Groups may overlap — a warning, never a restriction.** *Add group* takes its devices from typed
+  IDs, a tag, or the ticked rows, and checks first: how many are new, in no group, or already in
+  another group. Those are named in a warning and listed in a small table (Device ID, IMEI,
+  current group) where any can be left out — All, None, Invert, or a click on the row; they join
+  the new group and keep their other one, unless *Take them out of their other groups* is ticked.
+  *Add to group* on ticked rows works the same way and says what it will do first. *Take out of
+  group*, with a group in view, takes devices out of that group only. A device in several groups
+  shows each group's name. The group in view can be renamed or deleted (its devices stay).
+- **A filter offers only values some device has** — "No group 0" was a choice that matched
+  nothing — plus any already ticked.
+- **Edit group:** the group in view has *Edit* — rename it, and add devices in bulk: paste any
+  number of IDs (a column copied from Excel), pick a tag, or use the ticked rows. Same check and
+  warning as Add group, with "already in this group" counted; *Take them out of their other
+  groups* makes it a transfer.
+- **The Group filter lists each group by its own name** — nothing merged, no "In several groups";
+  a device in two groups matches either name.
+- **Every table's columns can be dragged wider or narrower** by their header's edge; a
+  double-click gives the table its automatic widths back; widths are remembered per page.
+- Saved commands: the data packs to the left and Tags takes the spare width; a long command name
+  stays on one line with "…", whole on hover.
+- Fixed: a refused Add group came back with its dialog open but the page's buttons dead — the
+  script reopened the dialog before the form it needed was set up.
+- **The selection bar** acts on the ticked rows — or on every device the filters match ("Select all
+  23,105 matching"): Add to group, Add tag, Remove tag, Take out of group, New job, Export, Remove.
+- **Last job and its status** — Completed, In progress, In line, Paused, Failed, Not reachable,
+  Time limit, Not started, Cancelled — read live from today's jobs and **kept on the device when the
+  day's record is cleared**, so the list still says them tomorrow ("Not finished" for a job that
+  was still open).
+- **Schema v21:** the device list is keyed by the cloud's device ID (it was keyed by IMEI, so a
+  device without a known IMEI could not be listed); its IMEI is learned from the cloud's records.
+  Every device a job, a group or a cloud record names is listed. On the live data: 0.4 s to migrate,
+  all 23,103 IMEIs kept, 2 group-only devices added.
+
+### Overview: the day as a timeline, and answers by firmware (10 Oct 2026)
+
+- **Answer rate by hour** is a 24-hour timeline: one slim column per hour, the current hour marked,
+  drawn at a fixed height — two hours of data no longer stretch into two blocks across the page.
+- **Commands today** unfolds each command by **firmware**: devices, answered, failed and answer rate
+  per build, a build far below the command's overall rate marked, and a *Firmware* column summing
+  up the builds per command.
+- *Never answered — last ping in Web FOTA* and *Why commands failed* are taken off the page.
+- **The job export carries Device type and FW version** for every device, from Web FOTA.
+
+### Readable, quiet pages (10 Oct 2026)
+
+- **Every grey now passes WCAG AA on every surface.** Measured, the secondary grey reached only
+  3.2–3.7:1 on the dark panels and 2.7–3.0:1 on light; it is now 5.2–6.1:1 and 4.8–5.4:1, and
+  the brighter grey 8.0–9.4:1 and 7.3–8.2:1. No text is smaller than about 11.5 px; table text
+  is 13 px with taller rows; table headers, tile labels and field labels are bolder and
+  brighter.
+- **No help text anywhere.** The top bar shows the page and its module; the page's description
+  is a hold-tip on the title. Gone: "used by N saved commands", explanatory placeholders,
+  notices that explain a rule, empty states with directions, the console's and sign-in page's
+  paragraphs, the rail legend's second line. What explains is a tip on the title.
+- **Data and version moved from the footer to the version chip in the rail**: hover shows the
+  install, data digest, snapshots, period, version, schema and Python; a double-click pins the
+  card so it can be copied. COTA pages no longer have a footer; Web FOTA's keeps its snapshot
+  line.
+
+### Commands: saved commands are the page (10 Oct 2026)
+
+- **One list, full width**, with search, Export, Import and **Add command** in its head;
+  columns for the command (name, hex, note), its parameter (name, or code when unnamed), type
+  and tags.
+- **One dialog adds and edits.** As the command is typed it shows its type, parameter name and
+  code, and whether it is already saved under another name. When the parameter has no name, a
+  *Parameter name* field appears in the same dialog and is saved with the command; left blank,
+  the command shows by code. The Name follows the reading until you type your own.
+- **Parameter names fold away** at the bottom — rename or remove only — and now also list
+  parameters your saved commands use without a name.
+
+### New job: plan in figures, a formal Start summary (10 Oct 2026)
+
+- **Advanced settings** replaces the settings line in the fold's title; a *Changed* pill shows
+  when a value differs from its default.
+- **The plan is one row of figures** — May take up to (hard stop, ends by), Devices, Commands,
+  At a time — then the commands by name. The arithmetic behind the time is its tooltip; the
+  *Each command* and *Calls* rows are gone.
+- **Start asks with a formal summary**: one sentence, then Devices, Commands (listed), Devices at
+  a time, Maximum duration, Stops by and Estimated duration.
+
+### Job progress moves (10 Oct 2026)
+
+- The bar **glides** to its new widths and the percentage and tile figures **count** to their
+  new values on every redraw, instead of jumping.
+- **While a job runs** the bar carries moving stripes and a sweep of light, and a dot pulses
+  beside the percentage; **paused or done it is still**. The motion is phase-locked to the clock
+  so the 5-second redraw never restarts it, and it is off under reduced-motion settings.
+
+### A job's max time is its hard limit — confirmed before Start
+
+The user's design (09–10 Oct 2026), replacing the fixed hour that cut job #7 short and left a
+2-device job open for an hour.
+
+- **One command takes at most 3 attempts of the answer wait and a tick** — 3 × 30 s + 10 s =
+  100 s. Measured: attempts go 30 s apart, ~90 s per unanswered command; an answered one takes
+  ~20–30 s. (The first version counted 2 min; the hard limit needed the real figure.)
+- **A job's max time** is the longest it can take if no device answers — the devices in progress,
+  each running its commands, the rest taking slots as they free — plus a tenth for slow ticks.
+  **It is the job's hard limit** unless a shorter one is typed in Settings.
+- **Start asks first**, in the app's own dialog with a go-ahead button rather than a red one:
+  "1,000 devices × 4 commands, 200 at a time. Max time 37 min — it stops by 15:42 whatever is
+  left. About 8 min if devices answer."
+- **Every job finishes the day it starts** — the COTA record is cleared when the app starts on a
+  new day. If its max time would run past 23:59, Start is held and the plan shows the devices in
+  progress that would fit.
+- **A pause stops the clock**: time spent paused moves the deadline on, so a tight limit is not
+  eaten by an expired session.
+- **The job page shows Started, Max time and Remaining** under its progress line. Remaining is
+  the commands still to do at the most each can take — for one device exactly the user's sum
+  (10 commands, 5 answered and 3 failed: 2 × one command); for many, the devices in progress
+  finish theirs and each device in line takes the first slot that frees. A finished job shows
+  how long it took.
+- **The Preview leads with it**: "May take up to 1 h 50 min · hard stop · ends by 11:50", and
+  the sum behind it — "10 rounds × 6 commands × 1 min 40 s = 1 h 40 min, + 10% → 1 h 50 min" —
+  or, for a job the calls decide, "N calls at 5 a second". A typed limit reads "Stops at 1 h ·
+  your limit · its max time 1 h 50 min".
+
+### Cloud sign-in: a remembered password survives sign-out, and the page is lean
+
+- **Signing out drops the session token and keeps a remembered password** in Windows Credential
+  Manager (or the environment), so the next sign-in needs no typing. **Forget saved password**
+  — red, and it asks first — removes it.
+- **The cloud is called "CVTMS Cloud".** The API URL moved into *Sign-in details*; the footnote
+  about where secrets are kept, the cloud's name beside the heading, the Status card's API URL
+  and its two notes are gone (the user, 10-10-2026). Where secrets go is in *Remember me*'s
+  tooltip.
+
+### Every tile: outlined in its colour over a soft gradient
+
+The look of Web FOTA's red alert tile, which the user picked for every tile (10-10-2026): a thin
+border all round in the tile's colour — green, yellow, orange, red, white or grey — over a soft
+gradient of the same colour, in both themes and both modules. It replaces the coloured left bar.
+
+### Fixed — the first visit of a new day showed yesterday's jobs
+
+The COTA record is cleared once per process on the first page of a new day, but the Overview
+and the Jobs list computed their figures before that ran: the first visit showed yesterday's
+jobs as today's, the next showed none. The clearing now runs before any page reads anything.
+
+### A job its time limit stopped says so — and the rest can carry on
+
+Job #7 (09-10-2026: 2,997 devices × 8 commands, 200 at a time) stopped at its 60-minute limit
+with 1,515 devices finished, 200 mid-sequence and 1,282 never started — and read only "done". Its
+plan had said "up to 240 min if devices do not answer", in a warning that was easy to read past.
+
+- **A job that ended at its limit shows *time limit*, not *done***, on its page and in the list,
+  with the reason: "Stopped at its 60-minute time limit — 200 mid-sequence and 1,282 not
+  started." Jobs that ended this way before the change say it too.
+- **Continue the rest** opens a new job with exactly the devices the limit stopped, in the job's
+  own order — 1,482 here — with the same commands and settings.
+- **The plan's warning gives the fix as numbers**: "To fit: 1,000 devices in progress at once,
+  or a 240-minute time limit."
+
+### Intouch COTA Overview: what the day's jobs say
+
+A new first page for Intouch COTA, built like Web FOTA's Overview, from today's own record and
+Web FOTA's registry. Nothing on it calls the cloud.
+
+- **Answer rate by hour** — answered and failed stacked per hour, each hour's answer rate on
+  top, the current hour hatched. On 08-10-2026 it showed devices answering 71–73% in the
+  afternoon and 10% at 21:00.
+- **Today at a glance** — donuts of every command (answered, failed, out, not sent, stopped) and
+  every device (answered everything, some, nothing).
+- **Needs attention** — online but not answering, commands slower than their answer wait,
+  answers that report a failure, firmware with no answers; and held by the cloud, resends to
+  devices that never answered, late answers.
+- **Never answered — last ping in Web FOTA.** The cloud's records name each device's IMEI, and
+  Web FOTA knows when it last pinged the OTA platform. Of 26 silent devices: 3 pinged in the
+  last hour (online but not answering — listed, with a way into Configure), 19 earlier today,
+  4 over a day ago (switched off).
+- **Commands today** — per command across all jobs: answered, first try, typical and slowest
+  time, main failure, and a suggested wait for a command slower than its own (GET GREEN
+  DRIVING: ~49 s against 30 s → 60 s).
+- **By firmware** — answered everything / some / nothing per model and firmware (7.4.27C: 0 of 2).
+
+### Every job device shows its IMEI
+
+The Configure page said "IMEI not known yet" for job devices although every cloud record carries
+the IMEI. A device-list upload had stored 69 devices with their IMEI as the device id too — the id
+column defaulted onto the IMEI column when the header named no id — and the cloud's records,
+which defer to a person's own map, could not correct it. Now:
+
+- the device map is repaired from the cloud's records on upgrade (schema 19), and whenever a
+  record arrives for a device whose map row holds its IMEI as its id;
+- an upload never reads the IMEI column as the id, and a 14+ digit "device id" is refused as an
+  IMEI wherever ids are typed or uploaded;
+- a device the map lacks takes its IMEI from its newest cloud record.
+
+---
+
+## 2.0.2 — 2026-10-08
 
 Built on 2.0.1 from the user's review of the Commands page and the job page, and from the
 day's field-test jobs #8–#14 — up to 69 devices (08 Oct 2026).
+
+Pushed as a branch on 8 Oct and never built: it ships inside 2.1.0.
 
 ### Commands: laid out for a growing library
 
@@ -159,6 +458,12 @@ to the end or to its time limit, and a person pauses it.**
 
 ### Fixed
 
+- **Web FOTA → Changes: the Fallbacks list follows the window.** With *Today* picked, the tile
+  said 6 fallbacks and the list showed 271 — every fallback ever recorded. The list, its count
+  and its model chips now take the same period as the tile; *Times* still counts each device's
+  whole history, and *Falling back repeatedly* stays all-time by definition.
+- **Web FOTA → Changes: *Yesterday* stops at midnight.** The tiles and the moves list took only
+  the window's start, so *Yesterday* also counted today.
 - The import preview's *Apply* button read "<built-in method update…>": its counts used the key
   `update`, and in Jinja a key named like a dict method is read as the method. Now `updated`,
   and CLAUDE.md lists the names to avoid.

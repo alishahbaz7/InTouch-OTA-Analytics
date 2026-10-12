@@ -50,6 +50,8 @@ MODULES: tuple[Module, ...] = (
              "Configuration over the air through the web platform", pill="Soon"),
     )),
     Module("intouch_cota", "Intouch COTA", (
+        Item("Overview", "/cota/overview", "grid",
+             "Today's jobs at a glance — what answered, what did not, and why"),
         Item("Configure", "/cota/console", "message",
              "One device, one command at a time — send it and see what the device says"),
         Item("Jobs", "/cota", "send",
@@ -57,7 +59,8 @@ MODULES: tuple[Module, ...] = (
              prefixes=("/cota/jobs",)),
         Item("Commands", "/cota/commands", "tag",
              "Your names for parameters and commands — every page and export reads them"),
-        Item("Devices", "/cota/devices", "cpu", "IMEI to cloud device id — who can be reached"),
+        Item("Devices", "/cota/devices", "cpu",
+             "Every device by its cloud ID: group, tags, last job, and what Web FOTA knows of it"),
         Item("Sign in", "/cota/signin", "key", "Which cloud, and the credentials to reach it",
              also=("/cota/signout",), in_rail=False),
     )),
@@ -143,6 +146,8 @@ ICONS = {
     "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
     "plus": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "search": '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    "bell": '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
     "copy": '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>'
             '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
     "rotate-ccw": '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
