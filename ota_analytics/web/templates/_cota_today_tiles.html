@@ -1,0 +1,34 @@
+{# Today's six tiles — the Jobs page and the Overview show the same ones from here. `t` is
+   cota_campaign.today(); the COTA record holds only today, so this is every job there is. #}
+{% from "_cota_charts.html" import took %}
+<div class="tiles">
+  <div class="tile tone-white">
+    <div class="tile-label">Jobs today</div>
+    <div class="tile-value">{{ t.jobs | comma }}</div>
+    <div class="tile-sub">{% if t.running or t.paused %}{{ t.running }} running · {{ t.paused }} paused{% else %}all finished{% endif %}</div>
+  </div>
+  <div class="tile tone-white" data-tip="Devices sent at least one command today.">
+    <div class="tile-label">Devices reached</div>
+    <div class="tile-value">{{ t.reached | comma }}</div>
+  </div>
+  <div class="tile tone-green">
+    <div class="tile-label">Commands answered</div>
+    {% if t.answered_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.answered_share }}%<span class="tile-count">{{ t.answered | comma }}</span></div>
+    {% else %}<div class="tile-value">{{ t.answered | comma }}</div>{% endif %}
+  </div>
+  <div class="tile tone-white">
+    <div class="tile-label">Time to answer</div>
+    <div class="tile-value">{{ took(t.median_answer) }}</div>
+    <div class="tile-sub">typical · slowest {{ took(t.slowest_answer) }}</div>
+  </div>
+  <div class="tile {{ 'tone-red' if t.failed else 'tone-grey' }}">
+    <div class="tile-label">Failed</div>
+    {% if t.failed_share is not none %}<div class="tile-value" data-tip="Of the commands that finished today.">{{ t.failed_share }}%<span class="tile-count">{{ t.failed | comma }}</span></div>
+    {% else %}<div class="tile-value">{{ t.failed | comma }}</div>{% endif %}
+  </div>
+  <div class="tile tone-grey">
+    <div class="tile-label">Cloud calls</div>
+    <div class="tile-value">{{ (t.send_calls + t.poll_calls) | comma }}</div>
+    <div class="tile-sub">{{ t.send_calls | comma }} sends · {{ t.poll_calls | comma }} checks</div>
+  </div>
+</div>

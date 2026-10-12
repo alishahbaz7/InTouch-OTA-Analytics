@@ -39,6 +39,26 @@ def _app_root() -> Path:
 ROOT = _app_root()
 
 
+def _channel() -> str:
+    """Which copy this is: the packaged `release`, or `dev` running from source.
+
+    Both are meant to run at the same time on one machine — the release in daily use, the
+    source copy being worked on — so everything they could fight over is keyed on this: the
+    default port, which running copy a new launch defers to, and the session cookie name.
+    Their data is already apart, because ROOT is. A server deployed from source is a release
+    in every sense but packaging, so OTA_CHANNEL overrides the guess.
+    """
+    chosen = (os.environ.get("OTA_CHANNEL") or "").strip().lower()
+    if chosen in ("release", "dev"):
+        return chosen
+    return "release" if is_frozen() else "dev"
+
+
+CHANNEL = _channel()
+# Release keeps 8000 so existing bookmarks and the deploy units stay right; dev sits beside it.
+DEFAULT_PORT = 8000 if CHANNEL == "release" else 8100
+
+
 def command_hint(*args: str) -> str:
     """How to run this program from a terminal, spelled the way the reader would type it.
 

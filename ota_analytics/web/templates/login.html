@@ -20,7 +20,6 @@
     .signin .msg { padding: 0.6rem 0.75rem; border-radius: 6px; font-size: 0.9rem; }
     .signin .msg.error { background: #fef2f2; color: #991b1b; }
     .signin .msg.warn  { background: #fffbeb; color: #92400e; }
-    .signin .hint { color: #6b7280; font-size: 0.85rem; margin-top: 1.5rem; }
   </style>
 </head>
 <body>
@@ -38,13 +37,12 @@
     <form method="post" action="/login">
       {# The submitted password is never rendered back into this page. #}
       <input type="hidden" name="next" value="{{ next }}">
-      <label for="password">Password</label>
+      <label for="password" data-tip="The viewer password can read every page but cannot change anything.">Password</label>
       <input type="password" id="password" name="password" autocomplete="current-password"
              autofocus required>
       <button type="submit">Sign in</button>
     </form>
-
-    <p class="hint">The viewer password can read every page but cannot change anything.</p>
   </main>
+{% include "_hold_tip.html" %}
 </body>
 </html>

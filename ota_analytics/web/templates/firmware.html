@@ -1,61 +1,40 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% import "_grid.html" as grid with context %}
 {% block title %}Firmware — OTA Analytics{% endblock %}
 
 {% block content %}
-{# Model slicer, the same one the overview uses. It was an always-open multi-select list box
-   here, which took six rows of chrome and needed "ctrl+click to pick several" explaining
-   underneath. A <details> dropdown holds it to a single line and behaves like every other
-   picker in the app. Empty selection means the whole fleet, so "all" is the default and
-   narrowing is opt-in. #}
+{# Model slicer, the same list filter the overview and the Devices tables use. Empty means the
+   whole fleet, so narrowing is opt-in. #}
 <div class="page-toolbar">
   <span class="hint">{{ mix_total | comma }} devices
-    {%- if selected_models %} in {{ selected_models | length }} of
-      {{ models | length }} models{% else %} · all {{ models | length }} models{% endif %}
+    {%- if selected_models %} in {{ selected_models | length }} of {{ models | length }} models{% endif %}
     &middot; {{ mix | length }} firmware version{{ 's' if mix | length != 1 }}</span>
-
-  <details class="dropdown" id="model-picker">
-    <summary>
-      {%- if selected_models -%}
-        {{ selected_models[0] }}{% if selected_models | length > 1 %}
-          +{{ selected_models | length - 1 }}{% endif %}
-      {%- else -%}All models{%- endif -%}
-    </summary>
-    <form method="get" class="dropdown-panel">
-      <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
-      <div class="dropdown-list">
-        {% for r in models %}
-        <label class="dropdown-item">
-          <input type="checkbox" name="model" value="{{ r.label }}"
-                 {{ 'checked' if r.label in selected_models }}>
-          <span>{{ r.label }}</span>
-          <em>{{ r.devices | comma }}</em>
-        </label>
-        {% endfor %}
-      </div>
-      <div class="dropdown-actions">
-        <a href="/firmware{{ qs() }}">Clear</a>
-        <button type="submit">Apply</button>
-      </div>
-    </form>
-  </details>
+  <form method="get" id="model-form" class="toolbar-pick">
+    {% if snapshot_id %}<input type="hidden" name="snapshot" value="{{ snapshot_id }}">{% endif %}
+    <span class="toolbar-label">Model</span>
+    {{ grid.pick('model', 'Model', model_choices.entries, model_choices.chosen, 'model-form') }}
+  </form>
 </div>
 
 {% if targets %}
+{% set c = kpis.compliance %}
+{% set c_total = c.on_target + c.off_target + c.eol_ok + c.undeclared %}
 <div class="tiles">
-  {{ m.tile('On target', kpis.compliance.on_target | comma, '', 'ok-tile') }}
-  {{ m.tile('Off target', kpis.compliance.off_target | comma, 'needs update', 'alert') }}
-  {{ m.tile('End of life', kpis.compliance.eol_ok | comma, '', 'muted-tile') }}
-  {{ m.tile('No target set', kpis.compliance.undeclared | comma, 'unknown', 'muted-tile') }}
+  {{ m.tile('On target', c.on_target, tone='tone-green', total=c_total,
+            tip='On the declared target version for its model.') }}
+  {{ m.tile('Off target', c.off_target, tone='tone-red' if c.off_target else 'tone-grey', total=c_total,
+            tip='Not on the declared target version for its model.') }}
+  {{ m.tile('End of life', c.eol_ok, tone='tone-grey', total=c_total,
+            tip='An end-of-life model already on its final firmware.') }}
+  {{ m.tile('No target set', c.undeclared, tone='tone-grey', total=c_total,
+            tip='No target version declared for the model, so compliance is unknown.') }}
 </div>
 {% endif %}
 
 <section class="card">
-  <h2>Devices per firmware version
-    <span class="count">{{ mix | length }} version{{ 's' if mix | length != 1 }}</span>
-    {%- if selected_models %}
-    <span class="hint">{{ selected_models | join(', ') }}</span>
-    {%- endif %}</h2>
+  <h2><span data-tip="{% if selected_models %}{{ selected_models | join(', ') }}: {% endif %}devices on each version, and how many of them are online and offline.">Devices per firmware version</span>
+    <span class="hint">{{ mix | length }}</span></h2>
   {% set biggest = mix[0].devices if mix else 1 %}
   {# Grouped header. Three percentage columns sit next to each other and they do NOT share a
      denominator: the first is a share of the whole fleet, the other two are shares of that one
@@ -65,20 +44,21 @@
 
      Inactive is shown rather than left as the remainder, because online + offline does not
      reach 100%: STATUS has a third value for devices that have never pinged. #}
-  <table class="grouped" id="firmware-mix">
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="grouped data-grid" id="firmware-mix">
     <thead>
       <tr class="group-row">
-        <th rowspan="2">Model</th>
-        <th rowspan="2">Firmware</th>
+        <th class="fit" rowspan="2">Model</th>
+        <th class="fit" rowspan="2">Firmware</th>
         <th class="n" colspan="3">Devices</th>
         <th class="n" colspan="3">Online</th>
         <th class="n" colspan="3">Offline</th>
         <th rowspan="2">Distribution</th>
       </tr>
       <tr class="sub-row">
-        <th class="n">Count</th><th class="n">% of fleet</th><th class="n">Task</th>
-        <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
-        <th class="n">Count</th><th class="n">% of version</th><th class="n">Task</th>
+        <th class="n fit">Count</th><th class="n fit">% of fleet</th><th class="n fit">Task</th>
+        <th class="n fit">Count</th><th class="n fit">% of version</th><th class="n fit">Task</th>
+        <th class="n fit">Count</th><th class="n fit">% of version</th><th class="n fit">Task</th>
       </tr>
       <tr class="totals-row">
         <td colspan="2">Total</td>
@@ -103,7 +83,7 @@
            for a device that has never pinged. It is 0 on 102 of 103 rows, so a column of
            its own was noise — but the shortfall still has to be accountable, or that one
            row silently loses 645 devices. It is named here instead. #}
-        <td class="n"{% if r.inactive %} title="{{ r.inactive | comma }} of these have never pinged, so they count as neither online nor offline"{% endif %}>{{ r.devices | comma }}{% if r.inactive %}<span class="footmark">*</span>{% endif %}</td>
+        <td class="n"{% if r.inactive %} data-tip="{{ r.inactive | comma }} of these have never pinged, so they count as neither online nor offline."{% endif %}>{{ r.devices | comma }}{% if r.inactive %}<span class="footmark">*</span>{% endif %}</td>
         <td class="n dim">{{ '%.1f' % (r.devices / mix_total * 100 if mix_total else 0) }}%</td>
         <td class="n dim">{{ r.pending | comma }}</td>
         <td class="n">{{ r.online | comma }}</td>
@@ -122,26 +102,28 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 
 {% if gaps %}
 <section class="card highlight">
-  <h2>Coverage gaps
-    <span class="hint">off target and never tasked — online ones are actionable now</span>
-  </h2>
-  <table>
-    <thead><tr><th>Model</th><th>On firmware</th><th>Target</th>
-               <th class="n">Devices</th><th class="n">Online now</th></tr></thead>
+  <h2><span data-tip="Off target and never tasked. The online ones are actionable now.">Coverage gaps</span>
+    <span class="hint">{{ gaps | sum(attribute='devices') | comma }} devices</span></h2>
+  <div class="table-wrap grid-scroll">
+  <table class="data-grid">
+    <thead><tr><th class="fit">Model</th><th class="fit">On firmware</th><th class="fit">Target</th>
+               <th class="n fit">Devices</th><th class="n">Online now</th></tr></thead>
     <tbody>
       {% for g in gaps %}
       <tr>
         <td>{{ g.device_model }}</td><td>{{ g.firmware }}</td><td class="dim">{{ g.target }}</td>
         <td class="n">{{ g.devices | comma }}</td>
-        <td class="n {{ 'alert-text' if g.online }}">{{ g.online | comma }}</td>
+        <td class="n {{ 'tone-yellow-text' if g.online }}">{{ g.online | comma }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endif %}
 {% endblock %}

@@ -3,31 +3,24 @@
 {% block title %}Reachability — OTA Analytics{% endblock %}
 
 {% block content %}
-<div class="glance-grid">
-  <section class="card">
-    <h2>Fleet last seen</h2>
-    {% set total = (staleness | sum(attribute='devices')) or 1 %}
-    {% for b in staleness %}
-      {{ m.bar(b.bucket, b.devices, total,
-               'ok' if b.bucket == 'online now' else ('dim' if '90+' in b.bucket or b.bucket == 'never pinged' else 'neutral')) }}
-    {% endfor %}
-  </section>
-  <section class="card muted-card">
-    <h2>Reading this page</h2>
-    <p class="lede">
-      Online rate paired with how long the offline devices have been dark. A low rate with very
-      old contact means retired hardware; a low rate with recent contact means devices are
-      dropping off now. Worst first, ≥{{ min_devices }} devices.
-    </p>
-  </section>
-</div>
+<section class="card">
+  <h2>Fleet last seen</h2>
+  {% set total = (staleness | sum(attribute='devices')) or 1 %}
+  {% for b in staleness %}
+    {{ m.bar(b.bucket, b.devices, total,
+             'ok' if b.bucket == 'online now' else ('dim' if '90+' in b.bucket or b.bucket == 'never pinged' else 'neutral')) }}
+  {% endfor %}
+</section>
 
 <section class="card">
-  <h2>By firmware version</h2>
-  <table>
+  <h2><span data-tip="Online rate paired with how long the offline devices have been dark. A low rate with very old contact means retired hardware; a low rate with recent contact means devices are dropping off now. Worst first, versions with at least {{ min_devices }} devices.">By firmware version</span>
+    <span class="hint">{{ rows | length }}</span></h2>
+  {% if rows %}
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
     <thead>
-      <tr><th>Model</th><th>Firmware</th><th class="n">Devices</th><th class="n">Online</th>
-          <th>Online rate</th><th class="n">Avg dark</th><th class="n">Max dark</th>
+      <tr><th class="fit">Model</th><th class="fit">Firmware</th><th class="n fit">Devices</th><th class="n fit">Online</th>
+          <th class="fit">Online rate</th><th class="n fit">Avg dark</th><th class="n fit">Max dark</th>
           <th class="n">Pending</th></tr>
     </thead>
     <tbody>
@@ -52,5 +45,9 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
+  {% else %}
+  <p class="empty-line">No version has {{ min_devices }} devices or more.</p>
+  {% endif %}
 </section>
 {% endblock %}

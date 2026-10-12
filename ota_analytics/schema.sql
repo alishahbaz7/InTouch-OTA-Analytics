@@ -365,3 +365,261 @@ SELECT m.snapshot_id,
 FROM device_current c
 JOIN device_current_meta m ON m.only_row = 1
 JOIN snapshot s ON s.id = m.snapshot_id;
+
+-- ─── COTA: configuration over the air (v10) ────────────────────────────────────────────────
+-- Commands sent to devices through the cloud's own COTA API (ctvms IntouchAdminApi), as jobs
+-- of many devices × many commands. See COTA.md. Nothing here is derived from snapshots and
+-- nothing in the snapshot warehouse reads it; bundles do not carry it.
+
+-- The cloud addresses a device by its internal id, people by IMEI ("Device Unique No").
+-- The send call also needs the device type, so both come from here.
+-- v21: the Devices list. Keyed by the cloud's device id — a device can be added by its id alone,
+-- and its IMEI is learned later from the cloud's records (it was keyed by IMEI before, so a device
+-- without one could not be listed). Tags are set-up, like groups; the last job's name and
+-- status are copied here when the day's record is cleared, so the list still says them tomorrow.
+CREATE TABLE IF NOT EXISTS cota_device (
+  device_id       INTEGER PRIMARY KEY,
+  imei            TEXT,                 -- NULL until known
+  device_type     INTEGER NOT NULL,     -- the cloud's model number, sent with every command
+  tags            TEXT NOT NULL DEFAULT '',   -- comma separated, as cota_library.clean_tags writes
+  source          TEXT,                 -- added | device list | cloud record | group | …
+  added_at        TEXT,
+  updated_at      TEXT NOT NULL,
+  last_job_name   TEXT,
+  last_job_status TEXT,
+  last_job_at     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cota_device_imei ON cota_device(imei) WHERE imei IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS cota_job (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT,
+  source_file TEXT,
+  created_at  TEXT NOT NULL,
+  note        TEXT
+);
+
+-- One row per device × command. `state` moves planned → sent | send_failed, and stays
+-- `unmapped` for an IMEI the device map did not know — kept rather than dropped, so the export
+-- accounts for every row of the sheet it came from.
+CREATE TABLE IF NOT EXISTS cota_task (
+  id          INTEGER PRIMARY KEY,
+  job_id      INTEGER NOT NULL REFERENCES cota_job(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,     -- row order in the source sheet
+  imei        TEXT NOT NULL,
+  device_id   INTEGER,
+  device_type INTEGER,
+  cmd_type    INTEGER NOT NULL,
+  params      TEXT NOT NULL,        -- JSON {"val1": ..., "val2": ...}, exactly as sent
+  batch_no    INTEGER,              -- tasks sharing one API call
+  state       TEXT NOT NULL,
+  sent_at     TEXT,
+  http_status INTEGER,
+  send_reply  TEXT,                 -- the cloud's reply to the send call, raw
+  error       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cota_task_job ON cota_task(job_id, state);
+-- v15: every per-device lookup — pairing replies with sends, learning the IMEI, the console's
+-- thread — goes by device. Without this each one scanned all tasks: a 5,000-device job took 12×
+-- as long as a 1,000-device one, where it should take 5×.
+CREATE INDEX IF NOT EXISTS ix_cota_task_device ON cota_task(device_id, state);
+
+-- What getGPRSCommand returned for a device, each time it was asked. Stored raw because the
+-- reply shape is not known yet and differs per command — matching a reply to the command that
+-- caused it is the next step (COTA.md, "Open questions").
+CREATE TABLE IF NOT EXISTS cota_poll (
+  id          INTEGER PRIMARY KEY,
+  job_id      INTEGER NOT NULL REFERENCES cota_job(id) ON DELETE CASCADE,
+  device_id   INTEGER NOT NULL,
+  polled_at   TEXT NOT NULL,
+  window_from INTEGER NOT NULL,     -- epoch seconds, as sent to the API
+  window_to   INTEGER NOT NULL,
+  http_status INTEGER,
+  records     INTEGER,              -- entries found in the reply, when it holds a list
+  raw         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cota_poll_job ON cota_poll(job_id, device_id, polled_at);
+
+-- ─── COTA: what the cloud holds for each command (v11) ─────────────────────────────────────
+-- getGPRSCommand returns one record per command sent to a device — from this tool, the portal
+-- or anywhere else — keyed by the cloud's own id (e.g. 865510083360422_6AC48E16). The cloud
+-- rewrites val1, so the local task (what the UI sent) and this row (what the cloud queued) are
+-- two views of one command, joined by task_id once matched on device, type and time.
+--
+-- A command moves through three stages, shown as ticks in the console:
+--   ✓   command via API     the task's send call was accepted         (cota_task.state = 'sent')
+--   ✓✓  response via API    the cloud returned a record for it        (a row here, first_seen_at)
+--   ✓✓  response via device the device itself answered (green)        (device_response, reserved:
+--                                                                       it comes from its own API)
+CREATE TABLE IF NOT EXISTS cota_command (
+  cloud_id           TEXT PRIMARY KEY,   -- "id" in the record
+  device_id          INTEGER NOT NULL,
+  imei               TEXT,
+  cmd_type           INTEGER,
+  sent_epoch         INTEGER,            -- "timestamp": when the cloud took the command
+  val1               TEXT,               -- as the cloud holds it, rewritten
+  status             INTEGER,            -- meaning not yet known; kept exactly as given
+  api_response       TEXT,               -- "response", as given
+  api_response_time  TEXT,               -- "responseTime", as given
+  task_id            INTEGER REFERENCES cota_task(id) ON DELETE SET NULL,
+  first_seen_at      TEXT NOT NULL,      -- when this install first saw it: the white ✓✓
+  last_seen_at       TEXT NOT NULL,
+  raw                TEXT NOT NULL,      -- the record exactly as last returned
+  device_response    TEXT,               -- the device's answer: the record's `response`
+  device_response_at TEXT,
+  missing_since      TEXT                -- v12: absent from a later complete answer for its period
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_cota_command_device ON cota_command(device_id, sent_epoch);
+-- One cloud record per task: a match is one-to-one.
+CREATE UNIQUE INDEX IF NOT EXISTS ix_cota_command_task ON cota_command(task_id)
+  WHERE task_id IS NOT NULL;
+
+-- ─── COTA: sequences — one device, several commands, one at a time (v13) ───────────────────
+-- A run is an ordered list of commands for one device. The runner sends one, waits for its
+-- outcome, retries by the rules in cota_run.py, leaves a gap, and moves to the next. Every
+-- attempt is an ordinary console task, so it shows in the conversation and the export; these
+-- tables add only the order, the attempts and why each step ended as it did.
+CREATE TABLE IF NOT EXISTS cota_run (
+  id           INTEGER PRIMARY KEY,
+  device_id    INTEGER NOT NULL,
+  device_type  INTEGER NOT NULL,
+  cmd_type     INTEGER NOT NULL,
+  state        TEXT NOT NULL,          -- running | paused | done | cancelled
+  control      TEXT,                   -- pause | cancel: asked for by the page, read by the runner
+  pause_reason TEXT,
+  created_at   TEXT NOT NULL,
+  finished_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cota_run_device ON cota_run(device_id, id);
+
+CREATE TABLE IF NOT EXISTS cota_run_step (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES cota_run(id) ON DELETE CASCADE,
+  seq             INTEGER NOT NULL,
+  val1            TEXT NOT NULL,
+  kind            TEXT NOT NULL,       -- get | set | action | unknown, from the command's first byte
+  state           TEXT NOT NULL,       -- queued | running | done | failed | cancelled
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  log             TEXT NOT NULL DEFAULT '[]',   -- one entry per attempt: task, outcome, when
+  pending_task_id INTEGER,             -- sent, outcome not yet decided: a resume watches it again
+  outcome         TEXT,
+  started_at      TEXT,
+  finished_at     TEXT,
+  wait_after_seconds INTEGER NOT NULL DEFAULT 0   -- v22: pause after this command
+);
+CREATE INDEX IF NOT EXISTS ix_cota_run_step ON cota_run_step(run_id, seq);
+
+-- ─── COTA: jobs — many devices, a sequence of commands each (v14) ──────────────────────────
+-- Saved groups of cloud device ids. Kept across days, like the device map: they are set-up,
+-- not the day's record.
+CREATE TABLE IF NOT EXISTS cota_group (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cota_group_member (
+  group_id  INTEGER NOT NULL REFERENCES cota_group(id) ON DELETE CASCADE,
+  device_id INTEGER NOT NULL,
+  seq       INTEGER NOT NULL,                -- the order given: a job's canary is the first ones
+  PRIMARY KEY (group_id, device_id)
+) WITHOUT ROWID;
+-- v21: a device is in one group at a time (cota_fleet moves it). Not UNIQUE: devices put in two
+-- groups before the rule are resolved by a person on the Devices page, not by a migration.
+CREATE INDEX IF NOT EXISTS ix_group_member_device ON cota_group_member(device_id);
+
+-- A job: the commands, the devices, and the settings it runs with. Each device moves through the
+-- sequence on its own; a scheduler sends one command to every device ready for it in one call
+-- per batch. See ota_analytics/cota_campaign.py.
+CREATE TABLE IF NOT EXISTS cota_campaign (
+  id               INTEGER PRIMARY KEY,
+  name             TEXT NOT NULL,
+  job_id           INTEGER REFERENCES cota_job(id) ON DELETE SET NULL,  -- its attempts' tasks
+  device_type      INTEGER NOT NULL,
+  cmd_type         INTEGER NOT NULL,
+  commands         TEXT NOT NULL,            -- JSON list of val1, in order
+  batch_size       INTEGER NOT NULL,         -- devices per send call
+  rate_per_sec     REAL NOT NULL,            -- calls to the cloud per second
+  validity_hours   REAL NOT NULL,            -- how long a sleeping device is waited for
+  canary_size      INTEGER NOT NULL,         -- devices in the first wave (0: none)
+  active_wave      INTEGER NOT NULL DEFAULT 0,
+  max_fail_share   REAL NOT NULL,            -- the automatic stop: share of answering devices
+  fail_base_failed   INTEGER NOT NULL DEFAULT 0,   -- retired in v17: counted commands, and a
+  fail_base_finished INTEGER NOT NULL DEFAULT 0,   -- late answer netted against new failures
+  fail_acknowledged TEXT,                    -- v17: JSON device ids already failing at the last
+                                             --      resume — seen by a person, not counted again
+  resumed_at       REAL,                     -- v17: epoch s; an answer first seen after it, to a
+                                             --      command sent before it, has no known time
+  in_progress      INTEGER,                  -- v18: devices in progress at once; the rest wait
+                                             --      'queued' in job order. NULL = all at once
+  paused_at        REAL,                     -- v20: epoch s, while paused — the clock is stopped
+  paused_seconds   REAL NOT NULL DEFAULT 0,  -- v20: time spent paused, added to the deadline
+  waits            TEXT,                     -- v22: JSON, the wait after each command (NULL: none)
+  state            TEXT NOT NULL,            -- running | paused | done | cancelled
+  control          TEXT,                     -- pause | cancel, asked by the page
+  pause_reason     TEXT,
+  send_calls       INTEGER NOT NULL DEFAULT 0,
+  poll_calls       INTEGER NOT NULL DEFAULT 0,
+  answer_wait_seconds REAL,                  -- v16: before a resend; NULL = cota_run's default
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cota_campaign_device (
+  campaign_id     INTEGER NOT NULL REFERENCES cota_campaign(id) ON DELETE CASCADE,
+  device_id       INTEGER NOT NULL,
+  seq             INTEGER NOT NULL,          -- order in the group
+  wave            INTEGER NOT NULL,          -- 0 canary, 1 the rest
+  step            INTEGER NOT NULL DEFAULT 0,          -- index into the commands
+  state           TEXT NOT NULL,             -- ready | waiting | done | expired | cancelled
+  attempt         INTEGER NOT NULL DEFAULT 0,          -- of the current step
+  due_at          REAL NOT NULL DEFAULT 0,             -- epoch s: when it may be sent to
+  next_poll_at    REAL,
+  wait_started_at REAL,
+  step_started_at REAL,
+  pending_task_id INTEGER,
+  PRIMARY KEY (campaign_id, device_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_campaign_due  ON cota_campaign_device(campaign_id, state, due_at);
+CREATE INDEX IF NOT EXISTS ix_campaign_poll ON cota_campaign_device(campaign_id, state, next_poll_at);
+-- v18: the next devices in line, in job order, every tick of a 30,000-device job.
+CREATE INDEX IF NOT EXISTS ix_campaign_line ON cota_campaign_device(campaign_id, state, seq);
+
+-- One row per device per command: what happened to it. The status grid and the export read this.
+CREATE TABLE IF NOT EXISTS cota_campaign_result (
+  campaign_id INTEGER NOT NULL REFERENCES cota_campaign(id) ON DELETE CASCADE,
+  device_id   INTEGER NOT NULL,
+  step        INTEGER NOT NULL,
+  state       TEXT NOT NULL,                 -- queued | done | failed | expired | skipped | cancelled
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  task_ids    TEXT NOT NULL DEFAULT '[]',
+  outcome     TEXT,
+  answer      TEXT,
+  finished_at TEXT,
+  answer_seconds   REAL,                     -- v16: from the step's first attempt to the answer
+  answered_attempt INTEGER,                  -- v16: which attempt's record carried the answer
+  PRIMARY KEY (campaign_id, device_id, step)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_campaign_result_state ON cota_campaign_result(campaign_id, step, state);
+
+-- ─── COTA: the command library (v16) ───────────────────────────────────────────────────────
+-- Names the user gives. Kept across days, like groups and the device map: set-up, not the
+-- day's record. cota.describe_command reads both, so every page and export uses the names.
+-- A parameter's name: 6C0A → whatever the user calls it. Overrides a built-in name.
+CREATE TABLE IF NOT EXISTS cota_parameter (
+  code       TEXT PRIMARY KEY,                 -- four hex digits, upper case
+  name       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+-- A whole command under a name, with tags, to pick in Configure and Jobs.
+CREATE TABLE IF NOT EXISTS cota_saved_command (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  val1       TEXT NOT NULL,                    -- upper case hex, as sent
+  tags       TEXT NOT NULL DEFAULT '',         -- comma separated
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  wait_after_seconds INTEGER NOT NULL DEFAULT 0   -- v22: pause after it, before the next command
+);
+CREATE INDEX IF NOT EXISTS ix_cota_saved_command_val1 ON cota_saved_command(val1);

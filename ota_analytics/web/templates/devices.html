@@ -1,166 +1,104 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% from "_icons.html" import icon %}
+{% from "_grid.html" import th_sort, pick, pager with context %}
 {% block title %}Devices — OTA Analytics{% endblock %}
 
+{#- Every device of the snapshot, in Intouch COTA's Devices design (10-10-2026): each column
+    filtered as in Excel and sorted from its header, the view kept in the URL so it can be
+    bookmarked or sent. -#}
 {% block content %}
-<form class="filters" method="get">
-  <input type="hidden" name="snapshot" value="{{ snapshot_id }}">
-  <label>Model
-    <select name="model">
-      <option value="">All</option>
-      {% for r in models %}
-      <option value="{{ r.label }}" {{ 'selected' if r.label == filters.model }}>{{ r.label }}</option>
+<section class="card" id="devices">
+  <div class="library-head">
+    <h2><span data-tip="Every device in this snapshot. Filter and sort on any column; the address keeps the view, so it can be bookmarked or sent.">Devices</span>
+      <span class="hint">{% if filters %}{{ total | comma }} of {{ opts.all | comma }}{% else %}{{ total | comma }}{% endif %}</span></h2>
+    {#- The fallback tag (task completed, on its base firmware) is a property of the row, not a
+        column, so it filters from here. -#}
+    <span class="job-filters" role="group" aria-label="Fallback">
+      <a href="{{ link({'fallback': None, 'page': 1}) }}" class="{{ 'on' if not filters.fallback }}">All</a>
+      {% for key, label in fallbacks %}
+      <a href="{{ link({'fallback': key, 'page': 1}) }}" class="{{ 'on' if filters.fallback == key }}"
+         data-tip="{{ 'Task completed, and the device is on its base firmware.' if key == 'yes' else 'A fallback whose target is a newer version than the one it is on.' }}">{{ label }}</a>
       {% endfor %}
-    </select>
-  </label>
-  {# Several versions are usually interesting together — the ones a rollout is moving
-     between — so this is a checkbox list rather than a single choice. Version numbers only:
-     the device counts were the widest thing in the list and are already on the Firmware page.
-     "All" is a real toggle, not a reset: ticking it selects every version, clearing it
-     deselects every one. #}
-  <label class="filter-picker">Firmware
-    <details class="dropdown" id="firmware-picker">
-      <summary>
-        {%- if filters.firmware -%}
-          {{ filters.firmware[0] }}{% if filters.firmware | length > 1 %}
-            +{{ filters.firmware | length - 1 }}{% endif %}
-        {%- else -%}All {{ firmwares | length }} versions{%- endif -%}
-      </summary>
-      <div class="dropdown-panel">
-        <label class="dropdown-item toggle-all">
-          <input type="checkbox" id="firmware-all">
-          <span>All</span>
-          <em>{{ firmwares | length }}</em>
-        </label>
-        <div class="dropdown-list">
-          {% for f in firmwares %}
-          <label class="dropdown-item">
-            <input type="checkbox" name="firmware" value="{{ f.label }}"
-                   {{ 'checked' if f.label in filters.firmware }}>
-            <span>{{ f.label }}</span>
-          </label>
-          {% endfor %}
+    </span>
+    {% if filters.group %}
+    <span class="group-chip">{{ icon('layers') }}<b>{{ filters.group }}</b>
+      <a class="link-btn" href="{{ link({'group': None, 'page': 1}) }}" aria-label="Every group">{{ icon('x') }}</a></span>
+    {% endif %}
+    <span class="library-actions">
+      {% if filters %}<a class="link-btn" href="{{ clear_link }}">{{ icon('x') }}<span>Clear filters</span></a>{% endif %}
+      <details class="dropdown">
+        <summary class="tool-btn" data-tip="All {{ total | comma }} matching devices, not just this page.">{{ icon('download') }}<span>Export</span></summary>
+        <div class="dropdown-panel export-panel">
+          <a class="dropdown-item" href="{{ link({'format': 'xlsx', 'page': None, 'size': None}, '/devices/export') }}"><span>Excel workbook</span><em>.xlsx</em></a>
+          <a class="dropdown-item" href="{{ link({'format': 'csv', 'page': None, 'size': None}, '/devices/export') }}"><span>CSV</span><em>.csv</em></a>
+          <a class="dropdown-item" href="{{ link({'format': 'txt', 'page': None, 'size': None}, '/devices/export') }}"><span data-tip="One IMEI per line, to paste into the platform.">IMEI list</span><em>.txt</em></a>
         </div>
-      </div>
-    </details>
-  </label>
-  <label>Status
-    <select name="status">
-      <option value="">All</option>
-      {# The stored value is the platform's word; the label is ours. See
-         normalize.STATUS_LABELS — a device that has never pinged is waiting to be
-         activated, not one that has gone quiet. #}
-      {% for s in ['Online', 'Offline', 'Inactive'] %}
-      <option value="{{ s }}" {{ 'selected' if s == filters.status }}>{{ s | status }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>Task state
-    <select name="queue_state">
-      <option value="">All</option>
-      {# Same four names the tiles use, so filtering and reading agree. #}
-      {% for value, text in [('pending', 'Task pending'), ('completed', 'Task completed'),
-                             ('never_tasked', 'No pending task')] %}
-      <option value="{{ value }}" {{ 'selected' if value == filters.queue_state }}>{{ text }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>Last update
-    <select name="changed">
-      <option value="">Any time</option>
-      {% for value, text in change_windows %}
-      <option value="{{ value }}" {{ 'selected' if value == filters.changed }}>{{ text }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>Fallback
-    <select name="fallback">
-      <option value="">All devices</option>
-      <option value="yes" {{ 'selected' if filters.fallback == 'yes' }}>Tagged fallback</option>
-      <option value="missed" {{ 'selected' if filters.fallback == 'missed' }}>Fallback — missed target</option>
-    </select>
-  </label>
-  {# Digits only, and a substring match: the last few digits are what someone reads off a
-     label, and a paste from the platform arrives with commas and quotes around it. #}
-  <label>Find IMEI
-    <input type="search" name="q" value="{{ filters.q or '' }}" placeholder="any part of an IMEI"
-           inputmode="numeric" autocomplete="off">
-  </label>
-  {# The Groups page still links here with ?group=…, so the capability stays even though the
-     text box is gone — it was an exact-match field nobody could type from memory. #}
-  {% if filters.group %}
-  <input type="hidden" name="group" value="{{ filters.group }}">
-  {% endif %}
-  <input type="hidden" name="sort" value="{{ sort }}">
-  <input type="hidden" name="dir" value="{{ dir }}">
-  <button type="submit">Apply</button>
-  <a class="clear" href="/devices{{ qs() }}">Clear</a>
-  {# Terse on purpose: the sorted column is already marked with ▼/▲ in its header. #}
-  <span class="hint">{{ total | comma }} · {{ page }}/{{ pages }}</span>
+      </details>
+    </span>
+  </div>
 
-  {# Downloads carry the filters in force, so the file matches the table above it. #}
-  {% set export_query = base_query ~ ('&' if base_query else '') ~ 'sort=' ~ sort ~ '&dir=' ~ dir %}
-  <details class="dropdown export">
-    <summary><span class="dl-icon">⤓</span> Download</summary>
-    <div class="dropdown-panel">
-      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=xlsx">
-        <span>Excel workbook</span><em>.xlsx</em></a>
-      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=csv">
-        <span>CSV</span><em>.csv</em></a>
-      <a class="dropdown-item" href="/devices/export?{{ export_query }}&format=txt">
-        <span>IMEI list — to paste into the platform</span><em>.txt</em></a>
-      <p class="footnote">All {{ total | comma }} matching devices, not just this page.</p>
-    </div>
-  </details>
-</form>
+  {#- The column filters post through this form; what is not a column filter rides along. -#}
+  <form method="get" action="/devices" id="filters">
+    {% for k, v in keep.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    {% if filters.group %}<input type="hidden" name="group" value="{{ filters.group }}">{% endif %}
+    {% if filters.fallback %}<input type="hidden" name="fallback" value="{{ filters.fallback }}">{% endif %}
+  </form>
 
-<section class="card">
-  <table>
-    {#- Clicking a header sorts by it; clicking the active one flips direction. -#}
-    {% macro sortable(key, label, numeric=false) %}
-      {% set active = (sort == key) %}
-      {% set next_dir = 'asc' if (active and dir == 'desc') else 'desc' %}
-      <th class="sortable {{ 'n' if numeric }} {{ 'sorted' if active }}">
-        <a href="/devices?{{ base_query }}{{ '&' if base_query }}sort={{ key }}&dir={{ next_dir }}">
-          {{ label }}<span class="sort-arrow">{{ ('▼' if dir == 'desc' else '▲') if active else '' }}</span>
-        </a>
-      </th>
-    {% endmacro %}
+  <div class="table-wrap grid-scroll" id="grid" data-fit>
+  <table class="data-grid">
     <thead>
       <tr>
-        {{ sortable('imei', 'IMEI') }}
-        {{ sortable('model', 'Model') }}
-        {{ sortable('firmware', 'Firmware') }}
-        {{ sortable('changed', 'Last change') }}
-        {{ sortable('target', 'Target') }}
-        {{ sortable('config', 'Config') }}
-        {{ sortable('hw', 'HW') }}
-        {{ sortable('status', 'Status') }}
-        {{ sortable('task', 'Task') }}
-        {{ sortable('seen', 'Last seen') }}
-        {{ sortable('checked', 'Last checked') }}
+        <th class="n fit">S.No.</th>
+        {{ th_sort('imei', 'IMEI', 'fit') }}
+        {{ th_sort('model', 'Model', 'fit') }}
+        {{ th_sort('firmware', 'Firmware', 'fit') }}
+        {{ th_sort('changed', 'Last change', 'fit') }}
+        {{ th_sort('target', 'Target', 'fit') }}
+        {{ th_sort('config', 'Config', 'fit') }}
+        {{ th_sort('hw', 'HW', 'fit') }}
+        {{ th_sort('status', 'Status', 'fit') }}
+        {{ th_sort('task', 'Task', 'fit') }}
+        {{ th_sort('seen', 'Last seen', 'fit') }}
+        {{ th_sort('checked', 'Last checked') }}
+      </tr>
+      <tr class="filter-row">
+        <th></th>
+        <th><input type="search" name="q" form="filters" class="col-filter {{ 'is-set' if filters.q }}" value="{{ filters.q or '' }}"
+                   placeholder="Filter" aria-label="Filter IMEI" inputmode="numeric" autocomplete="off"
+                   data-tip="Part of an IMEI, or several pasted — separated by commas, spaces or new lines."></th>
+        <th>{{ pick('model', 'Model') }}</th>
+        <th>{{ pick('firmware', 'Firmware') }}</th>
+        <th>{{ pick('changed', 'Last change') }}</th>
+        <th>{{ pick('target', 'Target') }}</th>
+        <th>{{ pick('config', 'Config') }}</th>
+        <th>{{ pick('hw', 'HW') }}</th>
+        <th>{{ pick('status', 'Status') }}</th>
+        <th>{{ pick('queue_state', 'Task') }}</th>
+        <th>{{ pick('seen', 'Last seen') }}</th>
+        <th></th>
       </tr>
     </thead>
     <tbody>
       {% for d in rows %}
       <tr>
+        <td class="n dim">{{ first + loop.index }}</td>
         <td class="mono">{{ d.imei }}</td>
         <td>{{ d.device_model or '—' }}</td>
         <td>
           <strong>{{ d.firmware or '—' }}</strong>
           {%- if d.is_fallback %}
           <span class="tag tag-fallback"
-                title="Task completed but the device is on its base firmware {{ d.base_firmware }}{% if d.update_firmware and d.update_firmware != d.firmware %}, while targeted at {{ d.update_firmware }}{% endif %}">fallback</span>
+                data-tip="Task completed but the device is on its base firmware {{ d.base_firmware }}{% if d.update_firmware and d.update_firmware != d.firmware %}, while targeted at {{ d.update_firmware }}{% endif %}">fallback</span>
           {%- endif %}
         </td>
         <td class="change">
+          {#- The move, and its time under it — the COTA list's Last job cell. -#}
           {% if d.prev_firmware %}
-            <span class="v-from">{{ d.prev_firmware }}</span>
-            <span class="arrow">→</span>
-            <span class="v-to">{{ d.firmware }}</span>
-            <span class="dim small">{{ (d.last_fw_change_at or '')[5:16] }}</span>
+            <span class="v-from">{{ d.prev_firmware }}</span><span class="arrow">→</span><span class="v-to">{{ d.firmware }}</span>
+            <span class="sub-line">{{ d.last_fw_change_at | when }}</span>
           {% elif d.last_changed_at %}
-            <span class="dim small">{{ d.last_changed_at[5:16] }}</span>
+            <span class="dim">{{ d.last_changed_at | when }}</span>
           {% else %}
             <span class="muted">never</span>
           {% endif %}
@@ -168,23 +106,18 @@
         <td class="dim">{{ d.update_firmware or '—' }}</td>
         <td class="dim">{{ d.configuration or '—' }}</td>
         <td class="dim">{{ d.hw_ver or '—' }}</td>
-        <td><span class="pill pill-{{ d.status | lower }}">{{ d.status | status }}</span></td>
-        <td><span class="pill pill-{{ d.queue_state }}">{{ {'pending': 'Task pending', 'completed': 'Task completed', 'never_tasked': 'No pending task'}.get(d.queue_state, d.queue_state) }}</span></td>
+        <td><span class="pill pill-{{ (d.status or 'unknown') | lower }}">{{ d.status | status }}</span></td>
+        <td><span class="pill pill-{{ d.queue_state }}">{{ task_labels.get(d.queue_state, d.queue_state or '—') }}</span></td>
         <td>{{ m.dark_days(d.seen_age_hours) }}</td>
-        <td class="dim small">{{ (d.last_checked_at or '')[11:16] }}</td>
+        <td class="dim">{{ (d.last_checked_at or '')[11:16] or '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
+  {% if not rows %}
+  <p class="empty-line">{% if filters %}No device matches these filters.{% else %}No devices in this snapshot.{% endif %}</p>
+  {% endif %}
+  {{ pager(page, pages, total, first, size, sizes) }}
 </section>
-
-{% if pages > 1 %}
-<nav class="pager">
-  {% set base = '/devices?' ~ base_query ~ ('&' if base_query else '')
-                ~ 'sort=' ~ sort ~ '&dir=' ~ dir %}
-  {% if page > 1 %}<a href="{{ base }}&page={{ page - 1 }}">&larr; Previous</a>{% endif %}
-  <span>{{ page }} / {{ pages }}</span>
-  {% if page < pages %}<a href="{{ base }}&page={{ page + 1 }}">Next &rarr;</a>{% endif %}
-</nav>
-{% endif %}
 {% endblock %}

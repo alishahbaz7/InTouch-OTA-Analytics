@@ -1,0 +1,59 @@
+{#- Pictures for Intouch COTA jobs. Server-drawn — CSS widths and inline SVG, no script — so they
+    work offline and redraw with the page. Segments: [{label, value, tone}], tone one of ok, warn,
+    bad, neutral, orange, empty ("empty" is left as the track, so the bar's unfilled part is what
+    is still to come). -#}
+
+{%- macro took(seconds) -%}
+  {%- if seconds is none -%}—
+  {%- else -%}
+    {%- set whole = seconds | round | int -%}
+    {%- if whole < 60 -%}{{ whole }} s
+    {%- elif whole < 3600 -%}{{ whole // 60 }} min{% if whole % 60 %} {{ whole % 60 }} s{% endif %}
+    {%- else -%}{{ whole // 3600 }} h{% if whole % 3600 // 60 %} {{ whole % 3600 // 60 }} min{% endif %}
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro outcome_bar(segments, total, big=false) -%}
+<div class="stack {{ 'stack-big' if big }}" role="img"
+     aria-label="{% for s in segments %}{{ s.label }} {{ s.value }}{{ ', ' if not loop.last }}{% endfor %}">
+  {#- The big bar keeps its empty segments at width 0, so a redraw can glide each one to its new
+      width — one that vanished could only jump. -#}
+  {%- for s in segments if (s.value or big) and s.tone != 'empty' and total %}
+  <div class="stack-seg {{ s.tone }}" data-key="{{ s.key or s.label }}" style="width: {{ '%.3f' % (s.value / total * 100) }}%"
+       title="{{ s.label }}: {{ '{:,}'.format(s.value) }} ({{ '%.0f' % (s.value / total * 100) }}%)"></div>
+  {%- endfor %}
+</div>
+{%- endmacro -%}
+
+{#- Today as a 24-hour timeline: one slim column per hour, answered (green) under failed (red),
+    the hour's answer rate above it, the current hour hatched and marked "now". HTML, not SVG, so
+    the chart keeps its height and its text size at any window width — an SVG scaled with the
+    window and two hours of data became two giant blocks (the user, 10-10-2026).
+    series: [{hour, answered, failed, total, rate, current, future}] for 00..23. -#}
+{%- macro answer_hours(series) -%}
+{%- set peak = (series | map(attribute='total') | max) if series else 0 -%}
+{%- set top = peak if peak > 0 else 1 -%}
+<div class="hour-timeline" role="img"
+     aria-label="Answered and failed commands by hour today{% for p in series if p.total %}, {{ p.hour }}:00 {{ p.answered }} answered {{ p.failed }} failed{% endfor %}">
+  <div class="ht-scale"><span>{{ '{:,}'.format(peak) }}</span><span>{{ '%g' % (peak / 2) if peak > 1 else '' }}</span><span>0</span></div>
+  <div class="ht-plot">
+    {%- for p in series %}
+    <div class="ht-col {{ 'is-now' if p.current }} {{ 'is-future' if p.future }} {{ 'is-empty' if not p.total }}">
+      {%- if p.total %}
+      <div class="ht-stack" style="height: {{ '%.1f' % (p.total / top * 100) }}%">
+        <span class="ht-rate {{ 'is-low' if p.rate is not none and p.rate < 30 }}">{{ p.rate }}%</span>
+        {%- if p.failed %}<div class="ht-bad" style="flex: {{ p.failed }}"></div>{% endif %}
+        {%- if p.answered %}<div class="ht-ok" style="flex: {{ p.answered }}"></div>{% endif %}
+      </div>
+      <div class="ht-pop"><b>{{ p.hour }}:00</b> {{ '{:,}'.format(p.answered) }} answered · {{ '{:,}'.format(p.failed) }} failed · {{ p.rate }}%</div>
+      {%- endif %}
+    </div>
+    {%- endfor %}
+  </div>
+  <div class="ht-axis">
+    {%- for p in series %}<span class="{{ 'is-now' if p.current }}">{{ ('now' if p.current else p.hour) if (loop.index0 % 2 == 0 or p.current) else '' }}</span>{% endfor %}
+  </div>
+</div>
+{%- endmacro -%}
+

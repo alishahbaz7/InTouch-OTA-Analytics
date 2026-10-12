@@ -30,22 +30,28 @@ def test_every_page_template_exists():
 
 def test_sortable_columns_are_whitelisted():
     """A sort parameter must never reach ORDER BY as raw SQL."""
-    assert api.DEFAULT_SORT in api.SORTABLE
-    assert "seen" in api.SORTABLE
+    from ota_analytics import fota_devices
 
-    injected = api._order_by("'; DROP TABLE device; --", "desc")
+    assert fota_devices.DEFAULT_SORT in fota_devices.SORTABLE
+    assert "seen" in fota_devices.SORTABLE
+
+    injected = fota_devices.order_by("'; DROP TABLE device; --", "desc")
     assert "DROP" not in injected
-    assert injected.startswith(api.SORTABLE[api.DEFAULT_SORT])
+    assert injected.startswith(fota_devices.SORTABLE[fota_devices.DEFAULT_SORT])
 
 
 @pytest.mark.parametrize("direction,expected", [("asc", "ASC"), ("desc", "DESC"), ("x", "DESC")])
 def test_sort_direction_is_constrained(direction, expected):
-    assert expected in api._order_by("firmware", direction)
+    from ota_analytics import fota_devices
+
+    assert expected in fota_devices.order_by("firmware", direction)
 
 
 def test_missing_values_sort_last():
     """A device that never reported should not head the list on a NULL timestamp."""
-    assert api._order_by("seen", "desc").startswith("d.seen_at IS NULL")
+    from ota_analytics import fota_devices
+
+    assert fota_devices.order_by("seen", "desc").startswith("d.seen_at IS NULL")
 
 
 def test_relative_age_reads_naturally():

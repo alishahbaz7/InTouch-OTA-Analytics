@@ -150,7 +150,8 @@ def _write_provenance(workbook, provenance: dict) -> None:
 
 
 def to_xlsx(rows: list[dict], columns, sheet_name: str = "Devices",
-            provenance: dict | None = None) -> bytes:
+            provenance: dict | None = None,
+            source: list[tuple[str, str]] | None = None) -> bytes:
     """The rows as a spreadsheet, written a row at a time rather than assembled in memory.
 
     `write_only=True` is the whole difference. The ordinary mode keeps a `Cell` object for every
@@ -206,6 +207,18 @@ def to_xlsx(rows: list[dict], columns, sheet_name: str = "Devices",
 
     if provenance:
         _write_provenance(workbook, provenance)
+    elif source:
+        # A file that is not about the fleet says what it is about instead — a COTA export
+        # names the device and the time range rather than a fleet digest.
+        sheet = workbook.create_sheet("Source")
+        sheet.column_dimensions["A"].width = 24
+        sheet.column_dimensions["B"].width = 52
+        heading = [WriteOnlyCell(sheet, value=v) for v in ("Field", "Value")]
+        for cell in heading:
+            cell.font = _bold()
+        sheet.append(heading)
+        for label, value in source:
+            sheet.append([label, "" if value is None else str(value)])
 
     stream = io.BytesIO()
     workbook.save(stream)

@@ -3,13 +3,31 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "1.9.1"
+__version__ = "2.1.0"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-10-05"
-CODENAME = "keel"
+RELEASED = "2026-10-12"
+CODENAME = "relay"
 
 VERSION_HISTORY = [
+    ("2.1.0", "2026-10-12", "One design through the application: Web FOTA on the Intouch COTA "
+                            "tables, tiles and list filters; a Devices list to manage the "
+                            "COTA fleet — filters and sort on every column, groups, tags; a "
+                            "COTA Overview of the day; a wait after a command; a job's limit "
+                            "is its own max time; a New job form in sections"),
+    ("2.0.2", "2026-10-08", "Intouch COTA jobs check 200 devices a call and keep 200 in "
+                            "progress at a time; no automatic pause on devices going quiet; "
+                            "a scheduler that stops leaves a record; Commands page laid out "
+                            "for a growing library and shared by file; no help text on the "
+                            "pages, red deletes that ask first; a job page whose top stays "
+                            "put and leads with percentages"),
+    ("2.0.1", "2026-10-07", "Intouch COTA jobs: a list first and a page to create one, each "
+                            "device's conversation inside the job, time to answer, rerun and "
+                            "duplicate, "
+                            "and a command library that names commands everywhere"),
+    ("2.0.0", "2026-10-05", "IntouchCOTA — configuration commands sent in bulk "
+                            "through the cloud's COTA API, as a separate module beside the "
+                            "snapshot analytics"),
     ("1.9.1", "2026-10-05", "The release is named InTouchOTA-Analytics-v<version>, zip and folder "
                             "alike, and carries one executable — the windowless copy is gone"),
     ("1.9.0", "2026-10-05", "A fetch takes seconds instead of minutes: query statistics, a "
@@ -67,9 +85,10 @@ def build_info() -> dict:
     """Everything needed to identify exactly what is running."""
     import sys
 
-    from . import db
+    from . import config, db
 
     return {
+        "channel": config.CHANNEL,
         "version": __version__,
         "released": RELEASED,
         "codename": CODENAME,

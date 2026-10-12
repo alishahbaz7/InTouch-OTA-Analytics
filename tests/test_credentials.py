@@ -36,8 +36,8 @@ def test_a_saved_password_is_announced_not_just_hinted(tmp_path, monkeypatch):
 
     body = TestClient(api.app, raise_server_exceptions=False).get("/update").text
 
-    assert "Password already saved in" in body
-    assert "leave the box empty" in body.lower()
+    assert "Password saved in" in body
+    assert 'placeholder="Saved"' in body       # a state, not an instruction (no help text)
     assert "Change password" in body            # the field is the exception, not the norm
     # And the secret itself never reaches the page.
     assert "secret-value" not in body

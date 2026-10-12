@@ -33,3 +33,8 @@ $env:OTA_PLATFORM_PASSWORD = ""
 # Leave at 0. This tells the app to trust an identity header from a proxy, which is only safe
 # when the app is loopback-only behind Cloudflare Access.
 $env:OTA_TRUST_PROXY_AUTH = "0"
+
+# ─── channel ─────────────────────────────────────────────────────────────────
+# Hosting from source makes this copy "dev" by default (DEV badge, its own session cookie).
+# This launcher serves colleagues, so it is the release.
+$env:OTA_CHANNEL = "release"

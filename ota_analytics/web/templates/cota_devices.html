@@ -1,0 +1,465 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Devices — Intouch COTA{% endblock %}
+
+{#- The Devices list (the user's design, 10-10-2026): every device by its cloud ID, filtered and
+    sorted on any column, ticked to group, tag, send a job or remove. Filters and sort are the
+    URL, so a view can be bookmarked and shared. -#}
+{%- set L = listing -%}
+
+{% from "_grid.html" import th_sort, pick, pager with context %}
+
+{% block content %}
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+
+<section class="card" id="devices">
+  <div class="library-head">
+    <h2><span data-tip="Every device by its cloud ID — the IMEI, firmware and last ping come from Web FOTA. Filter and sort on any column; tick devices to group, tag, start a job or remove them.">Devices</span>
+      <span class="hint">{% if filters %}{{ L.total | comma }} of {{ opts.all | comma }}{% else %}{{ L.total | comma }}{% endif %}</span></h2>
+    {% if group %}
+    <span class="group-chip">{{ icon('layers') }}<b>{{ group.name }}</b>
+      <button type="button" class="link-btn" data-edit-group data-id="{{ group.id }}" data-name="{{ group.name }}"
+              data-tip="Rename the group, or add devices to it — paste any number of IDs, pick a tag, or use the ticked rows.">{{ icon('edit') }}<span>Edit</span></button>
+      <form method="post" action="/cota/groups/{{ group.id }}/delete" class="inline-form"
+            data-name="{{ group.name }}" data-confirm="Delete the group “{name}”? Its devices stay in the list, in no group.">
+        <button type="submit" class="link-btn danger">Delete group</button>
+      </form></span>
+    {% endif %}
+    <span class="library-actions">
+      {% if filters %}<a class="link-btn" href="/cota/devices?{{ {'sort': sort, 'dir': direction, 'size': L.size} | urlencode }}">{{ icon('x') }}<span>Clear filters</span></a>{% endif %}
+      <details class="dropdown">
+        <summary class="tool-btn">{{ icon('download') }}<span>Export</span></summary>
+        <div class="dropdown-panel export-panel">
+          <a class="dropdown-item" href="{{ link({'format': 'xlsx'}, '/cota/devices/export') }}"><span>Excel workbook</span><em>.xlsx</em></a>
+          <a class="dropdown-item" href="{{ link({'format': 'csv'}, '/cota/devices/export') }}"><span>CSV</span><em>.csv</em></a>
+        </div>
+      </details>
+      <button type="button" class="tool-btn" data-open="group-dialog">{{ icon('layers') }}<span>Add group</span></button>
+      <button type="button" class="btn-primary btn-icon" data-open="add-dialog">{{ icon('plus') }}<span>Add device</span></button>
+    </span>
+  </div>
+
+  {# ── what the ticked devices can have done to them ── #}
+  <form method="post" action="/cota/devices/action" id="sel-form" class="sel-bar" hidden>
+    <input type="hidden" name="action" id="sel-action">
+    <input type="hidden" name="ids" id="sel-ids">
+    <input type="hidden" name="scope" id="sel-scope">
+    <input type="hidden" name="query" value="{{ filter_query }}">
+    <input type="hidden" name="group_id" id="sel-group">
+    <input type="hidden" name="tag" id="sel-tag">
+    <input type="hidden" name="back" value="{{ link({'page': L.page}) }}">
+    <span class="sel-count" id="sel-count"></span>
+    <button type="button" class="link-btn" id="sel-all" hidden></button>
+    <span class="sel-actions">
+      <details class="dropdown">
+        <summary class="tool-btn">{{ icon('layers') }}<span>Add to group</span></summary>
+        <div class="dropdown-panel move-panel">
+          <label class="move-transfer"><input type="checkbox" name="transfer" value="true" id="sel-transfer">
+            <span data-tip="Off: a device keeps the groups it is in and joins this one too. On: it leaves them — a move.">Take them out of their other groups</span></label>
+          {% for g in opts.groups %}<button type="button" class="dropdown-item" data-move="{{ g.id }}" data-name="{{ g.name }}"><span>{{ g.name }}</span><em>{{ g.devices | comma }}</em></button>
+          {% else %}<span class="dropdown-item dim">No groups yet</span>{% endfor %}
+        </div>
+      </details>
+      <button type="button" class="tool-btn" data-tag-action="tag">{{ icon('tag') }}<span>Add tag</span></button>
+      <button type="button" class="tool-btn" data-tag-action="untag">{{ icon('tag') }}<span>Remove tag</span></button>
+      <input type="hidden" name="from_group" value="{{ group.id if group else '' }}">
+      <button type="submit" class="tool-btn" data-action="ungroup" data-confirm-action="Take out"
+              {% if group %}data-name="{{ group.name }}" data-confirm="Take the selected devices out of “{name}”? They stay in the list and in any other group."
+              {%- else %}data-confirm="Take the selected devices out of every group they are in? They stay in the list."{% endif %}>{{ icon('x') }}<span>Take out of group</span></button>
+      <button type="submit" class="tool-btn" data-action="newjob">{{ icon('send') }}<span>New job</span></button>
+      <button type="submit" class="tool-btn" data-action="export">{{ icon('download') }}<span>Export</span></button>
+      <button type="submit" class="tool-btn danger" data-action="delete" data-confirm-action="Remove"
+              data-confirm="Remove the selected devices from the list and from their groups? Today's jobs keep their record.">{{ icon('trash') }}<span>Remove</span></button>
+    </span>
+    <button type="button" class="link-btn sel-clear" id="sel-clear">Clear selection</button>
+  </form>
+
+  <form method="get" action="/cota/devices" id="filters">
+    <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ direction }}">
+    <input type="hidden" name="size" value="{{ L.size }}">
+  </form>
+
+  <div class="table-wrap grid-scroll" id="grid" data-fit>
+  <table class="devices-table data-grid" data-total="{{ L.total }}">
+    <thead>
+      <tr data-head-row>
+        <th class="sel-col fit"><input type="checkbox" id="sel-page" aria-label="Select every device on this page"></th>
+        <th class="n fit">S.No.</th>
+        {{ th_sort('id', 'Device ID', 'n fit') }}
+        {{ th_sort('imei', 'IMEI', 'fit') }}
+        {{ th_sort('model', 'Device type', 'fit') }}
+        {{ th_sort('group', 'Group', 'fit') }}
+        {{ th_sort('job', 'Last job', 'fit') }}
+        {{ th_sort('status', 'Last job status', 'fit') }}
+        {{ th_sort('fw', 'FW version', 'fit') }}
+        {{ th_sort('seen', 'FOTA last seen', 'fit') }}
+        {{ th_sort('tag', 'Tags') }}
+      </tr>
+      <tr class="filter-row">
+        <th></th><th></th>
+        <th><input type="search" name="id" form="filters" class="col-filter {{ 'is-set' if filters.get('id') }}" value="{{ filters.get('id', '') }}" placeholder="Filter" aria-label="Filter device ID"
+                   data-tip="Part of an ID, or several IDs pasted — separated by commas or spaces."></th>
+        <th><input type="search" name="imei" form="filters" class="col-filter {{ 'is-set' if filters.get('imei') }}" value="{{ filters.get('imei', '') }}" placeholder="Filter" aria-label="Filter IMEI"
+                   data-tip="Part of an IMEI, or several IMEIs pasted."></th>
+        <th>{{ pick('model', 'Device type') }}</th>
+        <th>{{ pick('group', 'Group') }}</th>
+        <th>{{ pick('job', 'Last job') }}</th>
+        <th>{{ pick('status', 'Last job status') }}</th>
+        <th>{{ pick('fw', 'FW version') }}</th>
+        <th>{{ pick('seen', 'FOTA last seen') }}</th>
+        <th>{{ pick('tag', 'Tags') }}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in L.rows %}
+      <tr>
+        <td class="sel-col"><input type="checkbox" data-row-sel value="{{ d.device_id }}" aria-label="Select device {{ d.device_id }}"></td>
+        <td class="n dim">{{ L.first + loop.index }}</td>
+        <td class="n mono"><a href="/cota/console?device={{ d.device_id }}" class="id-link">{{ d.device_id }}</a></td>
+        <td class="mono">{{ d.imei or '—' }}</td>
+        <td>{{ d.model or '—' }}</td>
+        <td>{% if d.group_count > 1 %}{% for n in d.group_name.split(', ') %}<span class="group-tag">{{ n }}</span>{% endfor %}
+            {% else %}{{ d.group_name or '—' }}{% endif %}</td>
+        <td>{% if d.job_name %}{{ d.job_name }}<span class="sub-line">{{ (d.job_at or '')[8:10] }}-{{ (d.job_at or '')[5:7] }} {{ (d.job_at or '')[11:16] }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td>{% if d.job_status %}<span class="pill pill-js-{{ d.job_status | lower | replace(' ', '-') }}">{{ d.job_status }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td class="mono">{{ d.firmware or '—' }}</td>
+        <td>{% if d.seen_bucket == 'none' %}<span class="dim">Not in Web FOTA</span>
+            {% elif d.seen_bucket == 'never' %}<span class="dim">Never</span>
+            {% else %}<span class="seen seen-{{ d.seen_bucket }}" data-tip="{{ d.seen_at }}">{{ d.seen_at | ago }}</span>{% endif %}</td>
+        <td class="tags-cell">{% for t in d.tag_list %}<a class="tag-chip" href="{{ link({'tag': t, 'page': 1}) }}">{{ t }}</a>{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if not L.rows %}
+  <p class="empty-line">{% if filters %}No device matches these filters.{% else %}No devices yet.{% endif %}</p>
+  {% endif %}
+
+  {{ pager(L.page, L.pages, L.total, L.first, L.size, sizes) }}
+</section>
+
+{# ── Add device: one ID, a pasted list, or a CSV ── #}
+{%- set ad = add_draft or {} %}
+<dialog class="form-dialog" id="add-dialog" aria-labelledby="add-title" {{ 'data-autoopen' if add_draft }}>
+  <form method="post" action="/cota/devices/add" enctype="multipart/form-data" class="stack-form" id="add-form">
+    <div class="dialog-head"><h3 id="add-title">Add device</h3>
+      <button type="button" class="icon-btn dialog-close" data-close aria-label="Close">{{ icon('x') }}</button></div>
+    <label><span data-tip="The cloud's device ID — one, or many separated by commas, spaces or new lines. Not the IMEI: it is learned from the cloud's records.">Device ID</span>
+      <textarea name="devices" rows="3" class="mono" spellcheck="false" id="add-ids" placeholder="14906">{{ ad.get('devices', '') }}</textarea></label>
+    <label>Tags
+      <input type="text" name="tags" list="tag-list" value="{{ ad.get('tags', '') }}" placeholder="Delhi, pilot" autocomplete="off"></label>
+    <div class="file-row">
+      <label class="file-pick"><span data-tip="Columns: id (required), trackingCode (the IMEI) and tags (both optional). A header row is optional.">Or a CSV file</span>
+        <input type="file" name="file" accept=".csv" id="add-file"></label>
+      <a class="field-hint" href="/cota/devices/template.csv">Download template</a>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="tool-btn" data-close>Cancel</button>
+      <button type="submit" class="btn-primary">Add devices</button>
+    </div>
+  </form>
+</dialog>
+
+{# ── Add group: from IDs, a tag or the selection; devices already in a group move only if chosen ── #}
+{%- set gd = group_draft or {} %}
+{#- The same dialog edits a group: a new name, and devices added in bulk (data-edit-id). -#}
+<dialog class="form-dialog form-dialog-wide" id="group-dialog" aria-labelledby="group-title" {{ 'data-autoopen' if group_draft }}
+        {%- if gd.get('edit_id') %} data-edit-id="{{ gd.edit_id }}"{% endif %}>
+  <form method="post" action="/cota/groups" class="stack-form" id="group-form">
+    <input type="hidden" name="group_id" id="group-edit-id">
+    <div class="dialog-head"><h3 id="group-title">Add group</h3>
+      <button type="button" class="icon-btn dialog-close" data-close aria-label="Close">{{ icon('x') }}</button></div>
+    <label>Name
+      <input type="text" name="name" required value="{{ gd.get('name', '') }}" autocomplete="off" id="group-name"></label>
+    <div class="seg-choice" role="radiogroup" aria-label="Devices from">
+      {%- set src = gd.get('source', 'ids') %}
+      <label class="seg"><input type="radio" name="source" value="ids" {{ 'checked' if src == 'ids' }}> Device IDs</label>
+      <label class="seg"><input type="radio" name="source" value="tag" {{ 'checked' if src == 'tag' }}> Tag</label>
+      <label class="seg" id="src-selection"><input type="radio" name="source" value="selection" {{ 'checked' if src == 'selection' }} disabled> Selected <span id="src-sel-count"></span></label>
+    </div>
+    <div class="src-panel" data-src="ids">
+      <textarea name="devices" rows="4" class="mono" spellcheck="false" aria-label="Device IDs" placeholder="14906, 786"
+                data-tip="Any number — commas, spaces or one per line; a column copied from Excel works.">{{ gd.get('devices', '') }}</textarea></div>
+    <div class="src-panel" data-src="tag">
+      <select name="tag" aria-label="Tag">
+        <option value="">Choose a tag</option>
+        {% for t in opts.tags %}<option value="{{ t }}" {{ 'selected' if gd.get('tag') == t }}>{{ t }}</option>{% endfor %}
+      </select></div>
+    <div class="src-panel" data-src="selection"><span class="dim" id="src-sel-note"></span></div>
+    <input type="hidden" name="ids" id="group-ids"><input type="hidden" name="scope" id="group-scope">
+    <input type="hidden" name="query" value="{{ filter_query }}">
+    <input type="hidden" name="skip" id="group-skip">
+
+    {#- Devices already in a group: a warning, never a restriction (the user, 10-10-2026). They join
+        this group too unless unticked; the box below makes it a move. -#}
+    <div class="group-check" id="group-check" hidden aria-live="polite">
+      <div class="check-sum" id="check-sum"></div>
+      <div class="check-elsewhere" id="check-elsewhere" hidden>
+        <div class="check-warn" id="check-warn"></div>
+        <label class="inline check-transfer"><input type="checkbox" name="transfer" value="true" id="group-transfer">
+          Take them out of their other groups</label>
+        <div class="check-head">
+          <span class="check-tools">
+            <button type="button" class="link-btn" data-pick="all">All</button>
+            <button type="button" class="link-btn" data-pick="none">None</button>
+            <button type="button" class="link-btn" data-pick="invert">Invert</button>
+          </span>
+          <span class="check-count" id="check-moving"></span>
+        </div>
+        <div class="check-frame">
+          <table class="data-grid check-table">
+            <thead><tr><th class="fit"><input type="checkbox" id="check-all" aria-label="Every device in the list"></th>
+              <th class="n fit">Device ID</th><th class="fit">IMEI</th><th>Current group</th></tr></thead>
+            <tbody id="check-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <p class="notice notice-error" id="group-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="tool-btn" data-close>Cancel</button>
+      <button type="submit" class="btn-primary" id="group-submit">Create group</button>
+    </div>
+  </form>
+</dialog>
+
+{# ── a tag for the selection ── #}
+<dialog class="form-dialog form-dialog-small" id="tag-dialog" aria-labelledby="tag-title">
+  <form class="stack-form" id="tag-form">
+    <div class="dialog-head"><h3 id="tag-title">Add tag</h3>
+      <button type="button" class="icon-btn dialog-close" data-close aria-label="Close">{{ icon('x') }}</button></div>
+    <label>Tag <input type="text" id="tag-input" list="tag-list" required autocomplete="off"></label>
+    <div class="dialog-actions">
+      <button type="button" class="tool-btn" data-close>Cancel</button>
+      <button type="submit" class="btn-primary" id="tag-submit">Add tag</button>
+    </div>
+  </form>
+</dialog>
+
+
+<datalist id="tag-list">{% for t in opts.tags %}<option value="{{ t }}">{% endfor %}</datalist>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function $(id) { return document.getElementById(id); }
+  function plural(n, word) { return n.toLocaleString('en-US') + ' ' + word + (n === 1 ? '' : 's'); }
+
+  // Dialogs: open, close, and come back open after a refused submit.
+  document.querySelectorAll('[data-open]').forEach(function (b) {
+    b.addEventListener('click', function () { openDialog(b.getAttribute('data-open')); });
+  });
+  document.querySelectorAll('.form-dialog [data-close]').forEach(function (b) {
+    b.addEventListener('click', function () { b.closest('dialog').close(); });
+  });
+  function openDialog(id) {
+    var d = $(id); if (!d || !d.showModal) return;
+    if (id === 'group-dialog') prepareGroup();
+    d.showModal();
+    var first = d.querySelector('input:not([type=hidden]):not([type=radio]):not([disabled]), textarea');
+    if (first) first.focus();
+  }
+
+  // Selection: ticked rows, the page, or every device the filters match.
+  var table = document.querySelector('.devices-table');
+  var total = Number(table.getAttribute('data-total'));
+  var boxes = Array.prototype.slice.call(document.querySelectorAll("[data-row-sel]"));
+  var pageBox = $('sel-page'), bar = $('sel-form'), allMatching = false;
+  function picked() { return boxes.filter(function (b) { return b.checked; }).map(function (b) { return b.value; }); }
+  function count() { return allMatching ? total : picked().length; }
+  function draw() {
+    var ids = picked();
+    var n = count();
+    bar.hidden = n === 0;
+    pageBox.checked = boxes.length > 0 && ids.length === boxes.length;
+    pageBox.indeterminate = ids.length > 0 && ids.length < boxes.length;
+    $('sel-count').textContent = plural(n, 'device') + ' selected';
+    var all = $('sel-all');
+    all.hidden = !(ids.length === boxes.length && total > boxes.length);
+    all.textContent = allMatching ? 'Select only this page' : 'Select all ' + total.toLocaleString('en-US') + ' matching';
+    $('sel-ids').value = allMatching ? '' : ids.join(',');
+    $('sel-scope').value = allMatching ? 'all' : '';
+    boxes.forEach(function (b) { b.closest('tr').classList.toggle('is-selected', b.checked); });
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', function () { if (!b.checked) allMatching = false; draw(); }); });
+  pageBox.addEventListener('change', function () {
+    boxes.forEach(function (b) { b.checked = pageBox.checked; });
+    if (!pageBox.checked) allMatching = false;
+    draw();
+  });
+  $('sel-all').addEventListener('click', function () { allMatching = !allMatching; draw(); });
+  $('sel-clear').addEventListener('click', function () {
+    allMatching = false; boxes.forEach(function (b) { b.checked = false; }); draw();
+  });
+  bar.querySelectorAll('[data-action]').forEach(function (b) {
+    b.addEventListener('click', function () { $('sel-action').value = b.getAttribute('data-action'); });
+  });
+
+  // Add to group: say first what it does — and which devices are in another group already.
+  function selectionBody() {
+    var body = new URLSearchParams();
+    body.set('source', 'selection'); body.set('ids', $('sel-ids').value); body.set('scope', $('sel-scope').value);
+    body.set('query', bar.querySelector('[name=query]').value);
+    return body;
+  }
+  bar.querySelectorAll('[data-move]').forEach(function (item) {
+    item.addEventListener('click', function () {
+      item.closest('details').removeAttribute('open');
+      var body = selectionBody(); body.set('group_id', item.getAttribute('data-move'));
+      fetch('/cota/groups/check', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (c) {
+        if (!c.ok) return;
+        var moving = $('sel-transfer').checked;
+        var parts = [plural(c.total, 'device') + ' will be in “' + item.getAttribute('data-name') + '”.'];
+        if (c.here) parts.push(c.here.toLocaleString('en-US') + ' already are.');
+        var where = c.elsewhere.map(function (g) { return g.name + ' ' + g.count.toLocaleString('en-US'); }).join(', ');
+        if (c.elsewhere_total) parts.push(moving
+          ? c.elsewhere_total.toLocaleString('en-US') + ' leave their other group (' + where + ').'
+          : c.elsewhere_total.toLocaleString('en-US') + ' are also in another group (' + where + ') and stay in it.');
+        $('sel-action').value = 'add'; $('sel-group').value = item.getAttribute('data-move');
+        bar.setAttribute('data-confirm', parts.join(' '));
+        bar.setAttribute('data-confirm-action', moving ? 'Move' : 'Add'); bar.setAttribute('data-confirm-tone', 'go');
+        bar.requestSubmit();
+        bar.removeAttribute('data-confirm'); bar.removeAttribute('data-confirm-action'); bar.removeAttribute('data-confirm-tone');
+      });
+    });
+  });
+
+  // Add tag / Remove tag for the selection.
+  var tagMode = 'tag';
+  bar.querySelectorAll('[data-tag-action]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      tagMode = b.getAttribute('data-tag-action');
+      $('tag-title').textContent = tagMode === 'tag' ? 'Add tag' : 'Remove tag';
+      $('tag-submit').textContent = tagMode === 'tag' ? 'Add tag' : 'Remove tag';
+      $('tag-submit').className = tagMode === 'tag' ? 'btn-primary' : 'btn-danger';
+      $('tag-input').value = ''; $('tag-dialog').showModal(); $('tag-input').focus();
+    });
+  });
+  $('tag-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    $('sel-action').value = tagMode; $('sel-tag').value = $('tag-input').value;
+    $('tag-dialog').close(); bar.submit();
+  });
+
+  // Add group: choose where its devices come from; check before creating. Devices already in a
+  // group are a warning, never a restriction: they join too unless unticked (the user, 10-10-2026).
+  var gform = $('group-form'), checked = null, editing = null;
+  // Add group, or Edit group: the same dialog, its title, address and button set for each.
+  function groupMode(edit) {
+    editing = edit;
+    $('group-title').textContent = edit ? 'Edit group' : 'Add group';
+    gform.action = edit ? '/cota/groups/' + edit.id + '/edit' : '/cota/groups';
+    $('group-edit-id').value = edit ? edit.id : '';
+    if (edit) $('group-name').value = edit.name;
+    $('group-submit').textContent = edit ? 'Save' : 'Create group';
+  }
+  document.querySelectorAll('[data-open="group-dialog"]').forEach(function (b) {
+    b.addEventListener('click', function () { groupMode(null); }, true);
+  });
+  document.querySelectorAll('[data-edit-group]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      groupMode({ id: b.dataset.id, name: b.dataset.name });
+      gform.querySelector('[name=devices]').value = '';
+      openDialog('group-dialog');
+    });
+  });
+  var draftEdit = $('group-dialog').getAttribute('data-edit-id');
+  if (draftEdit) groupMode({ id: draftEdit, name: $('group-name').value });
+  function source() { var r = gform.querySelector('[name=source]:checked'); return r ? r.value : 'ids'; }
+  function showSource() {
+    gform.querySelectorAll('.src-panel').forEach(function (p) { p.hidden = p.getAttribute('data-src') !== source(); });
+    checked = null; $('group-check').hidden = true; $('group-submit').textContent = editing ? 'Save' : 'Create group';
+  }
+  function prepareGroup() {
+    var n = count(), opt = $('src-selection').querySelector('input');
+    opt.disabled = n === 0;
+    $('src-sel-count').textContent = n ? '(' + n.toLocaleString('en-US') + ')' : '';
+    $('src-sel-note').textContent = n ? plural(n, 'device') + ' selected on the page' : '';
+    $('group-ids').value = $('sel-ids').value; $('group-scope').value = $('sel-scope').value;
+    if (n && !gform.querySelector('[name=source]:checked:not([disabled])')) opt.checked = true;
+    if (opt.disabled && opt.checked) gform.querySelector('[name=source][value=ids]').checked = true;
+    showSource();
+  }
+  gform.querySelectorAll('[name=source]').forEach(function (r) { r.addEventListener('change', showSource); });
+  gform.addEventListener('input', function (e) { if (e.target.name === 'devices' || e.target.name === 'tag') showSource(); });
+  function rows() { return Array.prototype.slice.call($('check-rows').querySelectorAll('input')); }
+  function drawJoining() {
+    var all = rows(), on = all.filter(function (b) { return b.checked; }).length;
+    $('check-moving').textContent = on.toLocaleString('en-US') + ' of ' + all.length.toLocaleString('en-US') + ' will join';
+    $('check-all').checked = all.length > 0 && on === all.length;
+    $('check-all').indeterminate = on > 0 && on < all.length;
+  }
+  $('check-rows').addEventListener('change', drawJoining);
+  $('check-rows').addEventListener('click', function (e) {      // a click anywhere on the row
+    var tr = e.target.closest('tr');
+    if (!tr || e.target.tagName === 'INPUT') return;
+    var box = tr.querySelector('input'); box.checked = !box.checked; drawJoining();
+  });
+  $('check-all').addEventListener('change', function () {
+    rows().forEach(function (b) { b.checked = $('check-all').checked; }); drawJoining();
+  });
+  gform.querySelectorAll('[data-pick]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var what = b.getAttribute('data-pick');
+      rows().forEach(function (x) { x.checked = what === 'invert' ? !x.checked : what === 'all'; });
+      drawJoining();
+    });
+  });
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
+  function drawCheck(c) {
+    var sum = $('check-sum'); sum.textContent = '';
+    var facts = [[c.total, 'devices'], [c.new, 'new to the list'], [c.here, 'already in this group'],
+                 [c.free, 'in no group'], [c.elsewhere_total, 'in another group']];
+    facts.forEach(function (f, i) {
+      if (i > 0 && !f[0]) return;
+      var s = el('span', 'check-fact' + (i === 4 ? ' is-warn' : '')); s.appendChild(el('b', '', f[0].toLocaleString('en-US'))); s.appendChild(document.createTextNode(' ' + f[1])); sum.appendChild(s);
+    });
+    $('check-elsewhere').hidden = !c.elsewhere_total;
+    $('check-warn').textContent = c.elsewhere_total
+      ? plural(c.elsewhere_total, 'device') + (c.elsewhere_total === 1 ? ' is' : ' are') + ' already in another group — '
+        + c.elsewhere.map(function (g) { return g.name + ' ' + g.count.toLocaleString('en-US'); }).join(', ')
+        + '. They join this group too.' : '';
+    var body = $('check-rows'); body.textContent = '';
+    c.elsewhere.forEach(function (g) {
+      g.devices.forEach(function (d) {
+        var tr = el('tr'), td = el('td', 'fit'), box = el('input');
+        box.type = 'checkbox'; box.value = d.device_id; box.checked = true;
+        box.setAttribute('aria-label', 'Device ' + d.device_id);
+        td.appendChild(box); tr.appendChild(td);
+        tr.appendChild(el('td', 'n mono fit', String(d.device_id)));
+        tr.appendChild(el('td', 'mono fit', d.imei || '—'));
+        tr.appendChild(el('td', '', d.groups.join(', ')));
+        body.appendChild(tr);
+      });
+    });
+    $('group-check').hidden = false; drawJoining();
+  }
+  gform.addEventListener('submit', function (e) {
+    $('group-error').hidden = true;
+    if (checked) {                                   // checked once: create, less any unticked
+      $('group-skip').value = rows().filter(function (b) { return !b.checked; }).map(function (b) { return b.value; }).join(',');
+      return;
+    }
+    e.preventDefault();
+    // Editing with no devices given is a rename alone: nothing to check.
+    var src = source(), given = src === 'ids' ? gform.querySelector('[name=devices]').value.trim()
+                                  : (src === 'tag' ? gform.querySelector('[name=tag]').value : 'selection');
+    if (editing && !given) { gform.submit(); return; }
+    var body = new URLSearchParams(new FormData(gform));
+    fetch('/cota/groups/check', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (c) {
+      if (!c.ok) { $('group-error').textContent = c.message; $('group-error').hidden = false; return; }
+      checked = c;
+      if (!c.elsewhere_total) { $('group-skip').value = ''; gform.submit(); return; }
+      drawCheck(c);
+    });
+  });
+
+  draw();
+  // Last, once everything it needs exists: a refused save comes back with its dialog open. Run
+  // earlier, it reached the group form before it was defined and stopped the whole page's script.
+  document.querySelectorAll('dialog[data-autoopen]').forEach(function (d) { openDialog(d.id); });
+})();
+</script>
+{% endblock %}

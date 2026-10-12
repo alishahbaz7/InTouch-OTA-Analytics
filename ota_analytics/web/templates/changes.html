@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "macros.html" as m %}
+{% from "_icons.html" import icon %}
 {% block title %}Changes &amp; Fallbacks — OTA Analytics{% endblock %}
 
 {% block content %}
@@ -12,9 +13,9 @@
   <span class="hint">{{ registry_summary.devices | comma }} devices tracked ·
     {{ registry_summary.change_rows | comma }} changes recorded</span>
 
-  <details class="dropdown export">
-    <summary><span class="dl-icon">⤓</span> Download</summary>
-    <div class="dropdown-panel">
+  <details class="dropdown">
+    <summary class="tool-btn">{{ icon('download') }}<span>Export</span></summary>
+    <div class="dropdown-panel export-panel">
       <div class="dropdown-heading">All moves in this period</div>
       <a class="dropdown-item" href="/changes/export?window={{ window }}&format=xlsx">
         <span>Excel workbook</span><em>.xlsx</em></a>
@@ -34,24 +35,27 @@
   </details>
 </div>
 
+{# Each kind of move as its share of all the moves in the window, the count beside it. Red only for
+   what a device did by itself — an unplanned downgrade, a fallback — and only when there is one. #}
 <div class="tiles">
   {{ m.tile('Firmware moves', summary.moves | comma,
-            (summary.devices | comma) ~ ' devices') }}
-  {{ m.tile('Raised', '↑ ' ~ (summary.upgrades | comma), '', 'ok-tile') }}
-  {{ m.tile('Lowered — planned', '↓ ' ~ (summary.planned_downgrades | comma),
-            'matched target', 'muted-tile') }}
-  {{ m.tile('Lowered — unplanned', '↓ ' ~ (summary.unplanned_downgrades | comma),
-            'no target said so', 'alert') }}
-  {{ m.tile('Fallbacks', summary.fallbacks | comma, 'returned to base', 'alert') }}
-  {{ m.tile('Moved twice or more', summary.devices_moved_twice | comma, 'unstable') }}
+            (summary.devices | comma) ~ ' devices', 'tone-white') }}
+  {{ m.tile('Raised', summary.upgrades, tone='tone-green', total=summary.moves,
+            tip='Of the moves: to a newer version.') }}
+  {{ m.tile('Lowered — planned', summary.planned_downgrades, tone='tone-grey', total=summary.moves,
+            tip='Of the moves: landed on the older version its target named.') }}
+  {{ m.tile('Lowered — unplanned', summary.unplanned_downgrades,
+            tone='tone-red' if summary.unplanned_downgrades else 'tone-grey', total=summary.moves,
+            tip='Of the moves: to an older version that no target named.') }}
+  {{ m.tile('Fallbacks', summary.fallbacks, tone='tone-red' if summary.fallbacks else 'tone-grey',
+            total=summary.moves, tip='Of the moves: back to its base firmware, the build it shipped with.') }}
+  {{ m.tile('Moved twice or more', summary.devices_moved_twice, tone='tone-white', total=summary.devices,
+            tip='Of the devices that moved: firmware changed more than once in this period.') }}
 </div>
 
-<div class="glance-grid">
-  <section class="card {{ 'highlight' if fallbacks }}">
-    <h2>Fallbacks
-      <span class="hint">device returned to its <strong>base firmware</strong> — the build it
-        shipped with</span>
-    </h2>
+{#- Fallbacks first and full width: the highest-priority signal, and a table too wide to halve. -#}
+<section class="card {{ 'highlight' if fallbacks }}">
+    <h2><span data-tip="A device that returned to its base firmware, the build it shipped with.">Fallbacks</span></h2>
     {# The same pill-tab control the window selector at the top of this page uses. Every view is
        a plain link, so a filtered list is a URL that can be pasted to a colleague. #}
     {% set fb_keep = 'window=' ~ window ~ '&fb_size=' ~ fb_size %}
@@ -62,7 +66,7 @@
          class="{{ 'on' if fb_min == 1 }}">All</a>
       <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}&fb_min=2{{ fb_model_q }}"
          class="{{ 'on' if fb_min > 1 }}"
-         title="Only devices that have returned to base more than once">Repeats only</a>
+         data-tip="Only devices that have returned to base more than once.">Repeats only</a>
       {% if fb_models | length > 1 %}
         <a href="?{{ fb_keep }}&fb_sort={{ fb_sort }}{{ fb_min_q }}"
            class="{{ 'on' if not fb_model }}">Any model</a>
@@ -77,12 +81,13 @@
 
     {% if fallbacks %}
     {% set fb_base = fb_keep ~ fb_min_q ~ fb_model_q %}
-    <table>
+    <div class="table-wrap grid-scroll">
+    <table class="data-grid">
       <thead><tr>
-        {{ m.sortable(fb_base, 'imei', 'IMEI', fb_sort, param='fb_sort') }}
+        {{ m.sortable(fb_base, 'imei', 'IMEI', fb_sort, param='fb_sort', descending=false) }}
         {{ m.sortable(fb_base, 'times', 'Times', fb_sort, numeric=true, param='fb_sort') }}
-        {{ m.sortable(fb_base, 'model', 'Model', fb_sort, param='fb_sort') }}
-        <th>Move</th><th>Base</th>
+        {{ m.sortable(fb_base, 'model', 'Model', fb_sort, param='fb_sort', descending=false) }}
+        <th class="fit">Move</th><th class="fit">Base</th>
         {{ m.sortable(fb_base, 'when', 'When', fb_sort, param='fb_sort') }}
         <th>Status</th>
       </tr></thead>
@@ -102,35 +107,35 @@
             <span class="v-to">{{ f.to_firmware }}</span>
           </td>
           <td class="dim">{{ f.base_firmware }}</td>
-          <td class="dim">{{ f.changed_at[5:16] }}</td>
+          <td class="dim">{{ f.changed_at | when }}</td>
           <td><span class="pill pill-{{ (f.status or 'unknown') | lower }}">{{ f.status | status }}</span></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {{ m.pager(fb_page, fb_pages, fb_shown, fb_size, page_sizes, fb_query, 'fb_page', 'fb_size') }}
     {% else %}
-    <p class="empty">
+    <p class="empty-line">
       {% if fb_min > 1 or fb_model %}No fallback matches that filter.
+      {% elif since %}No device returned to its base firmware in this period.
       {% else %}No device has returned to its base firmware in the recorded history.{% endif %}
     </p>
     {% endif %}
   </section>
 
+<div class="glance-grid glance-wide-left">
   <section class="card {{ 'highlight' if fb_repeats }}">
-    <h2>Falling back repeatedly
-      <span class="hint">devices that have returned to base <strong>more than once</strong> —
-        a one-off can be explained away, a pattern cannot</span>
+    <h2><span data-tip="Devices that have returned to base more than once, worst first — a one-off can be explained away, a pattern cannot. Of {{ fb_totals.devices | comma }} devices that ever fell back, {{ fb_totals.repeat_devices | comma }} did it more than once; {{ fb_totals.events | comma }} fallbacks in all.">Falling back repeatedly</span>
+      {%- if fb_repeats %}
+      <span class="hint">{% if fb_totals.repeat_devices > fb_repeats | length %}{{ fb_repeats | length }} of {% endif %}{{ fb_totals.repeat_devices | comma }}</span>
+      {%- endif %}
     </h2>
     {% if fb_repeats %}
-    <p class="dim">
-      {{ fb_totals.repeat_devices | comma }} of {{ fb_totals.devices | comma }} devices that have
-      ever fallen back have done it more than once, across
-      {{ fb_totals.events | comma }} occurrences.
-    </p>
-    <table>
-      <thead><tr><th>IMEI</th><th class="n">Times</th><th>Model</th><th>Now on</th>
-                 <th>Base</th><th>First</th><th>Last</th></tr></thead>
+    <div class="table-wrap grid-scroll">
+    <table class="data-grid">
+      <thead><tr><th class="fit">IMEI</th><th class="n fit">Times</th><th class="fit">Model</th><th class="fit">Now on</th>
+                 <th class="fit">Base</th><th class="fit">First</th><th>Last</th></tr></thead>
       <tbody>
         {% for r in fb_repeats %}
         <tr class="row-alert">
@@ -139,25 +144,20 @@
           <td>{{ r.device_model or '—' }}</td>
           <td class="mono">{{ r.current_firmware or '—' }}</td>
           <td class="dim">{{ r.base_firmware }}</td>
-          <td class="dim">{{ r.first_fallback[5:16] }}</td>
-          <td class="dim">{{ r.last_fallback[5:16] }}</td>
+          <td class="dim">{{ r.first_fallback | when }}</td>
+          <td class="dim">{{ r.last_fallback | when }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% if fb_totals.repeat_devices > fb_repeats | length %}
-    <p class="dim">Showing the worst {{ fb_repeats | length }} of
-      {{ fb_totals.repeat_devices | comma }}.</p>
-    {% endif %}
+    </div>
     {% else %}
-    <p class="empty">No device has fallen back more than once.</p>
+    <p class="empty-line">No device has fallen back more than once.</p>
     {% endif %}
   </section>
 
   <section class="card">
-    <h2>Sitting on base firmware
-      <span class="hint">base build with a newer target assigned</span>
-    </h2>
+    <h2><span data-tip="Devices on their base build with a newer target assigned.">Sitting on base firmware</span></h2>
     <div class="change-rows">
       <div class="change-row">
         <span class="arrow">▪</span><span class="change-label">On base, newer target set</span>
@@ -173,32 +173,27 @@
       </div>
       <div class="change-row">
         <span class="arrow">?</span>
-        <span class="change-label">never moved, or fell back before we watched</span>
+        <span class="change-label" data-tip="Only history separates a device that fell back from one that never updated, so this shrinks as the change log grows.">never moved, or fell back before we watched</span>
         <b>{{ at_base.never_moved_or_unobserved | comma }}</b>
       </div>
     </div>
-    <p class="footnote">
-      The last row is ambiguous by nature — only history separates a device that fell back from
-      one that never updated. It shrinks as the change log grows.
-    </p>
   </section>
 </div>
 
 <section class="card">
-  <h2>Firmware moves
-    <span class="hint">newest first</span>
-  </h2>
-  {{ m.pager(page, pages, summary.moves, size, page_sizes, 'window=' ~ window) }}
+  <h2><span data-tip="Every firmware move in the period, newest first.">Firmware moves</span>
+    <span class="hint">{{ summary.moves | comma }}</span></h2>
   {% if moves %}
-  <table>
+  <div class="table-wrap grid-scroll" data-fit>
+  <table class="data-grid">
     <thead>
-      <tr><th>When</th><th>IMEI</th><th>Model</th><th>Move</th><th>Verdict</th>
-          <th>Target</th><th>Base</th><th>HW</th><th>Status</th></tr>
+      <tr><th class="fit">When</th><th class="fit">IMEI</th><th class="fit">Model</th><th class="fit">Move</th><th class="fit">Verdict</th>
+          <th class="fit">Target</th><th class="fit">Base</th><th class="fit">HW</th><th>Status</th></tr>
     </thead>
     <tbody>
       {% for r in moves %}
       <tr class="{{ 'row-alert' if r.is_fallback or (r.direction == 'downgrade' and not r.matched_target) }}">
-        <td class="dim">{{ r.changed_at[5:16] }}</td>
+        <td class="dim">{{ r.changed_at | when }}</td>
         <td class="mono">{{ r.imei }}</td>
         <td>{{ r.device_model or '—' }}</td>
         <td class="change">
@@ -218,19 +213,21 @@
         <td class="dim">{{ r.update_firmware or '—' }}</td>
         <td class="dim">{{ r.base_firmware or '—' }}</td>
         <td class="dim">{{ r.hw_ver or '—' }}</td>
-        <td><span class="pill pill-{{ (r.status or 'unknown') | lower }}">{{ r.status or '—' }}</span></td>
+        <td><span class="pill pill-{{ (r.status or 'unknown') | lower }}">{{ r.status | status }}</span></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
+  {{ m.pager(page, pages, summary.moves, size, page_sizes, 'window=' ~ window) }}
   {% else %}
-  <p class="empty">No firmware moved in this window.</p>
+  <p class="empty-line">No firmware moved in this window.</p>
   {% endif %}
 </section>
 
 {% if summary.other_fields %}
 <section class="card">
-  <h2>Other fields that changed <span class="hint">same window</span></h2>
+  <h2><span data-tip="In the same period as the firmware moves.">Other fields that changed</span></h2>
   <div class="chips">
     {% for f in summary.other_fields %}
     <span class="chip">{{ f.field }} <b>{{ f.n | comma }}</b></span>
@@ -241,9 +238,7 @@
 
 {% if fallbacks %}
 <section class="card">
-  <h2>What the fallbacks share
-    <span class="hint">a slice concentrating above its share of the fleet is a lead, not a cause</span>
-  </h2>
+  <h2><span data-tip="A slice concentrating above its share of the fleet is a lead, not a cause.">What the fallbacks share</span></h2>
   <div class="segments">
     {% for title, key in [('By model', 'by_model'), ('By version path', 'by_path'),
                           ('By hardware revision', 'by_hw'), ('By group', 'by_group')] %}
@@ -260,7 +255,7 @@
           <div class="bar-value">{{ r.devices | comma }}</div>
         </div>
         {% endfor %}
-      {% else %}<p class="empty small">No data</p>{% endif %}
+      {% else %}<p class="empty-line">No data</p>{% endif %}
     </div>
     {% endfor %}
   </div>

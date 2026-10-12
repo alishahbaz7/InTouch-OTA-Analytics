@@ -1,0 +1,382 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_cota_charts.html" import took %}
+{% block title %}New job — Intouch COTA{% endblock %}
+
+{% block content %}
+<a class="back-link" href="/cota">{{ icon('chevron-left') }}<span>All jobs</span></a>
+
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+{% if live %}
+<div class="notice notice-warn" data-tip="One job runs at a time: plan this one now, and start it once that one has finished.">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }}.
+  <a href="/cota/jobs/{{ live.id }}">Open it</a></div>
+{% endif %}
+{%- set d = draft or {} -%}
+{% if d.get('from_job') and not preview %}
+<div class="notice notice-ok">Filled from job #{{ d.from_job }} —
+  {{ {'unfinished': 'devices that did not answer every command',
+      'rest': 'the devices its time limit stopped'}.get(d.from_which, 'all its devices') }}
+  ({{ d.from_count | comma }}). Check it, then preview.</div>
+{% endif %}
+
+<div class="module-grid">
+  {# ── a new job: devices, commands, settings — then the plan, then Start ── #}
+  <section class="card">
+    <h2 class="form-card-title">New job</h2>
+    <form method="post" action="/cota/jobs/preview" enctype="multipart/form-data" class="stack-form job-form" id="job-form">
+      {#- Sections with a rule between (the user, 12-10-2026: "aesthetically more professional"):
+          each its name and count on one line — any action on the right — and its fields under it. -#}
+      <div class="form-section">
+        <div class="form-section-label"><label for="job-name">Job name</label></div>
+        <div class="form-section-body">
+          <input type="text" name="name" id="job-name" value="{{ d.get('name', '') }}" placeholder="FTP settings — Delhi fleet">
+        </div>
+      </div>
+
+      {#- Devices come from one place, chosen with the tabs: only that one is shown and sent — the
+          other two are hidden and disabled. Set here as well as by the script, so the page comes
+          back from a preview on the source that was used. -#}
+      {%- set source = 'group' if d.get('group_id') else ('ids' if (d.get('devices') or '').strip() else ('group' if groups else 'ids')) %}
+      <div class="form-section">
+        <div class="form-section-label">
+          <span data-tip="Where the devices come from — one source per job: a saved group, IDs typed or pasted, or the cloud's own CSV.">Devices</span>
+          <span class="form-count" id="src-count"></span>
+        </div>
+        <div class="form-section-body" id="device-sources">
+          <div class="src-tabs" role="tablist" aria-label="Devices from">
+            {% for key, label, ico in [('group', 'Saved group', 'layers'), ('ids', 'Device IDs', 'list'), ('csv', 'CSV file', 'upload')] %}
+            <button type="button" class="src-tab" role="tab" data-tab="{{ key }}" aria-selected="{{ 'true' if source == key else 'false' }}"
+                    tabindex="{{ '0' if source == key else '-1' }}">{{ icon(ico) }}<span>{{ label }}</span></button>
+            {% endfor %}
+          </div>
+          <div class="source-option {{ 'is-off' if source != 'group' }}" data-source="group" role="tabpanel">
+            <select name="group_id" aria-label="Saved group" {{ 'disabled' if source != 'group' }}>
+              <option value="">{{ 'Choose a group' if groups else 'No saved groups yet' }}</option>
+              {% for g in groups %}
+              <option value="{{ g.id }}" {{ 'selected' if d.get('group_id') == g.id | string }} data-count="{{ g.devices }}">{{ g.name }} · {{ g.devices | comma }} devices</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="source-option {{ 'is-off' if source != 'ids' }}" data-source="ids" role="tabpanel">
+            <textarea name="devices" rows="4" class="mono" spellcheck="false" aria-label="Device IDs"
+                      placeholder="786, 14906" data-tip="Any number — commas, spaces or one per line; a column copied from Excel works."
+                      {{ 'disabled' if source != 'ids' }}>{{ d.get('devices', '') if not d.get('group_id') }}</textarea>
+          </div>
+          <div class="source-option is-off" data-source="csv" role="tabpanel">
+            <div class="file-row">
+              <label class="file-drop" data-tip="Columns: id (required), trackingCode (optional). A header row is optional.">
+                <input type="file" name="file" accept=".csv" aria-label="Device CSV" disabled>
+                {{ icon('upload') }}<span class="file-drop-text" data-empty="Choose a CSV file">Choose a CSV file</span>
+              </label>
+              <a class="link-btn" href="/cota/groups/template.csv">{{ icon('download') }}<span>Download template</span></a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-section-label">
+          <label for="job-commands" data-tip="One per line, sent in order. Each line is named under the box as it is typed.">Commands</label>
+          <span class="form-count" id="cmd-count"></span>
+          {% if library %}
+          <details class="dropdown library-pick">
+            <summary class="tool-btn">{{ icon('book') }}<span>From library</span></summary>
+            <div class="dropdown-panel library-panel">
+              {% if library | length > 8 %}<input type="search" class="library-filter" placeholder="Filter {{ library | length }} commands" aria-label="Filter saved commands" data-library-filter>{% endif %}
+              {% for c in library %}
+              <button type="button" class="dropdown-item" data-val1="{{ c.val1 }}">
+                <span>{{ c.name }}</span><em class="mono">{{ c.val1[:18] }}{% if c.val1 | length > 18 %}…{% endif %}</em>
+              </button>
+              {% endfor %}
+            </div>
+          </details>
+          {% else %}
+          <a class="tool-btn library-pick" href="/cota/commands">{{ icon('book') }}<span>Command library</span></a>
+          {% endif %}
+        </div>
+        <div class="form-section-body">
+          <textarea name="commands" id="job-commands" rows="5" class="mono" spellcheck="false" required
+                    placeholder="DAD76F4B&#10;DAD76C0A">{{ d.get('commands', '') }}</textarea>
+          <ol class="line-names" id="line-names" aria-live="polite" data-waits="{{ d.get('waits', '') }}"
+              data-choices="{{ defaults.wait_choices }}"></ol>
+        </div>
+      </div>
+
+      {#- The values stay inside; the summary is its title alone (the user, 10-10-2026). A setting
+          moved off its default is marked, so a changed value is never hidden by the fold. -#}
+      {%- set changed = (d.get('in_progress') and d.in_progress | string != defaults.in_progress | string)
+                     or (d.get('batch_size') and d.batch_size | string != defaults.batch | string)
+                     or (d.get('rate_per_sec') and d.rate_per_sec | float != defaults.rate | float)
+                     or d.get('answer_wait_seconds') or d.get('time_limit_minutes') %}
+      <details class="advanced">
+        <summary>{{ icon('sliders') }}<span>Advanced settings</span>{% if changed %} <span class="pill pill-changed">Changed</span>{% endif %}<span class="adv-chev">{{ icon('chevron-down') }}</span></summary>
+        <div class="field-row">
+          <label><span data-tip="The rest wait in job order; each device that finishes its commands makes room for the next.">Devices in progress at once</span>
+            <input type="number" name="in_progress" min="1" step="1"
+                   value="{{ d.get('in_progress') or defaults.in_progress }}"></label>
+          <label><span data-tip="Up to {{ defaults.batch_max }} — checks read up to {{ defaults.batch_max }} too.">Devices per send call</span>
+            <input type="number" name="batch_size" min="1" max="{{ defaults.batch_max }}"
+                   value="{{ d.get('batch_size') or defaults.batch }}"></label>
+          <label>Calls per second
+            <input type="number" name="rate_per_sec" min="0.1" max="100" step="0.1"
+                   value="{{ d.get('rate_per_sec') or defaults.rate }}"></label>
+        </div>
+        <div class="field-row">
+          <label>Wait for an answer, per attempt (seconds)
+            <input type="number" name="answer_wait_seconds" min="10" max="3600" step="5"
+                   value="{{ d.get('answer_wait_seconds', '') }}" placeholder="{{ defaults.answer_wait }}"></label>
+          <label><span data-tip="Blank: the job's own max time — the longest it can take if no device answers — is its hard limit. Type fewer minutes to stop it sooner.">Time limit (minutes)</span>
+            <input type="number" name="time_limit_minutes" min="1" max="1440" step="1"
+                   value="{{ d.get('time_limit_minutes', '') }}" placeholder="its max time"></label>
+        </div>
+        <div class="field-row">
+          <label>Model · type
+            <span class="inline-pair">
+              <input type="number" name="device_type" value="{{ d.get('device_type') or defaults.type }}" aria-label="Model">
+              <input type="number" name="cmd_type" value="{{ d.get('cmd_type') or defaults.cmd }}" aria-label="Type">
+            </span></label>
+        </div>
+      </details>
+      <div class="form-foot">
+        <button type="submit" class="btn-primary btn-icon" data-tip="Shows the plan. Nothing is sent until Start.">
+          <span>Preview plan</span>{{ icon('chevron-right') }}</button>
+      </div>
+    </form>
+  </section>
+
+  {# ── the plan ── #}
+  <section class="card" id="plan">
+    {% if preview %}
+    {%- set p = preview %}
+    <h2><span data-tip="Nothing has been sent. Start sends it.">Plan</span></h2>
+    {% if p.problems %}<div class="notice notice-error">{{ p.problems[:5] | join('; ') }}{% if p.problems | length > 5 %} …{% endif %}</div>{% endif %}
+    {% if p.bad %}<div class="notice notice-error">Fix these commands first:
+      {% for s in p.bad %}line {{ s.line }} ({{ s.val1[:16] or 'blank' }}): {{ s.problem }}{{ '; ' if not loop.last }}{% endfor %}</div>{% endif %}
+    {% if p.busy %}<div class="notice notice-error">{{ p.busy | length }} device(s) are in a live
+      sequence or job ({{ p.busy[:10] | join(', ') }}) — one thing at a time per device.</div>{% endif %}
+    {#- The plan in figures the eye takes in at once: how long it may take (the job's hard stop,
+        the user, 10-10-2026), how many devices, commands and at a time. The arithmetic behind
+        the time is in the figure's hold-tip, not on the page (the user, 10-10-2026). -#}
+    {% if p.devices and p.steps %}
+    {%- set b = p.basis %}
+    {%- set sum -%}
+      {%- if b.by == 'devices' -%}
+      {{ b.rounds | comma }} round{{ '' if b.rounds == 1 else 's' }} × {{ b.steps }} command{{ '' if b.steps == 1 else 's' }} × {{ took(b.per_command) }} ({{ p.answer_wait | int }} s for an answer, up to 3 attempts)
+      {%- else -%}
+      {{ b.calls | comma }} calls at {{ '%g' % b.rate }} a second
+      {%- endif %} = {{ took(b.seconds) }}, + 10% → {{ took(p.max_minutes * 60) }}. About {{ took(p.estimate_minutes * 60) }} if devices answer.
+    {%- endset %}
+    {%- set at_once = [p.in_progress, p.devices] | min %}
+    <div class="plan-max {{ 'is-held' if p.past_today else ('is-cut' if p.over_limit else '') }}">
+      <div class="plan-max-figure plan-time" data-tip="{{ sum | trim }}">
+        <em>{{ 'Stops at' if p.limit_typed else 'May take up to' }}</em>
+        <b>{{ took(p.limit_minutes * 60) }}</b>
+        <small>{% if p.limit_typed %}your limit · its max time {{ took(p.max_minutes * 60) }}{% else %}hard stop{% endif %} · ends by {{ p.ends_clock }}</small>
+      </div>
+      <div class="plan-max-figure"><em>Devices</em><b>{{ p.devices | comma }}</b></div>
+      <div class="plan-max-figure"><em>Commands</em><b>{{ p.steps | length }}</b></div>
+      <div class="plan-max-figure"><em>At a time</em><b>{{ at_once | comma }}</b>
+        <small>{% if p.in_progress < p.devices %}the rest in line — {{ p.rounds }} rounds{% else %}all at once{% endif %}</small></div>
+    </div>
+    <ol class="plan-steps">{% for name in p.names %}<li><span class="plan-step-name">{{ name }}</span> <span class="mono dim">{{ p.steps[loop.index0].val1[:20] }}{% if p.steps[loop.index0].val1 | length > 20 %}…{% endif %}</span>
+      {%- if p.wait_words[loop.index0] and not loop.last %} <span class="wait-chip" data-tip="Each device waits this long after this command before the next — it may be off the air.">{{ icon('clock') }}{{ p.wait_words[loop.index0] }}</span>{% endif %}</li>{% endfor %}</ol>
+    {% if p.canary %}<p class="plan-canary"><span class="pill">Canary</span> the first {{ p.canary }} device{{ '' if p.canary == 1 else 's' }} first</p>{% endif %}
+    {% endif %}
+    {% if p.past_today and p.devices %}<div class="notice notice-error">It can take up to {{ took(p.limit_minutes * 60) }} —
+      past the end of today, when the day's record is cleared.
+      To finish today: {% if p.fit_in_progress %}<strong>{{ p.fit_in_progress | comma }}</strong> devices in progress at once, or {% endif %}split the group.</div>
+    {% elif p.over_limit and p.devices %}<div class="notice notice-warn">Your {{ p.limit_minutes | int }}-minute limit is shorter than
+      this job's max time of {{ took(p.max_minutes * 60) }}, so some devices may be stopped unfinished{% if p.in_progress < p.devices %} or never started{% endif %}.
+      To fit: {% if p.fit_in_progress %}<strong>{{ p.fit_in_progress | comma }}</strong> devices in progress at once, or {% endif %}leave the limit blank.</div>{% endif %}
+    {% if p.devices and p.steps and not p.bad and not p.busy and not p.problems and not p.past_today %}
+    <form method="post" action="/cota/jobs/start" class="stack-form">
+      {#- What was previewed is exactly what starts: the plan's own ids, the form's own values. -#}
+      {%- set fallback = {'batch_size': defaults.batch, 'rate_per_sec': defaults.rate,
+                          'in_progress': defaults.in_progress,
+                          'device_type': defaults.type, 'cmd_type': defaults.cmd} %}
+      {% for k in ('name', 'batch_size', 'rate_per_sec', 'time_limit_minutes', 'answer_wait_seconds', 'in_progress', 'device_type', 'cmd_type') %}
+      <input type="hidden" name="{{ k }}" value="{{ d.get(k) or fallback.get(k, '') }}">
+      {% endfor %}
+      <input type="hidden" name="waits" value="{{ p.waits | join(',') }}">
+      {#- A textarea, not a hidden input: the line breaks between commands must survive. -#}
+      <textarea name="commands" hidden>{{ d.get('commands', '') }}</textarea>
+      <input type="hidden" name="device_ids" value="{{ p.device_ids }}">
+      {% if live %}
+      <div class="notice notice-warn">Job #{{ live.id }} is still {{ live.state }} — start this one when it has finished.</div>
+      {% elif cota_status.token_held %}
+      {#- Before anything is sent, a formal summary of what will happen and how long it can take
+          (the user, 09- and 10-10-2026): one sentence, then the figures as a table. -#}
+      {%- set n_steps = p.steps | length -%}
+      {%- set before -%}
+        {{ n_steps }} command{{ '' if n_steps == 1 else 's' }} will be sent to {{ p.devices | comma }} device{{ '' if p.devices == 1 else 's' }}, in the order listed.
+      {%- endset %}
+      <template id="start-summary">
+        <dl class="confirm-kv">
+          {% if d.get('name') %}<dt>Job</dt><dd>{{ d.name }}</dd>{% endif %}
+          <dt>Devices</dt><dd>{{ p.devices | comma }}</dd>
+          <dt>Commands</dt><dd><ol class="confirm-steps">{% for name in p.names %}<li>{{ name }}{% if p.wait_words[loop.index0] and not loop.last %} — then wait {{ p.wait_words[loop.index0] }}{% endif %}</li>{% endfor %}</ol></dd>
+          <dt>Devices at a time</dt><dd>{{ ([p.in_progress, p.devices] | min) | comma }}{% if p.in_progress < p.devices %} · {{ p.rounds }} rounds{% endif %}</dd>
+          <dt>Maximum duration</dt><dd>{{ took(p.limit_minutes * 60) }}{% if p.limit_typed %} (set limit){% endif %}</dd>
+          <dt>Stops by</dt><dd>{{ p.ends_clock }}</dd>
+          <dt>Estimated duration</dt><dd>About {{ took(p.estimate_minutes * 60) }}, if devices respond</dd>
+        </dl>
+        {% if p.over_limit %}<p class="confirm-note">Devices not finished by {{ p.ends_clock }} will be stopped.</p>{% endif %}
+      </template>
+      <div class="form-actions"><button type="submit" class="btn-send btn-icon"
+          data-confirm="{{ before | trim }}" data-confirm-detail="start-summary"
+          data-confirm-action="Start job" data-confirm-tone="go">{{ icon('send') }}<span>Start job — {{ p.devices | comma }} device{{ '' if p.devices == 1 else 's' }}</span></button></div>
+      {% else %}
+      <div class="notice notice-warn">Not signed in to the cloud — sign in (top right), then preview again.</div>
+      {% endif %}
+    </form>
+    {% endif %}
+    {% else %}
+    <h2><span data-tip="Each command: 30 s for an answer, up to 3 attempts, then the next command. No job runs past its time limit.">Plan</span></h2>
+    <p class="empty-line">No plan yet.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// One source of devices at a time, chosen with the tabs: only that one is shown and sent — the
+// others are disabled, so their values stay in the form but never reach the server.
+(function () {
+  var wrap = document.getElementById('device-sources');
+  if (!wrap) return;
+  var count = document.getElementById('src-count');
+  var fields = { group: wrap.querySelector('[name="group_id"]'),
+                 ids: wrap.querySelector('[name="devices"]'),
+                 csv: wrap.querySelector('[name="file"]') };
+  var tabs = Array.prototype.slice.call(wrap.querySelectorAll('[data-tab]'));
+  var fileText = wrap.querySelector('.file-drop-text');
+  function current() {
+    var t = tabs.filter(function (b) { return b.getAttribute('aria-selected') === 'true'; })[0];
+    return t ? t.getAttribute('data-tab') : 'ids';
+  }
+  function plural(n, word) { return n.toLocaleString('en-US') + ' ' + word + (n === 1 ? '' : 's'); }
+  function tally() {
+    var key = current(), text = '';
+    if (key === 'group' && fields.group.value) {
+      text = plural(Number(fields.group.selectedOptions[0].getAttribute('data-count') || 0), 'device');
+    }
+    if (key === 'ids') {
+      var n = fields.ids.value.split(/[\s,;]+/).filter(String).length;
+      if (n) text = plural(n, 'device');
+    }
+    var file = fields.csv.files && fields.csv.files[0];
+    if (key === 'csv' && file) text = 'from file';
+    fileText.textContent = file ? file.name : fileText.getAttribute('data-empty');
+    fileText.parentNode.classList.toggle('is-set', !!file);
+    count.textContent = text;
+  }
+  function show(key, focus) {
+    tabs.forEach(function (b) {
+      var on = b.getAttribute('data-tab') === key;
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+    });
+    Object.keys(fields).forEach(function (k) {
+      wrap.querySelector('[data-source="' + k + '"]').classList.toggle('is-off', k !== key);
+      fields[k].disabled = k !== key;
+    });
+    tally();
+    if (focus) (key === 'csv' ? tabs[2] : fields[key]).focus();
+  }
+  tabs.forEach(function (b, i) {
+    b.addEventListener('click', function () { show(b.getAttribute('data-tab'), true); });
+    b.addEventListener('keydown', function (e) {
+      var step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      var next = tabs[(i + step + tabs.length) % tabs.length];
+      show(next.getAttribute('data-tab'), false); next.focus();
+    });
+  });
+  wrap.addEventListener('input', tally);
+  wrap.addEventListener('change', tally);
+  show(current(), false);
+})();
+</script>
+<script>
+// Each command line's name as it is typed — asked of this install, which knows the library, so
+// the page and the plan cannot disagree. And the library picker adds a line.
+(function () {
+  var box = document.getElementById('job-commands'), list = document.getElementById('line-names');
+  if (!box || !list) return;
+  var timer = null;
+  // A wait after each command but the last (the user, 10-10-2026): the saved command's by default,
+  // kept per line while the list is edited, sent with the preview as one value per line.
+  var choices = (list.getAttribute('data-choices') || '0').split(',').map(Number);
+  var kept = {}, drafted = (list.getAttribute('data-waits') || '').split(',').filter(String).map(Number);
+  function words(s) {
+    if (!s) return 'No wait';
+    var m = Math.floor(s / 60), r = s % 60;
+    return 'Wait ' + (m ? m + ' min' + (r ? ' ' + r + ' s' : '') : r + ' s');
+  }
+  var cmdCount = document.getElementById('cmd-count');
+  function draw(lines) {
+    if (cmdCount) cmdCount.textContent = lines.length ? lines.length + ' command' + (lines.length === 1 ? '' : 's') : '';
+    var before = {};
+    list.querySelectorAll('select[name=waits]').forEach(function (sel) { before[sel.dataset.key] = Number(sel.value); });
+    Object.assign(kept, before);
+    list.innerHTML = '';
+    lines.forEach(function (l, i) {
+      var li = document.createElement('li');
+      li.className = l.problem ? 'line-bad' : 'line-ok';
+      var at = document.createElement('span'); at.className = 'line-no'; at.textContent = l.line;
+      var name = document.createElement('span');
+      name.textContent = l.problem ? l.problem : (l.name || l.val1);
+      li.appendChild(at); li.appendChild(name);
+      var key = i + ':' + l.val1, last = i === lines.length - 1;
+      var value = key in kept ? kept[key] : (drafted.length === lines.length ? drafted[i] : (l.wait_after || 0));
+      if (l.problem || last) {
+        var h = document.createElement('input'); h.type = 'hidden'; h.name = 'waits'; h.value = '0';
+        li.appendChild(h);
+      } else {
+        var sel = document.createElement('select');
+        sel.name = 'waits'; sel.className = 'wait-pick'; sel.dataset.key = key;
+        sel.setAttribute('aria-label', 'Wait after line ' + l.line);
+        sel.setAttribute('data-tip', 'A pause after this command before the next, for one that takes the device off the air. The saved command sets it.');
+        var opts = choices.indexOf(value) < 0 ? choices.concat([value]).sort(function (a, b) { return a - b; }) : choices;
+        opts.forEach(function (s) {
+          var o = document.createElement('option'); o.value = s; o.textContent = words(s);
+          if (s === value) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.classList.toggle('is-set', value > 0);
+        sel.addEventListener('change', function () { sel.classList.toggle('is-set', Number(sel.value) > 0); });
+        li.appendChild(sel);
+      }
+      list.appendChild(li);
+    });
+    drafted = [];
+  }
+  function ask() {
+    var body = new URLSearchParams(); body.set('text', box.value);
+    fetch('/cota/commands/describe', { method: 'POST', body: body })
+      .then(function (r) { return r.json(); }).then(function (d) { draw(d.lines || []); })
+      .catch(function () {});
+  }
+  box.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(ask, 300); });
+  if (box.value.trim()) ask();
+  document.querySelectorAll('[data-library-filter]').forEach(function (input) {
+    input.addEventListener('input', function () {
+      var needle = input.value.trim().toLowerCase();
+      input.parentNode.querySelectorAll('[data-val1]').forEach(function (b) {
+        b.hidden = needle && b.textContent.toLowerCase().indexOf(needle) === -1;
+      });
+    });
+  });
+  document.querySelectorAll('.library-pick [data-val1]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = box.value.replace(/\s+$/, '');
+      box.value = (v ? v + '\n' : '') + b.getAttribute('data-val1');
+      b.closest('details').removeAttribute('open');
+      box.focus(); ask();
+    });
+  });
+})();
+</script>
+{% endblock %}

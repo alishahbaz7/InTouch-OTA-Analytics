@@ -1,0 +1,71 @@
+{#- The managed list's pieces (the Devices pattern, 10-10-2026), shared by Web FOTA's and Intouch
+    COTA's lists so the two read alike. Import with context: they read the page's `link()`,
+    `sort`, `direction`, `filters` and `opts`.
+
+      {% import "_grid.html" as grid with context %}
+-#}
+{% from "_icons.html" import icon %}
+
+{#- A header that sorts: a link that flips the direction, a chevron only on the sorted column. -#}
+{%- macro th_sort(key, label, cls='') -%}
+{%- set on = sort == key -%}
+{%- set next_dir = 'desc' if on and direction == 'asc' else 'asc' -%}
+<th class="sortable {{ cls }} {{ 'is-sorted' if on }}" aria-sort="{{ ('ascending' if direction == 'asc' else 'descending') if on else 'none' }}">
+  <a href="{{ link({'sort': key, 'dir': next_dir, 'page': 1}) }}">{{ label }}<span class="sort-ind {{ 'is-desc' if on and direction == 'desc' }}">{{ icon('chevron-down') }}</span></a></th>
+{%- endmacro -%}
+
+{#- A column's filter, as in Excel (the user, 10-10-2026): every value with its count, any number
+    ticked — All, None, Invert, or Only one — applied together. Everything ticked sends nothing,
+    so an untouched column never narrows the list. `values` is [(value, label, count)]; only
+    values something has are offered ("0 means it does not exist"), and one already ticked so it
+    can be unticked. The ticked values travel as hidden inputs of the form named by `form`. -#}
+{%- macro pick(key, label, values=none, chosen=none, form='filters') -%}
+{%- set chosen = (chosen if chosen is not none else (filters.get(key) or [])) -%}
+{%- set ns = namespace(values=[]) -%}
+{%- for v in (values if values is not none else opts.choices[key]) if v[2] or v[0] in chosen %}{% set ns.values = ns.values + [v] %}{% endfor -%}
+{%- set values = ns.values -%}
+{%- set shown = (values | selectattr('0', 'in', chosen) | list) if chosen else [] -%}
+<div class="col-multi {{ 'is-set' if chosen }}" data-multi="{{ key }}" data-form="{{ form }}">
+  <button type="button" class="col-filter multi-btn" aria-haspopup="dialog" aria-expanded="false"
+          aria-label="Filter {{ label }}">
+    <span class="multi-text">{% if not chosen %}All{% elif chosen | length == 1 %}{{ shown[0][1] if shown else chosen[0] }}{% else %}{{ chosen | length }} selected{% endif %}</span>{{ icon('chevron-down') }}</button>
+  {%- for v in chosen %}<input type="hidden" form="{{ form }}" name="{{ key }}" value="{{ v }}" data-multi-hidden>{% endfor %}
+  <div class="multi-panel" role="dialog" aria-label="Filter {{ label }}" hidden>
+    {% if values | length > 8 %}<input type="search" class="multi-search" placeholder="Search {{ values | length }} values" aria-label="Search {{ label }}">{% endif %}
+    <div class="multi-tools">
+      <button type="button" class="link-btn" data-pick="all">All</button>
+      <button type="button" class="link-btn" data-pick="none">None</button>
+      <button type="button" class="link-btn" data-pick="invert">Invert</button>
+      <span class="multi-sum"></span>
+    </div>
+    <div class="multi-list">
+      {%- for value, text, n in values %}
+      <label class="multi-item"><input type="checkbox" value="{{ value }}" {{ 'checked' if not chosen or value in chosen }}>
+        <span class="multi-label" title="{{ text }}">{{ text }}</span><span class="multi-count">{{ n | comma }}</span>
+        <button type="button" class="multi-only" data-only>Only</button></label>
+      {%- else %}<span class="multi-empty">No values</span>{% endfor %}
+    </div>
+    <div class="multi-foot">
+      <button type="button" class="tool-btn" data-pick="cancel">Cancel</button>
+      <button type="button" class="btn-primary" data-pick="apply">Apply</button>
+    </div>
+  </div>
+</div>
+{%- endmacro -%}
+
+{#- The pager under a managed list: where this page sits in the whole result, rows per page, and
+    the way through. Absolute links (`link()`), so it survives the page being re-rendered at a POST
+    address after an error. -#}
+{%- macro pager(page, pages, total, first, size, sizes) -%}
+<div class="pager">
+  <span class="pager-count">{% if total %}{{ '{:,}'.format(first + 1) }}–{{ '{:,}'.format([first + size, total] | min) }} of <strong>{{ '{:,}'.format(total) }}</strong>{% endif %}</span>
+  <span class="pager-sizes">{% for option in sizes %}<a class="{{ 'on' if option == size }}" href="{{ link({'size': option, 'page': 1}) }}">{{ option }}</a>{% endfor %}<span class="dim">per page</span></span>
+  <span class="pager-nav">
+    {% if page > 1 %}<a href="{{ link({'page': 1}) }}" aria-label="First">&laquo;</a><a href="{{ link({'page': page - 1}) }}">Previous</a>
+    {% else %}<span class="off">&laquo;</span><span class="off">Previous</span>{% endif %}
+    <span class="pager-at">{{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a href="{{ link({'page': page + 1}) }}">Next</a><a href="{{ link({'page': pages}) }}" aria-label="Last">&raquo;</a>
+    {% else %}<span class="off">Next</span><span class="off">&raquo;</span>{% endif %}
+  </span>
+</div>
+{%- endmacro -%}

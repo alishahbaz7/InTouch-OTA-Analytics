@@ -30,7 +30,11 @@ from dataclasses import dataclass
 
 from . import config
 
-SESSION_COOKIE = "ota_session"
+# Per channel, because browsers keep cookies per host and not per port: a release on :8000 and
+# a dev copy on :8100 would otherwise overwrite each other's session, and each signs with its
+# own key, so signing in to one would sign you out of the other. Release keeps the old name so
+# an upgrade does not sign anyone out.
+SESSION_COOKIE = "ota_session" if config.CHANNEL == "release" else "ota_session_dev"
 SESSION_MAX_AGE = 12 * 3600          # a working day; long enough not to nag, short enough to lapse
 
 ENV_SECRET_KEY = "OTA_SECRET_KEY"

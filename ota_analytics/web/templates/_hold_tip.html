@@ -1,0 +1,29 @@
+{# Help is never printed beside a title (the user's rule: it reads as filler). It sits in a
+   data-tip and appears only when the pointer rests on the title or control for a while. #}
+<div class="hold-tip" id="hold-tip" role="tooltip" hidden></div>
+<script>
+(function () {
+  var HOLD_MS = 5000;                       // the user's choice: help for those who linger
+  var tip = document.getElementById('hold-tip'), timer = null, over = null;
+  function hide() { clearTimeout(timer); timer = null; over = null; tip.hidden = true; }
+  document.addEventListener('mouseover', function (event) {
+    var el = event.target.closest ? event.target.closest('[data-tip]') : null;
+    if (el === over) return;
+    hide();
+    if (!el) return;
+    over = el;
+    timer = setTimeout(function () {
+      tip.textContent = el.getAttribute('data-tip');
+      tip.hidden = false;
+      var r = el.getBoundingClientRect();
+      var left = Math.max(8, Math.min(r.left, window.innerWidth - tip.offsetWidth - 8));
+      var top = r.bottom + 6 + tip.offsetHeight > window.innerHeight ? r.top - tip.offsetHeight - 6 : r.bottom + 6;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }, HOLD_MS);
+  });
+  document.addEventListener('mousedown', hide);
+  window.addEventListener('scroll', hide, true);
+  window.addEventListener('blur', hide);
+})();
+</script>

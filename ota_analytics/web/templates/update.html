@@ -114,9 +114,8 @@
     <div class="hero-status">
       <span class="dot"></span>
       <div>
-        <strong>{{ auth.label }}</strong>
+        <strong data-tip="{{ auth.detail }}">{{ auth.label }}</strong>
         {% if connection.username %}<span class="dim">— {{ connection.username }}</span>{% endif %}
-        <div class="hint">{{ auth.detail }}</div>
       </div>
     </div>
 
@@ -158,7 +157,7 @@
       </select>
       <label class="inline compact">
         <input type="checkbox" name="enabled" value="true" {{ 'checked' if agent.enabled }}>
-        auto
+        Auto
       </label>
       <button type="submit" class="ghost">Save</button>
     </form>
@@ -175,7 +174,7 @@
         <span class="switch-label">Start with Windows</span>
       </label>
       <input type="number" name="startup_delay" min="0" max="240"
-             value="{{ startup.delay_minutes }}" title="Minutes to wait before the first fetch">
+             value="{{ startup.delay_minutes }}" data-tip="Minutes to wait before the first fetch.">
       <span class="hint">min delay
         {%- if startup.enabled %} ·
           {{ 'at boot' if startup.starts_at_boot else 'at sign-in' }}
@@ -196,10 +195,9 @@
 </section>
 
 {% if not auth.can_automate %}
-<div class="notice notice-warn">
-  Unattended fetching needs credentials it can renew itself — sign in below with your username
-  and password and tick <strong>Remember me</strong>. A pasted bearer token stops working once
-  it expires.
+<div class="notice notice-warn"
+     data-tip="Unattended fetching needs credentials it can renew itself: sign in below with Remember me ticked. A pasted bearer token stops working once it expires.">
+  Auto-fetch needs a saved sign-in.
 </div>
 {% endif %}
 
@@ -209,9 +207,10 @@
       if connection.preset in presets else 'custom' }}</span></h2>
 
     {% if not is_local %}
-    <div class="notice notice-error">
-      Opened from another machine over plain HTTP — a password typed here would cross the
-      network unencrypted. Use <code>http://127.0.0.1:8000/update</code> on the host machine.
+    <div class="notice notice-error"
+         data-tip="Open http://127.0.0.1:{{ request.url.port or 8000 }}/update on the host machine instead.">
+      Opened from another machine over plain HTTP — a password typed here crosses the network
+      unencrypted.
     </div>
     {% endif %}
 
@@ -235,27 +234,27 @@
            to get it wrong. #}
         <label>{{ 'Change password' if connection.remembered else 'Password' }}
           <input type="password" name="password" autocomplete="current-password"
-                 placeholder="{{ 'leave blank — already saved' if connection.remembered else '' }}">
+                 placeholder="{{ 'Saved' if connection.remembered else '' }}"
+                 {%- if connection.remembered %} data-tip="Leave it empty to use the saved password."{% endif %}>
         </label>
       </div>
 
       {% if connection.remembered %}
-      <p class="saved-credential">
+      <p class="saved-credential" data-tip="Leave the password box empty to use it.">
         <span class="dot"></span>
-        Password already saved in <strong>{{ credential_store }}</strong> — leave the box empty
-        and press <em>Sign in &amp; fetch</em>. Only fill it in to replace it.
+        Password saved in <strong>{{ credential_store }}</strong>
       </p>
       {% endif %}
 
       <label class="inline">
         <input type="checkbox" name="remember" value="true" {{ 'checked' if connection.remembered }}>
-        Remember me <span class="opt">— required for auto-fetch</span>
+        <span data-tip="Required for auto-fetch. The password is stored in {{ credential_store }}, never in this project's files or the database.">Remember me</span>
       </label>
 
       {% if not connection.verify_tls %}
-      <div class="notice notice-warn">
-        Certificate checking is <strong>off</strong> — credentials go to whatever answers at
-        that address.
+      <div class="notice notice-warn"
+           data-tip="Credentials go to whatever answers at that address. Turn it back on under Endpoints &amp; sign-in details.">
+        Certificate checking is <strong>off</strong>.
       </div>
       {% endif %}
 
@@ -265,9 +264,7 @@
         <label class="inline">
           <input type="checkbox" name="verify_tls" value="true"
                  {{ 'checked' if connection.verify_tls }}>
-          <span>Verify the HTTPS certificate
-            <span class="opt">— keep on; off means anything on the network can impersonate the
-              platform and capture the password</span></span>
+          <span data-tip="Keep on. Off means anything on the network can impersonate the platform and capture the password.">Verify the HTTPS certificate</span>
         </label>
 
         <label>Export URL
@@ -318,10 +315,6 @@
         <button type="submit" form="forget" class="ghost">Forget password</button>
         {% endif %}
       </div>
-      <p class="footnote">
-        Password stored in <strong>{{ credential_store }}</strong>, never in this project's
-        files or the database.
-      </p>
     </form>
     {% if connection.remembered %}
     <form id="forget" method="post" action="/update/forget">
@@ -331,32 +324,30 @@
   </section>
 
   <section class="card {{ 'highlight' if tab == 'import' }}">
-    <h2>Import a file <span class="hint">.xlsx or .csv — columns matched by name</span></h2>
+    <h2><span data-tip="The platform's .xlsx, or a .csv with the same columns, matched by name. For a colleague's whole history, a shared bundle (below) is better than a single file.">Import a file</span></h2>
     <form method="post" action="/update/import" enctype="multipart/form-data" class="stack-form">
       <label class="dropzone">
         <input type="file" name="file" accept=".xlsx,.csv" required>
-        <span class="dropzone-text">Choose an export file</span>
-        <small>The platform's <code>.xlsx</code>, or a <code>.csv</code> with the same columns —
-          yours or a colleague's. Keep the original filename: the snapshot date is read from it,
-          because no column carries it. For a colleague's whole accumulated history, a
-          <a href="#share">shared bundle</a> is better than a single file.</small>
+        <span class="dropzone-text" data-tip="Keep the original filename: the snapshot date is read from it, because no column carries it.">Choose an export file</span>
       </label>
       <div class="form-actions"><button type="submit">Upload &amp; load</button></div>
     </form>
 
-    <h3>History <span class="hint">{{ snapshots | length }} snapshots · click to view</span></h3>
-    <table class="compact-table">
-      <thead><tr><th>Taken</th><th>Source</th><th class="n">Devices</th></tr></thead>
+    <h3><span data-tip="Open a snapshot by its time to view the dashboard as it was then. The 12 newest are listed.">History</span> <span class="hint">{{ snapshots | length | comma }}</span></h3>
+    <div class="table-wrap grid-scroll">
+    <table class="data-grid compact-table">
+      <thead><tr><th class="fit">Taken</th><th>Source</th><th class="n fit">Devices</th></tr></thead>
       <tbody>
         {% for s in snapshots[:12] %}
         <tr>
-          <td><a href="/?snapshot={{ s.id }}">{{ s.snapshot_at }}</a></td>
-          <td class="dim small">{{ 'API' if s.source_file.startswith('API') else s.source_file[:26] }}</td>
+          <td><a class="id-link" href="/?snapshot={{ s.id }}">{{ s.snapshot_at | when }}</a></td>
+          <td class="dim cell-clip" title="{{ s.source_file }}">{{ 'API' if s.source_file.startswith('API') else s.source_file }}</td>
           <td class="n">{{ s.row_count | comma }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </section>
 </div>
 
@@ -364,16 +355,12 @@
    nothing else on screen makes that visible — so the digest comes first, and the exchange
    that fixes a mismatch sits directly under it. #}
 <section class="card {{ 'highlight' if tab == 'share' }}" id="share">
-  <h2>Share this data <span class="hint">so two installs can prove they agree</span></h2>
+  <h2><span data-tip="Exchange snapshot history with another install; the same fleet digest on both proves they hold the same data.">Share this data</span></h2>
 
   <div class="identity-grid">
     <div class="identity-cell wide">
-      <span class="hero-metric-label">Fleet digest</span>
+      <span class="hero-metric-label" data-tip="A fingerprint of the exports loaded here. Same digest, same numbers: compare this with a colleague before comparing anything else.">Fleet digest</span>
       <span class="digest-value">{{ identity.digest_short }}</span>
-      <div class="hint">A fingerprint of the exports loaded here. Same digest, same numbers —
-        compare this with a colleague before comparing anything else. Hashing the database
-        file itself would report a mismatch every time, because two copies holding identical
-        data are never byte-identical.</div>
     </div>
     <div class="identity-cell">
       <span class="hero-metric-label">Snapshots</span>
@@ -404,27 +391,21 @@
 
   <div class="field-row">
     <form method="post" action="/update/label" class="stack-form">
-      <label>This install is called
+      <label><span data-tip="Appears on every bundle and report this install produces, so a file that has been emailed around still says where it came from.">This install is called</span>
         <input type="text" name="label" value="{{ identity.instance_label }}" maxlength="60"
-               placeholder="e.g. shahbaz-laptop">
+               placeholder="shahbaz-laptop">
       </label>
       <div class="form-actions"><button type="submit" class="ghost">Rename</button></div>
-      <p class="footnote">Appears on every bundle and report this install produces, so a file
-        that has been emailed around still says where it came from.</p>
     </form>
 
     {# POST, not GET: a full history is ~960,000 rows and most of a minute to write. As a plain
        download the browser showed nothing at all until the last byte, which reads as a button
        that does nothing. The job builds it with a bar to watch, then offers the file. #}
     <form method="post" action="/update/bundle" class="stack-form">
-      <label>Export snapshots from <span class="opt">— blank for all</span>
+      <label><span data-tip="Leave blank for all snapshots.">Export snapshots from</span>
         <input type="text" name="since" placeholder="2026-08-15 or 2026-08-15 09:00">
       </label>
-      <div class="form-actions"><button type="submit">Build bundle</button></div>
-      <p class="footnote">Carries the snapshots themselves, not the database file — the other
-        side replays them, so your history and theirs combine instead of one replacing the
-        other. A full history takes a minute or so to write; the download appears above when
-        it is ready.</p>
+      <div class="form-actions"><button type="submit" data-tip="Carries the snapshots themselves, not the database file. The other side replays them, so both histories combine instead of one replacing the other. A full history takes a minute or so; the download appears above when it is ready.">Build bundle</button></div>
     </form>
   </div>
 
@@ -432,25 +413,13 @@
         class="stack-form">
     <label class="dropzone">
       <input type="file" name="file" accept=".otabundle,.zip" required>
-      <span class="dropzone-text">Import a colleague's bundle</span>
-      <small><strong>It has to come from a different install.</strong> Importing a bundle you
-        exported here does nothing — every snapshot in it is already loaded, which is why it
-        reports "nothing to merge". Catching up on a few fetches takes seconds; a first import
-        of months of history can take a few minutes and the page will wait for it.</small>
+      <span class="dropzone-text" data-tip="It has to come from a different install: a bundle exported here is already loaded and reports nothing to merge. A few fetches take seconds; months of history can take a few minutes.">Import a colleague's bundle</span>
     </label>
     {# The old label named the mechanism ("snapshots dated inside history already held") rather
        than the decision, and had to be explained every time. State the situation instead. #}
     <label class="inline">
       <input type="checkbox" name="allow_interleave" value="true">
-      <span>Their data is <strong>older</strong> than mine
-        <span class="opt">— tick this only if their fetches are dated before your newest one
-          ({{ identity.last_snapshot_at or 'your latest' }}). Leave it off when they are ahead of
-          you, which is the usual case and takes seconds. Older fetches have to be slotted into
-          a timeline that already exists, and because this database stores only what changed at
-          each fetch, that alters what unchanged devices appear to have been doing — so it
-          rewrites the surrounding snapshots and rebuilds the change log. A few minutes, and it
-          pauses collection while it runs. If you leave it off when it was needed, the import
-          refuses and tells you rather than getting it wrong.</span></span>
+      <span data-tip="Tick only if their fetches are dated before your newest one ({{ identity.last_snapshot_at or 'your latest' }}); leave it off when they are ahead, the usual case. Older fetches are slotted into the existing timeline, which rewrites the surrounding snapshots and rebuilds the change log: a few minutes, with collection paused. Left off when it was needed, the import refuses and says so.">Their data is <strong>older</strong> than mine</span>
     </label>
     <div class="form-actions"><button type="submit">Merge bundle</button></div>
   </form>

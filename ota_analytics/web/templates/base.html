@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}OTA Analytics{% endblock %}</title>
+  <title>{% if build.channel == 'dev' %}DEV · {% endif %}{% block title %}OTA Analytics{% endblock %}</title>
   {# Versioned so a stylesheet change actually reaches the browser. Without it the file is
      cached under a URL that never varies, and a restyled page keeps rendering with the old
      rules — which looks exactly like the new CSS being broken. #}
-  <link rel="stylesheet" href="/static/app.css?v={{ build.version }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version() }}">
+  {#- The app's mark as the tab icon; a running job's page draws its progress over it. -#}
+  {%- set mark_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#4d9dff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' ~ nav_icons.mark ~ '</svg>' %}
+  <link rel="icon" id="favicon" href="data:image/svg+xml,{{ mark_svg | urlencode }}">
   <script>
   // Applied before the stylesheet paints, so a reader who chose light does not get a flash of
   // dark on every page load. Inline and tiny for that reason — an external file would arrive
@@ -18,27 +21,93 @@
       if (choice === 'light' || choice === 'dark') {
         document.documentElement.setAttribute('data-theme', choice);
       }
+      // The sidebar's collapsed state, for the same reason: applied after paint, every page
+      // load would open wide and then snap shut.
+      if (localStorage.getItem('ota-nav') === 'rail') {
+        document.documentElement.setAttribute('data-nav', 'rail');
+      }
+      // Configure's details panel: folded unless it was left open.
+      if (localStorage.getItem('ota-cota-side') === 'open') {
+        document.documentElement.setAttribute('data-cota-side', 'open');
+      }
     } catch (e) { /* private browsing blocks localStorage; the system theme still applies */ }
   })();
   </script>
 </head>
 <body>
-<header>
-  <div class="brand">InTouch <span>OTA Analytics</span>
-    <a class="version" href="/api/version" title="Version {{ build.version }} ·
-schema {{ build.schema_version }} · released {{ build.released }} · Python {{ build.python }}"
-    >v{{ build.version }}</a>
+{# Which module and page this is, from one definition (nav.py) — so a page added later lands in
+   the right module by its URL alone, and the rail and the top bar cannot disagree. #}
+{%- set nav_now = nav_state(request.url.path) -%}
+{%- set module = nav_now.module -%}
+<div class="shell">
+<aside class="rail" aria-label="Modules">
+  <div class="rail-brand">
+    <span class="rail-logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{{ nav_icons.mark | safe }}</svg></span>
+    <div class="rail-brand-text">
+      <div class="rail-title">InTouch <span>Utility</span></div>
+      <div class="rail-sub">Over-the-air workbench</div>
+      <div class="rail-meta">
+        {# Which data and which build this is: shown over the version on hover, pinned by a
+           double-click so it can be copied (the user, 10-10-2026) — not printed in a footer. #}
+        <button type="button" class="version" id="build-btn" aria-controls="build-pop"
+                aria-expanded="false">v{{ build.version }}</button>
+        {# The release and a source copy run side by side; without this the two windows are
+           identical and a change gets tested in the wrong one. #}
+        {% if build.channel == 'dev' %}<span class="channel-dev"
+          title="Running from source on port {{ request.url.port }} — the release is a separate copy with its own data">DEV</span>{% endif %}
+      </div>
+    </div>
   </div>
-  {# Reachability, Groups and Quality are still served — they are simply not in the nav.
-     Restore any of them by adding a line here. #}
-  <nav>
-    <a href="/{{ qs() }}" class="{{ 'on' if request.url.path == '/' }}">Overview</a>
-    <a href="/changes{{ qs() }}" class="{{ 'on' if request.url.path == '/changes' }}">Changes</a>
-    <a href="/devices{{ qs() }}" class="{{ 'on' if request.url.path == '/devices' }}">Devices</a>
-    <a href="/pending{{ qs() }}" class="{{ 'on' if request.url.path == '/pending' }}">Pending</a>
-    <a href="/firmware{{ qs() }}" class="{{ 'on' if request.url.path == '/firmware' }}">Firmware</a>
+
+  {# One group per way a device is changed over the air. Reachability, Groups and Quality are
+     still served under Web FOTA — they are simply not listed. Add them in nav.py. #}
+  <nav class="rail-nav">
+    {% for m in nav_modules %}
+    <div class="rail-group {{ 'is-current' if m.key == module }}">{{ m.label }}</div>
+    {% for it in m.items if it.in_rail %}
+    {%- set on = nav_now.active == it -%}
+    <a href="{{ it.href }}{{ qs() if m.key == 'fota' and it.href != '/update' }}"
+       class="rail-item {{ 'on' if on }} {{ 'is-soon' if it.pill == 'Soon' }}"
+       title="{{ m.label }} · {{ it.label }}"
+       {%- if on %} aria-current="page"{% endif %}>
+      <svg class="rail-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">{{ nav_icons[it.icon] | safe }}</svg>
+      <span class="rail-label">{{ it.label }}</span>
+      {% if it.pill %}<span class="rail-pill {{ 'pill-soon' if it.pill == 'Soon' }}">{{ it.pill }}</span>{% endif %}
+    </a>
+    {% endfor %}
+    {% endfor %}
   </nav>
+
+  <div class="rail-legend">
+    <span><b>Soon</b> · not built yet</span>
+  </div>
+</aside>
+
+{# A page can ask to fill the window exactly (`fit-window`): Configure does, so nothing on it
+   moves with the page — only its conversation scrolls. #}
+<div class="page {% block page_class %}{% endblock %}">
+<header class="topbar">
+  <button type="button" class="icon-btn" id="nav-toggle" aria-label="Collapse or expand the sidebar"
+          title="Collapse the sidebar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">{{ nav_icons.menu | safe }}</svg>
+  </button>
+  {# The page's description is help, so it is a hold-tip on the title, never a printed line
+     (the user, 10-10-2026). The line under the title names the module and nothing else. #}
+  <div class="topbar-titles" {% if nav_now.active %}data-tip="{{ nav_now.active.desc }}"{% endif %}>
+    {% if nav_now.active %}
+    <h1>{{ nav_now.active.label }}</h1>
+    <div class="view-desc"><strong>{{ nav_now.module_label }}</strong></div>
+    {% else %}
+    {# Pages served but not listed in the rail take their heading from their own title. #}
+    <h1>{{ self.title().split(' — ')[0] }}</h1>
+    <div class="view-desc"><strong>{{ nav_now.module_label }}</strong></div>
+    {% endif %}
+  </div>
   <div class="header-right">
+    {% if module == 'fota' %}
     {# Connection + agent status. Kept in the header so it is answerable at a glance from any
        page: am I signed in, and when does data next refresh? #}
     <a class="status-chip status-{{ auth.level }}" href="/update" title="{{ auth.detail }}">
@@ -71,12 +140,30 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
       <span class="status-text">{{ error_summary.last_24h }} error{{ 's' if error_summary.last_24h != 1 }}</span>
     </a>
     {% endif %}
+    {% elif module == 'intouch_cota' %}
+    {# The COTA counterpart of FOTA's connection chip: is there a token to send with? #}
+    {# The chip is the way in to Sign in — no separate button: it already says the state and
+       goes where it is changed. Marked while on that page. #}
+    <a class="status-chip status-{{ cota_status.level }} {{ 'is-current' if nav_now.active and nav_now.active.href == '/cota/signin' }}"
+       href="/cota/signin" id="cota-signin-chip" title="{{ cota_status.title }}">
+      <span class="dot"></span><span class="status-text">{{ cota_status.label }}</span>
+    </a>
+    {% endif %}
+    {% if code_stale %}
+    {# Dev copy only: the code on disk is newer than what this process is running. #}
+    <span class="status-chip status-warn" id="code-stale"
+          title="Python files changed since this copy started. Templates reload by themselves; code does not — restart (F5) to load it.">
+      <span class="dot"></span><span class="status-text">Restart to load new code</span></span>
+    {% endif %}
     <button type="button" class="theme-btn" id="theme-btn"
             title="Switch between following the system theme, light and dark">
       <span class="theme-icon" id="theme-icon">◐</span><span id="theme-label">Auto</span>
     </button>
+    {# Each module's primary action sits top-right: FOTA's data refresh, COTA's sign-in. #}
+    {% if module == 'fota' %}
     <a class="btn-update {{ 'on' if request.url.path.startswith('/update') }}"
        href="/update">Update data</a>
+    {% endif %}
   </div>
 </header>
 
@@ -90,30 +177,65 @@ schema {{ build.schema_version }} · released {{ build.released }} · Python {{ 
   {% block content %}{% endblock %}
 </main>
 
+{% if module == 'fota' %}
 <footer>
   {% if current %}
     {{ current.row_count | comma }} devices &middot; {{ current.snapshot_at }}
     &middot; <span class="dim">{{ current.source_file }}</span>
   {% endif %}
   {% if not multi_snapshot %}
-    <span class="warn">Single snapshot — trends unlock with a second export.</span>
+    <span class="warn" data-tip="Trends and changes appear once a second export is loaded.">Single snapshot</span>
   {% endif %}
   {% if agent.last_run %}
     <span>Last auto-fetch {{ agent.last_run }} — {{ agent.last_status }}</span>
   {% endif %}
-  {# The reconciliation line. Two installs report the same numbers if and only if these match,
-     so it is on every page rather than buried on a settings screen. #}
-  <a class="digest" href="/update#share" title="Fleet digest {{ identity.fleet_digest or '—' }}
-{{ identity.snapshots or 0 }} snapshot(s), {{ identity.first_snapshot_at or '—' }} to {{ identity.last_snapshot_at or '—' }}
-Database: {{ identity.db_path }}
-Compare this with a colleague before comparing numbers.">
-    <strong>{{ identity.instance_label }}</strong>
-    · data {{ identity.digest_short }}
-    · {{ identity.snapshots or 0 }} snapshot{{ '' if identity.snapshots == 1 else 's' }}
-  </a>
-  <span class="dim">v{{ build.version }} ({{ build.codename }}) · schema {{ build.schema_version }}
-    · Python {{ build.python }}</span>
 </footer>
+{% endif %}
+</div>{# .page #}
+</div>{# .shell #}
+
+{# The reconciliation card. Two installs report the same numbers if and only if their data
+   digests match, so it is one hover away on every page. Outside the rail, which clips. #}
+<div class="build-pop" id="build-pop" role="dialog" aria-label="Data and version" hidden>
+  <dl class="build-kv">
+    <dt>Install</dt><dd><strong>{{ identity.instance_label }}</strong></dd>
+    <dt>Data</dt><dd><a class="digest" href="/update#share" data-tip="Compare this with a colleague before comparing numbers: the same digest means the same numbers.">{{ identity.digest_short }}</a>
+      · {{ identity.snapshots or 0 }} snapshot{{ '' if identity.snapshots == 1 else 's' }}</dd>
+    {% if identity.first_snapshot_at %}<dt>Period</dt><dd>{{ identity.first_snapshot_at[:16] }} → {{ (identity.last_snapshot_at or '')[:16] }}</dd>{% endif %}
+    <dt>Version</dt><dd>{{ build.version }} ({{ build.codename }}){% if build.channel == 'dev' %} · dev{% endif %}</dd>
+    <dt>Schema</dt><dd>{{ build.schema_version }}</dd>
+    <dt>Python</dt><dd>{{ build.python }}</dd>
+  </dl>
+</div>
+<script>
+// Hover shows the card beside the version; a double-click pins it until a click elsewhere or Esc.
+(function () {
+  var btn = document.getElementById('build-btn'), pop = document.getElementById('build-pop');
+  if (!btn || !pop) return;
+  var pinned = false, timer = null;
+  function place() {
+    var r = btn.getBoundingClientRect();
+    pop.style.left = Math.min(r.right + 10, window.innerWidth - pop.offsetWidth - 8) + 'px';
+    pop.style.top = Math.max(8, r.top - 6) + 'px';
+  }
+  function show() { clearTimeout(timer); pop.hidden = false; place(); btn.setAttribute('aria-expanded', 'true'); }
+  function hide() { if (pinned) return; pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); }
+  function later() { clearTimeout(timer); timer = setTimeout(hide, 200); }
+  btn.addEventListener('mouseenter', function () { clearTimeout(timer); timer = setTimeout(show, 120); });
+  btn.addEventListener('mouseleave', later);
+  btn.addEventListener('focus', show);
+  btn.addEventListener('blur', later);
+  pop.addEventListener('mouseenter', function () { clearTimeout(timer); });
+  pop.addEventListener('mouseleave', later);
+  btn.addEventListener('dblclick', function () { pinned = !pinned; pop.classList.toggle('is-pinned', pinned); show(); });
+  document.addEventListener('mousedown', function (e) {
+    if (pinned && !pop.contains(e.target) && e.target !== btn) { pinned = false; pop.classList.remove('is-pinned'); hide(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !pop.hidden) { pinned = false; pop.classList.remove('is-pinned'); hide(); }
+  });
+})();
+</script>
 
 <script>
 // Keeps the agent chip honest between page loads: counts down to the next fetch and refreshes
@@ -175,7 +297,7 @@ Compare this with a colleague before comparing numbers.">
 // above it, which changes when the window is narrow enough for the header to wrap. A
 // hard-coded offset would leave the column names either overlapped or floating.
 (function () {
-  var header = document.querySelector('header');
+  var header = document.querySelector('header.topbar');
   if (!header) return;
 
   function measure() {
@@ -196,6 +318,29 @@ Compare this with a colleague before comparing numbers.">
   // Fonts land after first paint and change the header height, so measure again once the
   // page has settled.
   window.addEventListener('load', measure);
+})();
+
+// Sidebar: open, or folded to an icon rail. Remembered per browser; applied in <head> so the
+// page does not open wide and then snap shut. On a narrow window the rail is forced by CSS and
+// this button has nothing to undo, so it is hidden there.
+(function () {
+  var button = document.getElementById('nav-toggle');
+  if (!button) return;
+  var root = document.documentElement;
+
+  function label() {
+    button.title = root.getAttribute('data-nav') === 'rail' ? 'Expand the sidebar'
+                                                           : 'Collapse the sidebar';
+  }
+
+  label();
+  button.addEventListener('click', function () {
+    var rail = root.getAttribute('data-nav') !== 'rail';
+    if (rail) { root.setAttribute('data-nav', 'rail'); } else { root.removeAttribute('data-nav'); }
+    try { localStorage.setItem('ota-nav', rail ? 'rail' : 'open'); } catch (e) { /* not kept */ }
+    label();
+    window.dispatchEvent(new Event('resize'));   // sticky offsets depend on the header height
+  });
 })();
 
 // Theme switch: follow the system, or override it. Three states rather than two, because
@@ -271,6 +416,257 @@ document.addEventListener('click', function (event) {
     if (!node.contains(event.target)) node.removeAttribute('open');
   });
 });
+</script>
+<script>
+// A managed list's filters (the Devices pattern, shared by Web FOTA and Intouch COTA). A typed
+// filter applies on Enter or when the box is left; a list filter, as in Excel, is ticked — All,
+// None, Invert, Only one — and applied. Its panel floats over the page (fixed), so a scrolling
+// grid never clips it. The values go out as hidden inputs of the form the box names.
+(function () {
+  function formOf(el, name) { return document.getElementById(name || el.getAttribute('form') || 'filters'); }
+  document.querySelectorAll('input.col-filter[form]').forEach(function (el) {
+    el.addEventListener('change', function () { var f = formOf(el); if (f) f.requestSubmit(); });
+  });
+  var all = document.querySelectorAll('[data-multi]');
+  if (!all.length) return;
+  var openBox = null;
+  function multi(box) {
+    var btn = box.querySelector('.multi-btn'), panel = box.querySelector('.multi-panel');
+    var search = panel.querySelector('.multi-search'), apply = panel.querySelector('[data-pick=apply]');
+    var formName = box.getAttribute('data-form') || 'filters', saved = [];
+    function items() { return Array.prototype.slice.call(panel.querySelectorAll('.multi-item')); }
+    function boxes() { return items().map(function (i) { return i.querySelector('input'); }); }
+    function visible() { return items().filter(function (i) { return !i.hidden; }).map(function (i) { return i.querySelector('input'); }); }
+    function sum() {
+      var list = boxes(), on = list.filter(function (b) { return b.checked; }).length;
+      panel.querySelector('.multi-sum').textContent = on.toLocaleString('en-US') + ' of ' + list.length.toLocaleString('en-US');
+      apply.disabled = on === 0;
+    }
+    function place() {
+      var r = btn.getBoundingClientRect(), w = Math.max(270, r.width);
+      panel.style.width = w + 'px';
+      panel.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+      var top = r.bottom + 4;
+      panel.style.maxHeight = '';
+      if (top + panel.offsetHeight > window.innerHeight - 8) {
+        var above = r.top - 4;
+        if (above > window.innerHeight - top) { top = Math.max(8, above - panel.offsetHeight); }
+        else { panel.style.maxHeight = (window.innerHeight - top - 8) + 'px'; }
+      }
+      panel.style.top = top + 'px';
+    }
+    function close(restore) {
+      if (restore) boxes().forEach(function (b, i) { b.checked = saved[i]; });
+      panel.hidden = true; btn.setAttribute('aria-expanded', 'false');
+      if (search) { search.value = ''; items().forEach(function (i) { i.hidden = false; }); }
+      if (openBox === api) openBox = null;
+    }
+    function open() {
+      if (openBox) openBox.close(true);
+      saved = boxes().map(function (b) { return b.checked; });
+      panel.hidden = false; btn.setAttribute('aria-expanded', 'true');
+      sum(); place(); openBox = api;
+      (search || panel.querySelector('.multi-list input') || apply).focus();
+    }
+    var api = { box: box, close: close, place: place };
+    btn.addEventListener('click', function () { panel.hidden ? open() : close(true); });
+    panel.addEventListener('change', sum);
+    panel.querySelectorAll('[data-pick]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var what = b.getAttribute('data-pick');
+        if (what === 'all') visible().forEach(function (x) { x.checked = true; });
+        if (what === 'none') visible().forEach(function (x) { x.checked = false; });
+        if (what === 'invert') visible().forEach(function (x) { x.checked = !x.checked; });
+        if (what === 'cancel') return close(true);
+        if (what === 'apply') {
+          box.querySelectorAll('[data-multi-hidden]').forEach(function (h) { h.remove(); });
+          var list = boxes(), on = list.filter(function (x) { return x.checked; });
+          if (on.length && on.length < list.length) {
+            on.forEach(function (x) {
+              var h = document.createElement('input');
+              h.type = 'hidden'; h.name = box.getAttribute('data-multi'); h.value = x.value;
+              h.setAttribute('form', formName); h.setAttribute('data-multi-hidden', '');
+              box.appendChild(h);
+            });
+          }
+          close(false);
+          var form = formOf(box, formName);
+          return form && form.requestSubmit();
+        }
+        sum();
+      });
+    });
+    panel.querySelectorAll('[data-only]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
+        boxes().forEach(function (x) { x.checked = false; });
+        b.closest('.multi-item').querySelector('input').checked = true;
+        sum();
+      });
+    });
+    if (search) search.addEventListener('input', function () {
+      var q = search.value.trim().toLowerCase();
+      items().forEach(function (i) { i.hidden = q && i.querySelector('.multi-label').textContent.toLowerCase().indexOf(q) < 0; });
+    });
+    return api;
+  }
+  all.forEach(multi);
+  document.addEventListener('mousedown', function (e) {
+    if (openBox && !openBox.box.contains(e.target)) openBox.close(true);
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && openBox) openBox.close(true); });
+  window.addEventListener('resize', function () { if (openBox) openBox.place(); });
+  document.querySelectorAll('.grid-scroll').forEach(function (g) {
+    g.addEventListener('scroll', function () { if (openBox) openBox.close(true); });
+  });
+})();
+</script>
+{% include "_hold_tip.html" %}
+<script>
+// A long grid (`data-fit`) takes the room left in the window below it — the header then stays in
+// view while its rows scroll under it. A grid that starts below the first screen is sized as it
+// will stand once scrolled to: under the top bar and anything pinned there (data-fit-offset).
+(function () {
+  function fit() {
+    document.querySelectorAll('[data-fit]').forEach(function (grid) {
+      var head = grid.querySelector('thead tr');
+      if (head) grid.style.setProperty('--head-h', head.getBoundingClientRect().height + 'px');
+      var top = grid.getBoundingClientRect().top + window.scrollY;
+      var offset = top < window.innerHeight * 0.55 ? top : Number(grid.getAttribute('data-fit-offset') || 170);
+      var after = 0;
+      for (var next = grid.nextElementSibling; next; next = next.nextElementSibling) {
+        if (next.offsetParent !== null) after += next.offsetHeight + 8;
+      }
+      grid.style.maxHeight = Math.max(320, window.innerHeight - offset - after - 28) + 'px';
+    });
+  }
+  window.fitGrids = fit;
+  fit();
+  window.addEventListener('resize', fit);
+})();
+</script>
+<script>
+// Columns a person can widen or narrow (the user, 10-10-2026): drag a header's right edge. The
+// first drag fixes every column at the width it has, so nothing jumps; a double-click on the edge
+// gives the table back its automatic widths. Kept per page in this browser — a convenience, so
+// storage that refuses (a private window) only means it is not remembered.
+(function () {
+  var KEY = 'ota-cols:' + location.pathname + ':';
+  function head(t) { return t.tHead && t.tHead.rows[0]; }
+  function name(t, i) { return KEY + (t.id || (t.className.split(' ')[0] + i)); }
+  function cells(t) { return Array.prototype.slice.call(head(t).cells); }
+  function apply(t, widths) {
+    cells(t).forEach(function (c, i) { c.style.width = widths[i] + 'px'; });
+    t.style.width = widths.reduce(function (a, b) { return a + b; }, 0) + 'px';
+    t.classList.add('is-sized');
+  }
+  function freeze(t) {
+    if (!t.classList.contains('is-sized')) apply(t, cells(t).map(function (c) { return c.getBoundingClientRect().width; }));
+  }
+  function save(t, key) {
+    try { localStorage.setItem(key, JSON.stringify(cells(t).map(function (c) { return parseFloat(c.style.width) || 0; }))); }
+    catch (e) { /* not remembered */ }
+  }
+  function reset(t, key) {
+    cells(t).forEach(function (c) { c.style.width = ''; });
+    t.style.width = ''; t.classList.remove('is-sized');
+    try { localStorage.removeItem(key); } catch (e) { /* nothing kept */ }
+  }
+  function setup(t, i) {
+    // A grouped header's first row spans columns, so it has no one cell per column to drag.
+    if (!head(t) || t.classList.contains('grouped') || t.getAttribute('data-resizable') === 'on') return;
+    t.setAttribute('data-resizable', 'on');
+    var key = name(t, i);
+    try {
+      var kept = JSON.parse(localStorage.getItem(key) || 'null');
+      if (kept && kept.length === head(t).cells.length) apply(t, kept);
+    } catch (e) { /* start from the automatic widths */ }
+    cells(t).forEach(function (th) {
+      var grip = document.createElement('span');
+      grip.className = 'col-resize'; grip.setAttribute('aria-hidden', 'true');
+      th.appendChild(grip);
+      grip.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); });
+      grip.addEventListener('dblclick', function (e) { e.preventDefault(); e.stopPropagation(); reset(t, key); });
+      grip.addEventListener('mousedown', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        freeze(t);
+        var x = e.clientX, start = parseFloat(th.style.width), table = parseFloat(t.style.width);
+        document.body.classList.add('is-resizing');
+        function move(ev) {
+          var w = Math.max(44, start + ev.clientX - x);
+          th.style.width = w + 'px'; t.style.width = (table + w - start) + 'px';
+        }
+        function up() {
+          document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+          document.body.classList.remove('is-resizing'); save(t, key);
+        }
+        document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+      });
+    });
+  }
+  function all() { document.querySelectorAll('table.data-grid').forEach(setup); }
+  window.resizableGrids = all;              // a live redraw replaces its table: set it up again
+  all();
+})();
+</script>
+{# One confirmation for every delete, remove and cancel: a form or a submit button carrying
+   data-confirm opens this before it is sent. The item's name comes from data-name and is set as
+   text, never as markup, so a name cannot become part of the page. #}
+<dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h3 id="confirm-title">Delete?</h3>
+    <p id="confirm-text"></p>
+    <div id="confirm-detail" class="confirm-detail"></div>
+    <div class="confirm-actions">
+      <button value="cancel" class="tool-btn" id="confirm-cancel">Cancel</button>
+      <button value="ok" class="btn-danger" id="confirm-ok">Delete</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  var dialog = document.getElementById('confirm-dialog');
+  document.addEventListener('submit', function (event) {
+    var form = event.target, button = event.submitter;
+    var source = button && button.hasAttribute('data-confirm') ? button
+               : form.hasAttribute('data-confirm') ? form : null;
+    if (!source || form.getAttribute('data-confirmed') === '1') return;
+    event.preventDefault();
+    var name = source.getAttribute('data-name') || form.getAttribute('data-name') || '';
+    var message = source.getAttribute('data-confirm').split('{name}').join(name);
+    var action = source.getAttribute('data-confirm-action') || 'Delete';
+    function go() {
+      form.setAttribute('data-confirmed', '1');
+      if (form.requestSubmit) { form.requestSubmit(button || undefined); } else { form.submit(); }
+      form.removeAttribute('data-confirmed');
+    }
+    if (!dialog || !dialog.showModal) {          // no <dialog>: the browser's own box, never none
+      if (window.confirm(message)) go();
+      return;
+    }
+    document.getElementById('confirm-title').textContent = action + '?';
+    document.getElementById('confirm-text').textContent = message;
+    // A summary table, when the page supplies one: a server-rendered <template>, cloned — so
+    // nothing in it is parsed from an attribute.
+    var detail = document.getElementById('confirm-detail');
+    detail.textContent = '';
+    var from = source.getAttribute('data-confirm-detail');
+    var tpl = from ? document.getElementById(from) : null;
+    if (tpl && tpl.content) detail.appendChild(tpl.content.cloneNode(true));
+    dialog.classList.toggle('has-detail', !!detail.firstChild);
+    var ok = document.getElementById('confirm-ok');
+    ok.textContent = action;
+    // Red for what destroys; data-confirm-tone="go" for a confirmation that starts something.
+    ok.className = source.getAttribute('data-confirm-tone') === 'go' ? 'btn-primary' : 'btn-danger';
+    dialog.returnValue = '';
+    dialog.addEventListener('close', function once() {
+      dialog.removeEventListener('close', once);
+      if (dialog.returnValue === 'ok') go();
+    });
+    dialog.showModal();
+    document.getElementById('confirm-cancel').focus();     // the safe choice has the focus
+  }, true);
+})();
 </script>
 {# Pages add their own scripts here — the progress poller on /update, for one. #}
 {% block scripts %}{% endblock %}

@@ -49,7 +49,8 @@ python -m venv .venv
 ```
 
 That creates the database, ingests any exports in `Sample data\`, rebuilds metrics, and opens the
-dashboard at <http://127.0.0.1:8000>. In VS Code, press **F5**.
+dashboard. In VS Code, press **F5**. From source that is <http://127.0.0.1:8100>; the
+packaged release uses <http://127.0.0.1:8000>.
 
 Use `.\.venv\Scripts\python.exe` rather than a bare `python` — several Pythons are usually
 installed and only the venv has the dependencies.
@@ -57,8 +58,13 @@ installed and only the venv has the dependencies.
 ```powershell
 .\.venv\Scripts\python.exe main.py --no-ingest      # serve what is already loaded
 .\.venv\Scripts\python.exe main.py --port 8080
-.\.venv\Scripts\python.exe -m pytest -q             # 484 tests
+.\.venv\Scripts\python.exe -m pytest -q             # 983 tests
 ```
+
+**Running the release and a development copy together.** The packaged release serves on
+<http://127.0.0.1:8000>. A copy run from source serves on <http://127.0.0.1:8100>, wears a
+**DEV** badge, and keeps its own database (`data\` in the repo) and its own login cookie. Start
+both and neither defers to the other. `OTA_CHANNEL=release` or `dev` overrides the guess.
 
 ## How the data works
 
@@ -132,7 +138,7 @@ have been doing. `--allow-interleave` does it properly, but rebuilds everything 
 ```
 
 Produces `dist\InTouchOTA-Analytics-v<version>.zip` (~27 MB), which unpacks to a folder of the
-same name, e.g. `InTouchOTA-Analytics-v1.9.1\`. The recipient unpacks it anywhere and runs
+same name, e.g. `InTouchOTA-Analytics-v2.1.0\`. The recipient unpacks it anywhere and runs
 `InTouchOTA-Analytics.exe` — no Python, no install. It is the only executable in the release.
 
 **The app is portable: its database lives in a `data` folder beside the .exe.** Copy the folder
@@ -195,6 +201,31 @@ Every per-snapshot query keeps its own `WHERE snapshot_id = ?`, so a mismatched 
 nothing rather than the wrong rows. `tests/test_db_performance.py` fails if a fetch or a page
 starts resolving the view again.
 
+## Intouch COTA — configuration over the air (2.0.0, in progress)
+
+A second module, beside the analytics, that **sends** configuration commands to devices through
+the InTouch cloud's COTA API (ctvms IntouchAdminApi) and records what each device answers. It
+shares nothing with the snapshot warehouse. It has its own tables, its own device map
+(cloud device id ↔ IMEI) and its own sign-in, kept in the credential store like the platform
+password.
+
+- **Configure**: a conversation with one device. Send a command, see it accepted (✓), listed by
+  the cloud (white ✓✓) and answered by the device (green ✓✓). Or run a **sequence**, several
+  commands one at a time — 30 s for an answer, up to 3 attempts, then the next command.
+- **Jobs**: the same sequence for many devices, up to the whole fleet. The page opens on today's
+  dashboard — tiles, outcomes per job, answers per hour — and today's jobs; *New job* chooses the devices by group, by typed ids, or from a CSV of `id,trackingCode`
+  (*Download template* gives the format), names each command as it is typed, and previews the
+  plan before anything is sent. The job page shows progress as tiles and graphs (outcome split, time to
+  answer, answered on which attempt), a command summary, and every device — each unfolds to its own conversation — with pause, resume,
+  cancel, duplicate, rerun of the unanswered devices, and export.
+- **Commands**: your names for parameters (`6C0A` → a name) and for whole commands, with tags —
+  every page and export reads them, and Configure and Jobs pick saved commands from a list.
+- **Devices**: send one command to a list, load the device map, save groups.
+
+The COTA record lives for the day: the first COTA page opened on a later day clears the earlier
+days. Groups and the device map are kept. See [COTA.md](COTA.md) for the cloud API, the rules
+agreed for sending, the scale figures and the open questions.
+
 ## Hosting it
 
 Runs on anything: peak memory for a full 35,475-device fetch is **25 MB**. At an hourly cadence the
@@ -219,13 +250,16 @@ Set the passwords with `python -m ota_analytics.cli passwd --role admin`.
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Running it for a team, locally or in the cloud |
 | [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) | Phases and scope |
 | [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Module-level detail |
+| [COTA.md](COTA.md) | Intouch COTA: the cloud API, sending rules, scale, open questions |
 
 ## Status
 
 Working: ingest (`.xlsx` and `.csv`, columns matched by name), snapshot diffing, the dashboard,
 data-quality rules, scheduled fetching, retention, XLSX reports, authentication, database
 identity plus snapshot bundles for keeping two installs in sync, progress reporting for long
-jobs, and a packaged Windows build. AI-written insight summaries are the next phase.
+jobs, and a packaged Windows build. Intouch COTA (2.0.0) sends configuration commands — one
+device, a sequence, or a fleet job — and is being tested live; how a job treats a switched-off
+device is the open question (COTA.md). AI-written insight summaries are the next phase.
 
 Next up: consistent table behaviour across every list — page size, pinned headers, per-column
 filter and sort, and search — starting with **Firmware moves** on the Changes page.

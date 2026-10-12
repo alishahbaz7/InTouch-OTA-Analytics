@@ -176,7 +176,7 @@ def check_exposure(host: str) -> None:
     print(f"\nthen put the printed line in the environment as {auth.ENV_ADMIN_HASH}, or run on\n"
           "127.0.0.1 for local-only use.", file=sys.stderr)
     raise SystemExit(2)
-DEFAULT_PORT = 8000
+DEFAULT_PORT = config.DEFAULT_PORT      # 8000 for the release, 8100 from source
 
 
 def load_new_exports() -> int:
@@ -371,7 +371,18 @@ def already_serving(host: str, port: int, timeout: float = 1.5) -> bool:
         return False
     # Matched as text rather than parsed: /healthz is a fixed, tiny document, and the marker is
     # specific enough that nothing else would answer with it on loopback.
-    return APP_MARKER in body
+    if APP_MARKER not in body:
+        return False
+    # Defer only to a copy of the same channel. The release and a source copy are meant to run
+    # side by side; a dev launch that found the release on its port and opened *that* instead
+    # would look like the code change had not taken. A copy too old to report a channel is
+    # treated as the release, which is the only kind that existed then.
+    import json
+    try:
+        theirs = json.loads(body).get("channel") or "release"
+    except ValueError:
+        theirs = "release"
+    return theirs == config.CHANNEL
 
 
 def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
@@ -476,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             webbrowser.open(url)
         return 0
 
-    print("InTouch OTA Analytics")
+    print(f"InTouch OTA Analytics ({config.CHANNEL})")
     print(f"  database   {config.DB_PATH}")
     print(f"  exports    {config.EXPORT_DIR}")
 

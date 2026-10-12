@@ -487,7 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the dashboard")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=int, default=config.DEFAULT_PORT)
     p.add_argument("--reload", action="store_true")
     p.set_defaults(func=cmd_serve)
 

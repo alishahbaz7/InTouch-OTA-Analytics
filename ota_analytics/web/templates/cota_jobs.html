@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_cota_charts.html" import took, outcome_bar, answer_hours %}
+{% block title %}Jobs — Intouch COTA{% endblock %}
+
+{% block content %}
+{% if result %}<div class="notice notice-{{ result.level }}">{{ result.message }}</div>{% endif %}
+{% if live %}
+<div class="notice notice-warn" data-tip="One job runs at a time.">Job #{{ live.id }} “{{ live.name }}” is {{ live.state }}.
+  <a href="/cota/jobs/{{ live.id }}">Open it</a></div>
+{% endif %}
+
+{% if today %}
+{%- set t = today -%}
+{% with t = today %}{% include "_cota_today_tiles.html" %}{% endwith %}
+
+<div class="chart-grid dash-charts">
+  <figure class="chart-card card">
+    <figcaption><span data-tip="Green answered, amber waiting, red failed, grey expired; the empty part is not sent yet.">Outcomes per job</span></figcaption>
+    <div class="job-bars">
+      {% for j in t.per_job %}
+      <a class="job-bar-row" href="/cota/jobs/{{ j.id }}">
+        <span class="job-bar-label"><span class="dim">#{{ j.id }}</span> {{ j.name }}</span>
+        {{ outcome_bar(j.segments, j.total) }}
+        <span class="job-bar-value">{{ (j.segments | selectattr('key', 'equalto', 'done') | map(attribute='value') | first) | comma }}/{{ j.total | comma }}</span>
+      </a>
+      {% endfor %}
+    </div>
+  </figure>
+  <figure class="chart-card card">
+    <figcaption><span data-tip="Today, by the hour each command finished: answered in green, failed in red, the share answered above. The current hour is hatched.">Answers per hour</span></figcaption>
+    {% if t.answered and hours %}
+    {{ answer_hours(hours) }}
+    {% else %}
+    <p class="chart-empty">No answers yet today.</p>
+    {% endif %}
+  </figure>
+</div>
+{% endif %}
+
+<section class="card">
+  <div class="list-head">
+    <h2><span data-tip="Today's jobs. The record clears when the app starts on a new day; groups and saved commands stay.">Jobs</span></h2>
+    <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
+  </div>
+  {% if jobs %}
+  <div class="table-wrap">
+  <table class="job-list data-grid">
+    <thead><tr><th class="fit">#</th><th class="fit">Name</th><th class="n fit">Devices</th><th>Commands</th><th class="fit">State</th>
+      <th class="fit">Progress</th><th class="n fit">Answered</th><th class="n fit">Failed</th><th class="n fit">Expired</th>
+      <th class="fit">Started</th><th class="n fit">Duration</th></tr></thead>
+    <tbody>
+      {% for j in jobs %}
+      <tr>
+        <td class="dim">{{ j.id }}</td>
+        <td><a href="/cota/jobs/{{ j.id }}">{{ j.name }}</a></td>
+        <td class="n">{{ j.devices | comma }}</td>
+        <td>
+          <span class="step-chain">
+            {%- for name in j.names %}{% if not loop.first %}{{ icon('chevron-right') }}{% endif %}<span>{{ name }}</span>{% endfor -%}
+          </span>
+        </td>
+        <td>{% if j.ended_by_limit %}<span class="pill pill-job-limit" data-tip="{{ j.pause_reason or '' }}">time limit</span>{% else %}<span class="pill pill-job-{{ j.state }}">{{ j.state }}</span>{% endif %}</td>
+        <td>
+          <span class="mini-progress" title="{{ j.finished | comma }} of {{ j.total | comma }} device commands finished">
+            <span class="job-track"><span class="job-fill" style="width: {{ j.percent }}%"></span></span>
+            <span class="mini-pct">{{ j.percent }}%</span>
+          </span>
+        </td>
+        <td class="n ok-text">{{ j.results.get('done', 0) | comma }}</td>
+        <td class="n {{ 'bad-text' if j.results.get('failed') }}">{{ j.results.get('failed', 0) | comma }}</td>
+        <td class="n dim">{{ j.results.get('expired', 0) | comma }}</td>
+        <td class="dim small">{{ j.started_at[11:16] if j.started_at }}</td>
+        <td class="n dim small">{{ took(j.duration_seconds) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p>No jobs today.</p>
+    <a class="btn-primary btn-icon" href="/cota/jobs/new">{{ icon('plus') }}<span>New job</span></a>
+  </div>
+  {% endif %}
+</section>
+
+{% if sends %}
+<section class="card">
+  <h2><span data-tip="One command sent once, from the Devices page.">Single sends</span></h2>
+  <div class="table-wrap">
+  <table class="data-grid">
+    <thead><tr><th class="fit">#</th><th>Name</th><th class="n fit">Devices</th><th class="n fit">Accepted</th>
+      <th class="n fit">Refused</th><th class="fit">Sent</th></tr></thead>
+    <tbody>
+      {% for s in sends %}
+      <tr>
+        <td class="dim">{{ s.id }}</td>
+        <td>{{ s.name }}</td>
+        <td class="n">{{ (s.devices or 0) | comma }}</td>
+        <td class="n ok-text">{{ (s.sent or 0) | comma }}</td>
+        <td class="n {{ 'bad-text' if s.send_failed }}">{{ (s.send_failed or 0) | comma }}</td>
+        <td class="dim small">{{ s.created_at[11:16] if s.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

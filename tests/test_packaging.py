@@ -262,8 +262,10 @@ def test_healthz_identifies_the_app_without_revealing_data():
 
     assert payload["app"] == api.APP_ID
     assert payload["status"] == "ok"
-    # It is public and unauthenticated, so it must stay free of anything about the fleet.
-    assert set(payload) == {"status", "app"}
+    # It is public and unauthenticated, so it must stay free of anything about the fleet. The
+    # channel is about this copy of the program, not the data, and a new launch needs it to
+    # tell the release from a source copy running beside it.
+    assert set(payload) == {"status", "app", "channel"}
 
 
 def test_a_second_launch_opens_the_running_copy(monkeypatch):

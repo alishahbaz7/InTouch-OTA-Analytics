@@ -114,6 +114,21 @@ def test_a_narrow_window_excludes_older_moves(history):
     assert summary["fallbacks"] == 0
 
 
+def test_the_fallback_list_follows_the_window_the_tile_counts(history):
+    """09-10-2026: "Today" picked, the tile said 6 fallbacks and the list showed 271 — every one
+    ever recorded. The list, its count and its model chips now take the same period."""
+    at = lambda hours: (BASE + timedelta(hours=hours)).isoformat(sep=" ", timespec="seconds")
+    for since, until in ((at(1.5), None), (None, at(0.5)), (at(0.5), at(1.5)), (None, None)):
+        tile = registry.movement_summary(history, since, until)["fallbacks"]
+        listed = registry.fallbacks(history, since=since, until=until)
+        assert len(listed) == registry.fallback_count(history, since=since, until=until) == tile
+        assert sum(m["events"] for m in registry.fallback_models(history, since, until)) == tile
+    assert [f["imei"] for f in registry.fallbacks(history, since=at(0.5), until=at(1.5))] == ["faller"]
+    assert registry.fallbacks(history, since=at(1.5)) == []
+    # How many times the device has fallen back stays its whole history, whatever the period.
+    assert registry.fallbacks(history, since=at(0.5))[0]["times"] == 1
+
+
 def test_yesterday_has_an_upper_bound():
     """The one window that must not include today."""
     since, until = registry.window_range("yesterday", now=datetime(2026, 8, 15, 12, 0))
