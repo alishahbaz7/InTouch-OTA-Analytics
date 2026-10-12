@@ -3,13 +3,14 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
 RELEASED = "2026-10-12"
 CODENAME = "relay"
 
 VERSION_HISTORY = [
+    ("2.1.1", "2026-10-12", "Fixes and refinements after 2.1.0"),
     ("2.1.0", "2026-10-12", "One design through the application: Web FOTA on the Intouch COTA "
                             "tables, tiles and list filters; a Devices list to manage the "
                             "COTA fleet — filters and sort on every column, groups, tags; a "

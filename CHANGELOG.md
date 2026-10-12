@@ -5,6 +5,12 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 2.1.1 — in development
+
+Fixes and refinements after 2.1.0.
+
+---
+
 ## 2.1.0 — 2026-10-12
 
 Built on 2.0.2 from the user's reviews of 9–12 Oct 2026 and the field jobs that a fixed hour cut
