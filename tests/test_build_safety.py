@@ -153,8 +153,8 @@ def test_the_version_resource_matches_the_code():
             assert f"filevers=({parts})" in body
             assert f"StringStruct('FileVersion', '{__version__}')" in body
             assert f"StringStruct('ProductVersion', '{__version__}')" in body
-            # Each executable names itself, so Explorer and Task Manager tell them apart.
-            assert f"StringStruct('OriginalFilename', '{internal}.exe')" in body
+            # The program is named for the release, like the zip and the folder (12-10-2026).
+            assert f"StringStruct('OriginalFilename', '{build_module.release_name()}.exe')" in body
             # ASCII only: these strings go into a Windows resource, and there is no reason to
             # risk an encoding there for a dash.
             assert body.isascii(), f"{path.name} carries non-ASCII"
@@ -182,15 +182,21 @@ def test_the_resource_is_a_valid_version_structure():
             path.unlink(missing_ok=True)
 
 
-def test_the_executable_name_stays_unversioned():
-    """The release folder and the zip carry the version; the .exe does not.
+def test_the_program_and_its_folder_carry_the_release_name():
+    """The zip, the folder and the program are one name — `InTouchOTA-Analytics-v<version>` (the
+    user, 12-10-2026: "use the same name as the zip for the folder and the utility"). The spec
+    derives it from __version__, as build.release_name() does, so they cannot disagree."""
+    from ota_analytics import __version__
 
-    An executable renamed at every release breaks shortcuts and pinned taskbar icons at every
-    upgrade, for no information the folder name does not already give.
-    """
     spec = Path(__file__).resolve().parent.parent / "InTouchOTA-Analytics.spec"
     body = spec.read_text(encoding="utf-8")
-    assert "name=NAME," in body                       # not name=f"{NAME}-v{version}"
+    assert "from ota_analytics import __version__" in body
+    assert 'RELEASE = f"{NAME}-v{__version__}"' in body
+    assert body.count("name=RELEASE,") == 2           # the program and its folder
+    assert "name=NAME," not in body
+    assert build_module.DIST.name == build_module.release_name() == f"InTouchOTA-Analytics-v{__version__}"
+    source = Path(build_module.__file__).read_text(encoding="utf-8")
+    assert 'console = DIST / f"{release_name()}.exe"' in source
 
 
 # ─── what a release is called, and what is in it ────────────────────────────
@@ -247,3 +253,84 @@ def test_a_release_zip_from_either_naming_is_treated_as_build_output(tmp_path, m
     monkeypatch.setattr(build_module, "ROOT", tmp_path)
     monkeypatch.setattr(build_module, "DIST", app)
     assert build_module.user_files() == []
+
+
+# ─── the data moves with the program (12-10-2026) ───────────────────────────
+#
+# The program folder in dist\ is named for the release now, and this install keeps its database
+# inside it. A build must carry the user's files from the previous folder into the new one — or
+# the new release opens on an empty database while the history sits under the old name.
+
+def _app(root: Path, name: str, exe: str) -> Path:
+    app = root / name
+    (app / "data").mkdir(parents=True)
+    (app / "_internal").mkdir()
+    (app / "data" / "ota_analytics.db").write_bytes(b"the fleet history")
+    (app / exe).write_bytes(b"MZ")
+    (app / "READ ME FIRST.txt").write_text("hello", encoding="utf-8")
+    return app
+
+
+def _point_build_at(tmp_path, monkeypatch, release: str) -> Path:
+    new = tmp_path / "dist" / release
+    monkeypatch.setattr(build_module, "ROOT", tmp_path)
+    monkeypatch.setattr(build_module, "DIST", new)
+    monkeypatch.setattr(build_module, "PRESERVE", tmp_path / ".build-preserved-data")
+    return new
+
+
+def _build_over(tmp_path, new: Path, exe: str) -> None:
+    parked = build_module.rescue_data()
+    build_module.clear(tmp_path / "dist")
+    new.mkdir(parents=True)                               # what PyInstaller writes
+    (new / exe).write_bytes(b"MZ")
+    build_module.restore_data(parked)
+
+
+@pytest.mark.parametrize("old_name, old_exe", [
+    ("InTouchOTA-Analytics", "InTouchOTA-Analytics.exe"),                   # before 2.1.1
+    ("InTouchOTA-Analytics-v2.1.1", "InTouchOTA-Analytics-v2.1.1.exe"),     # an earlier release
+])
+def test_the_users_data_moves_into_the_new_release_folder(tmp_path, monkeypatch, old_name, old_exe):
+    _app(tmp_path / "dist", old_name, old_exe)
+    new = _point_build_at(tmp_path, monkeypatch, "InTouchOTA-Analytics-v2.1.2")
+
+    theirs = {p.relative_to(tmp_path / "dist").as_posix() for p in build_module.user_files()}
+    assert theirs == {f"{old_name}/data"}                 # the old program is the build's own
+    _build_over(tmp_path, new, "InTouchOTA-Analytics-v2.1.2.exe")
+
+    assert (new / "data" / "ota_analytics.db").read_bytes() == b"the fleet history"
+    assert not (tmp_path / "dist" / old_name).exists()    # the old program is gone, not the data
+    assert not (tmp_path / ".build-preserved-data").exists()
+
+
+def test_rebuilding_the_same_release_keeps_its_data_in_place(tmp_path, monkeypatch):
+    _app(tmp_path / "dist", "InTouchOTA-Analytics-v2.1.2", "InTouchOTA-Analytics-v2.1.2.exe")
+    new = _point_build_at(tmp_path, monkeypatch, "InTouchOTA-Analytics-v2.1.2")
+    _build_over(tmp_path, new, "InTouchOTA-Analytics-v2.1.2.exe")
+    assert (new / "data" / "ota_analytics.db").read_bytes() == b"the fleet history"
+
+
+def test_two_program_folders_holding_data_stop_the_build(tmp_path, monkeypatch):
+    """Which database is the live one cannot be guessed — the build says so and touches nothing."""
+    _app(tmp_path / "dist", "InTouchOTA-Analytics", "InTouchOTA-Analytics.exe")
+    _app(tmp_path / "dist", "InTouchOTA-Analytics-v2.1.1", "InTouchOTA-Analytics-v2.1.1.exe")
+    _point_build_at(tmp_path, monkeypatch, "InTouchOTA-Analytics-v2.1.2")
+
+    with pytest.raises(SystemExit) as raised:
+        build_module.rescue_data()
+    assert "More than one program folder" in str(raised.value)
+    for name in ("InTouchOTA-Analytics", "InTouchOTA-Analytics-v2.1.1"):
+        assert (tmp_path / "dist" / name / "data" / "ota_analytics.db").exists()
+    assert not (tmp_path / ".build-preserved-data").exists()
+
+
+def test_the_release_database_is_guarded_in_any_release_folder():
+    """Tests may never open this machine's release database — in the old folder or a versioned one."""
+    from tests.conftest import _REPO, _is_live_database
+
+    dist = _REPO / "dist"
+    for folder in ("InTouchOTA-Analytics", "InTouchOTA-Analytics-v2.1.1", "InTouchOTA-Analytics-v3.0.0"):
+        assert _is_live_database((dist / folder / "data" / "ota_analytics.db").resolve())
+    assert _is_live_database((_REPO / "data" / "ota_analytics.db").resolve())
+    assert not _is_live_database((dist / "backup-1.9.0" / "ota_analytics.db").resolve())

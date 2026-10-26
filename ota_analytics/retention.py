@@ -148,6 +148,18 @@ def _carry_state_forward(conn: sqlite3.Connection, remove: list[int]) -> None:
         conn.execute("UPDATE device_snapshot SET snapshot_id = ? WHERE snapshot_id = ?",
                      (survivor["id"], snapshot_id))
 
+        # Last pings move by the same rule, on their own: they resolve independently of the
+        # device rows, so a ping on the doomed snapshot survives unless the survivor has a newer
+        # one for that device, whatever happened to the device's other values.
+        conn.execute("""
+            DELETE FROM device_seen
+            WHERE snapshot_id = ?
+              AND EXISTS (SELECT 1 FROM device_seen k
+                          WHERE k.snapshot_id = ? AND k.imei = device_seen.imei)
+        """, (snapshot_id, survivor["id"]))
+        conn.execute("UPDATE device_seen SET snapshot_id = ? WHERE snapshot_id = ?",
+                     (survivor["id"], snapshot_id))
+
         # The change log moves with them. It has no foreign key to `snapshot`, so its rows would
         # survive either way — but pointing at a snapshot id that no longer exists is the kind
         # of quiet inconsistency that later reads as data loss. `changed_at` is untouched, so
@@ -302,6 +314,7 @@ RENUMBER_OFFSET = 1_000_000_000
 # Tables carrying a snapshot id that is cheaper to remap than to rebuild.
 RENUMBER_TABLES = [
     ("device_snapshot", "snapshot_id"),
+    ("device_seen", "snapshot_id"),
     ("device_group", "snapshot_id"),
     ("quality_issue", "snapshot_id"),
     ("insight", "snapshot_id"),
@@ -321,6 +334,17 @@ def device_columns(conn: sqlite3.Connection) -> list[str]:
     """
     return [r["name"] for r in conn.execute("PRAGMA table_info(device_snapshot)")
             if r["name"] != "snapshot_id"]
+
+
+def row_columns(conn: sqlite3.Connection) -> list[str]:
+    """A device row as it is exchanged: device_snapshot's columns plus the last ping.
+
+    The ping has its own table (v23), but a bundle still carries one self-contained row per
+    device per change, exactly as before the split — so a bundle from either side of it reads on
+    the other, and the receiver splits the rows by its own layout.
+    """
+    columns = device_columns(conn)
+    return columns if "seen_at" in columns else [*columns, "seen_at"]
 
 
 def densify(conn: sqlite3.Connection, snapshot_id: int) -> int:
@@ -343,7 +367,21 @@ def densify(conn: sqlite3.Connection, snapshot_id: int) -> int:
         WHERE d.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
                                WHERE x.imei = d.imei AND x.snapshot_id <= ?)
     """, (snapshot_id, snapshot_id))
-    return cursor.rowcount
+    added = cursor.rowcount
+
+    # The last ping too, for every device present here — an explicit NULL included for one that
+    # has never pinged. Inheriting "no ping yet" is still inheriting: a foreign snapshot landing
+    # before this one with a ping for that device would otherwise become this snapshot's answer.
+    # Runs after the rows above, so device_snapshot here now names every device.
+    cursor = conn.execute("""
+        INSERT OR IGNORE INTO device_seen (imei, snapshot_id, seen_at)
+        SELECT d.imei, ?1, (SELECT p.seen_at FROM device_seen p
+                            WHERE p.imei = d.imei AND p.snapshot_id <= ?1
+                            ORDER BY p.snapshot_id DESC LIMIT 1)
+        FROM device_snapshot d
+        WHERE d.snapshot_id = ?1 AND d.present = 1
+    """, (snapshot_id,))
+    return added + cursor.rowcount
 
 
 def compact(conn: sqlite3.Connection, since_snapshot_id: int | None = None) -> int:
@@ -351,9 +389,19 @@ def compact(conn: sqlite3.Connection, since_snapshot_id: int | None = None) -> i
 
     Same statement the v6 migration used, which took the sample database from 384 MB to 50 MB.
     Scoping it to a snapshot id limits the *deletion*, not the lookup: the oldest row in the
-    window is still compared against its real predecessor outside it.
+    window is still compared against its real predecessor outside it. Both tables: device rows,
+    then last pings.
     """
-    columns = [c for c in device_columns(conn) if c not in ("imei", DERIVED_COLUMN)]
+    return (compact_rows(conn, since_snapshot_id)
+            + compact_seen(conn, since_snapshot_id))
+
+
+def compact_rows(conn: sqlite3.Connection, since_snapshot_id: int | None = None, *,
+                 ignore: tuple[str, ...] = ()) -> int:
+    """device_snapshot's half of `compact`. `ignore` leaves columns out of the comparison — the
+    v23 migration uses it to drop rows that differed from the last one only in their ping."""
+    columns = [c for c in device_columns(conn)
+               if c not in ("imei", DERIVED_COLUMN, *ignore)]
     if not columns:
         return 0
 
@@ -372,6 +420,26 @@ def compact(conn: sqlite3.Connection, since_snapshot_id: int | None = None) -> i
                                  WHERE y.imei = device_snapshot.imei
                                    AND y.snapshot_id < device_snapshot.snapshot_id)
             AND {unchanged})
+    """, params)
+    return cursor.rowcount
+
+
+def compact_seen(conn: sqlite3.Connection, since_snapshot_id: int | None = None) -> int:
+    """Drop last-ping rows equal to the same device's previous one.
+
+    No previous row counts as NULL, so an explicit "never pinged" that nothing precedes goes too:
+    resolving reads it as NULL either way. Scoped like `compact`.
+    """
+    scope, params = "", []
+    if since_snapshot_id is not None:
+        scope = "snapshot_id >= ? AND "
+        params = [since_snapshot_id]
+    cursor = conn.execute(f"""
+        DELETE FROM device_seen
+        WHERE {scope}seen_at IS (SELECT p.seen_at FROM device_seen p
+                                 WHERE p.imei = device_seen.imei
+                                   AND p.snapshot_id < device_seen.snapshot_id
+                                 ORDER BY p.snapshot_id DESC LIMIT 1)
     """, params)
     return cursor.rowcount
 

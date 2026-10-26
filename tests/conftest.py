@@ -79,12 +79,20 @@ def make_csv(tmp_path: Path):
     return _make
 
 
-# This machine's own databases: the dev copy's beside the repo, and the release's in dist/. A
-# test that forgot to point the database at a temp file opened the dev one and migrated it — so
-# opening either is now a failure, not a quiet write to someone's live history.
+# This machine's own databases: the dev copy's beside the repo, and the release's in dist/ — in
+# `InTouchOTA-Analytics\` before 2.1.1, in `InTouchOTA-Analytics-v<version>\` since. A test that
+# forgot to point the database at a temp file opened the dev one and migrated it — so opening any
+# of them is now a failure, not a quiet write to someone's live history.
 _REPO = Path(__file__).resolve().parent.parent
-_LIVE_DATABASES = {(_REPO / "data" / "ota_analytics.db").resolve(),
-                   (_REPO / "dist" / "InTouchOTA-Analytics" / "data" / "ota_analytics.db").resolve()}
+
+
+def _is_live_database(target: Path) -> bool:
+    if target == (_REPO / "data" / "ota_analytics.db").resolve():
+        return True
+    dist = (_REPO / "dist").resolve()
+    return (target.name == "ota_analytics.db" and target.parent.name == "data"
+            and target.parent.parent.parent == dist
+            and target.parent.parent.name.startswith("InTouchOTA-Analytics"))
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +170,7 @@ def never_the_live_database(isolated_data, monkeypatch):
 
     def guarded(db_path=None, **kwargs):
         target = Path(db_path or config.DB_PATH).resolve()
-        if target in _LIVE_DATABASES:
+        if _is_live_database(target):
             pytest.fail(f"a test opened the live database {target} — use the `client` or "
                         "`conn` fixture, which point it at a temp file")
         return real_connect(db_path, **kwargs)

@@ -111,6 +111,11 @@ DEVICE_COLUMNS = (
     "base_config",
 )
 
+# What device_snapshot stores: everything but the last ping (v23). A device pings on nearly every
+# fetch, and while seen_at sat in that table 86.8% of all rows on the live database were a full
+# copy of a device written to record one timestamp. It has its own narrow table, device_seen.
+SNAPSHOT_COLUMNS = tuple(c for c in DEVICE_COLUMNS if c != "seen_at")
+
 # Rows are collected here first, then compared against stored state in one statement rather than
 # one query per device — 35,000 round trips per fetch would cost more than the writes they save.
 CREATE_STAGE = f"""
@@ -173,14 +178,16 @@ def insert_changed_sql(provided: set[str], prev_table: str = "device_state") -> 
 
     So an unsent column keeps the value already on record, and is excluded from the comparison
     that decides whether anything moved: a value this fetch never reported cannot have changed.
+
+    The last ping is not part of this row at all — see SEEN_SQL.
     """
-    carried = [c for c in DEVICE_COLUMNS if c not in provided and c != "imei"]
+    carried = [c for c in SNAPSHOT_COLUMNS if c not in provided and c != "imei"]
     values = ", ".join(("s." + c) if c in provided or c == "imei" else ("prev." + c)
-                       for c in DEVICE_COLUMNS)
+                       for c in SNAPSHOT_COLUMNS)
 
     # `IS` rather than `=` so NULL compares equal to NULL — most devices have several null
     # columns, and `=` would call every one of them a change.
-    compared = [c for c in DEVICE_COLUMNS if c != "imei" and c in provided]
+    compared = [c for c in SNAPSHOT_COLUMNS if c != "imei" and c in provided]
     unchanged = " AND ".join(f"p.{c} IS s.{c}" for c in compared) or "1"
 
     join = ""
@@ -191,7 +198,7 @@ def insert_changed_sql(provided: set[str], prev_table: str = "device_state") -> 
                 "ON prev.snapshot_id = ?2 AND prev.imei = s.imei")
 
     return f"""
-INSERT OR IGNORE INTO device_snapshot (snapshot_id, present, {', '.join(DEVICE_COLUMNS)})
+INSERT OR IGNORE INTO device_snapshot (snapshot_id, present, {', '.join(SNAPSHOT_COLUMNS)})
 SELECT ?1, 1, {values}
 FROM stage_device s
 {join}
@@ -220,6 +227,19 @@ WHERE d.snapshot_id = ?2
   AND NOT EXISTS (SELECT 1 FROM stage_device s WHERE s.imei = d.imei)
 """
 
+# A new last-ping time for every device whose last one moved — ~45 bytes each, where the same
+# fact used to cost a copy of the whole device. Compared with the device's newest row in
+# device_seen, and a device with none compares as NULL: one that has never pinged writes nothing
+# until it does. Only when the source sent a last ping at all — an unsent one is unknown, not empty.
+SEEN_SQL = """
+INSERT OR IGNORE INTO device_seen (imei, snapshot_id, seen_at)
+SELECT s.imei, ?1, s.seen_at
+FROM stage_device s
+WHERE s.seen_at IS NOT (SELECT p.seen_at FROM device_seen p
+                        WHERE p.imei = s.imei AND p.snapshot_id < ?1
+                        ORDER BY p.snapshot_id DESC LIMIT 1)
+"""
+
 
 class IngestError(Exception):
     """Raised when a file cannot be ingested at all."""
@@ -234,6 +254,7 @@ class IngestResult:
     ts_source: str = "filename"
     rows: int = 0            # devices the fetch reported — the fleet size, not what was stored
     changed_rows: int = 0    # rows actually written: what changed, plus any tombstones
+    seen_rows: int = 0       # last-ping times that moved (device_seen), counted apart
     groups: int = 0
     skipped_no_imei: int = 0
     duplicate_imei: int = 0
@@ -296,8 +317,9 @@ def _open_stage(cursor: sqlite3.Cursor) -> None:
 
 
 def _store_devices(conn: sqlite3.Connection, cursor: sqlite3.Cursor, snapshot_id: int,
-                   provided: set[str]) -> int:
-    """Write the staged fetch as change rows plus tombstones. Returns rows actually stored.
+                   provided: set[str]) -> tuple[int, int]:
+    """Write the staged fetch as change rows plus tombstones, and the last pings that moved.
+    Returns (device rows stored, ping rows stored).
 
     This is where a fetch stops costing one row per device. Everything the fetch reported is in
     stage_device; only what differs from the last stored row for that device is kept. `provided`
@@ -326,12 +348,17 @@ def _store_devices(conn: sqlite3.Connection, cursor: sqlite3.Cursor, snapshot_id
         cursor.execute(TOMBSTONES_SQL.format(prev=prev_table), (snapshot_id, previous))
         stored += cursor.rowcount
 
+    seen = 0
+    if "seen_at" in provided:
+        cursor.execute(SEEN_SQL, (snapshot_id,))
+        seen = cursor.rowcount
+
     cursor.execute("DELETE FROM stage_device")
     # Dropped rather than left behind, for the same reason registry drops `_state`: the
     # scheduler holds one connection for the life of a fetch and this is a full copy of the
     # fleet. It is only ever built at all when the resolved copy could not answer.
     cursor.execute("DROP TABLE IF EXISTS _prev")
-    return stored
+    return stored, seen
 
 
 def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
@@ -503,13 +530,31 @@ def ingest_file(conn: sqlite3.Connection, path: Path, job=None) -> IngestResult:
             result.groups += len(group_batch)
         if job:
             job.begin("Storing what changed", detail=f"{result.rows:,} devices")
-        result.changed_rows = _store_devices(conn, cursor, snapshot_id, provided_columns(mapping))
+        result.changed_rows, result.seen_rows = _store_devices(
+            conn, cursor, snapshot_id, provided_columns(mapping))
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
     conn.execute(
         "UPDATE snapshot SET row_count = ?, skipped_rows = ?, duration_ms = ? WHERE id = ?",
         (result.rows, result.skipped_no_imei, result.duration_ms, snapshot_id),
     )
+    _fold_in(conn, snapshot_id, result, job, ts_source=result.ts_source, from_report=from_report)
+    return result
+
+
+def _fold_in(conn: sqlite3.Connection, snapshot_id: int, result: IngestResult, job, *,
+             ts_source: str, from_report: bool = False) -> None:
+    """Everything after a fetch's rows are stored, in the order that makes each step cheap.
+
+    The resolved newest snapshot is moved forward FIRST. Quality and the registry both read the
+    snapshot just stored, and with `device_current` still holding the previous one, each had to
+    resolve it from scratch — two full resolutions per fetch, 0.8-2.5s on the live database,
+    for a result that advancing produces anyway from only what this fetch changed (~3,000 rows).
+    Advancing here also keeps resolution off the request path: a page that had to resolve the
+    new snapshot would do it again on the next request, because each one opens its own
+    connection.
+    """
+    current.advance(conn, snapshot_id)
 
     if job:
         job.begin("Checking data quality")
@@ -518,24 +563,18 @@ def ingest_file(conn: sqlite3.Connection, path: Path, job=None) -> IngestResult:
         skipped_no_imei=result.skipped_no_imei,
         duplicate_imei=result.duplicate_imei,
         unknown_columns=result.unknown_columns,
-        ts_source=result.ts_source,
+        ts_source=ts_source,
         from_report=from_report,
     )
     conn.commit()
     if job:
         job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
     registry.apply_snapshot(conn, snapshot_id)
-    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
-    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
-    # that itself would do it again on the next request, because each one opens its own
-    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
-    current.advance(conn, snapshot_id)
     conn.commit()
     # Statistics drift as history accumulates, and a stale plan is what made the registry step
     # take minutes. Refreshed here because a fetch is the only thing that adds bulk, and because
     # this is a write path already — PRAGMA optimize writes, so it may never run on a read.
     db.refresh_statistics(conn)
-    return result
 
 
 def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
@@ -636,34 +675,15 @@ def ingest_records(conn: sqlite3.Connection, records: list[dict], *,
         result.groups += len(group_batch)
     if job:
         job.begin("Storing what changed", detail=f"{result.rows:,} devices")
-    result.changed_rows = _store_devices(conn, cursor, snapshot_id, provided_columns(mapping))
+    result.changed_rows, result.seen_rows = _store_devices(
+        conn, cursor, snapshot_id, provided_columns(mapping))
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
     conn.execute("UPDATE snapshot SET row_count = ?, skipped_rows = ?, duration_ms = ? "
                  "WHERE id = ?",
                  (result.rows, result.skipped_no_imei, result.duration_ms, snapshot_id))
-
-    if job:
-        job.begin("Checking data quality")
-    result.findings = quality.run_rules(
-        conn, snapshot_id, skipped_no_imei=result.skipped_no_imei,
-        duplicate_imei=result.duplicate_imei, unknown_columns=result.unknown_columns,
-        ts_source="filename",   # an API timestamp is exact, so no "guessed time" warning
-    )
-    conn.commit()
-    if job:
-        job.begin("Updating the device registry", detail=f"{result.rows:,} devices")
-    registry.apply_snapshot(conn, snapshot_id)
-    # Move the resolved newest snapshot forward while we are already writing. Doing it here is
-    # what keeps it off the request path: resolving it costs seconds, and a page that had to do
-    # that itself would do it again on the next request, because each one opens its own
-    # connection. Advancing applies only what this fetch changed, so it costs ~150 upserts.
-    current.advance(conn, snapshot_id)
-    conn.commit()
-    # Statistics drift as history accumulates, and a stale plan is what made the registry step
-    # take minutes. Refreshed here because a fetch is the only thing that adds bulk, and because
-    # this is a write path already — PRAGMA optimize writes, so it may never run on a read.
-    db.refresh_statistics(conn)
+    # An API timestamp is exact, so no "guessed time" warning.
+    _fold_in(conn, snapshot_id, result, job, ts_source="filename")
     return result
 
 

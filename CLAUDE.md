@@ -275,13 +275,18 @@ here exists because a frozen build breaks assumptions that are invisible from so
   is exactly why the difference is easy to miss. Deriving `data/` from `__file__` put the
   database inside PyInstaller's extraction folder — **every launch would have started from an
   empty database.** `schema.sql` and `web/` go through `resource()`; nothing else may.
-- **A release is `InTouchOTA-Analytics-v<version>` — the zip and the folder it unpacks to — and
-  nothing else.** No platform suffix. That is the user's rule for every release, here and in
-  their other projects (it is in the shared `ship` skill). `build.release_name()` is the one
-  place it is spelled. The `.exe` keeps its unversioned name so shortcuts survive upgrades, and
-  the working folder in `dist\` stays unversioned because this install keeps its database in
-  it. A versioned release folder means an upgrade by unzipping starts empty unless the old
-  `data` folder is moved across — `READ ME FIRST.txt` says so.
+- **A release is `InTouchOTA-Analytics-v<version>` — the zip, the folder it unpacks to, the
+  working folder in `dist\` and the program itself — and nothing else.** No platform suffix.
+  That is the user's rule for every release, here and in their other projects (it is in the
+  shared `ship` skill); since 2.1.1 the `.exe` carries it too (the user, 12-10-2026: "use the same
+  name as the zip for the folder and the utility" — 2.1.0 still shipped `InTouchOTA-Analytics.exe`
+  in an unversioned `dist\InTouchOTA-Analytics\`). `build.release_name()` spells it; the spec
+  derives the same from `__version__`. A shortcut to the program is re-pointed at each upgrade.
+- **The data moves with the program.** This install keeps its database in the program folder, so
+  `build.restore_data` puts the user's files from any program folder (`InTouchOTA-Analytics`, or
+  an earlier `-v<version>`) into the new release's folder; two program folders holding files stop
+  the build, because which history is live cannot be guessed. An upgrade by unzipping still
+  starts empty unless the old `data` folder is moved across — `READ ME FIRST.txt` says so.
 - **One executable, with a console.** There used to be a windowless twin,
   `InTouchOTA-Analytics-silent.exe`, for auto-start to run after a reboot. Auto-start is
   withdrawn, so nothing launched it, and run by hand it showed nothing at all — which reads as a
@@ -650,7 +655,8 @@ working merge came to be reported as "no action, only loading".
 ## Never let a build touch data (`build.py`)
 
 `dist/` is deleted to start a build clean, and **this install keeps its data there by choice** —
-the database in `dist/InTouchOTA-Analytics/data`, bundles beside it in `dist/`, reports below it.
+the database in `dist/InTouchOTA-Analytics-v<version>/data` (before 2.1.1 the folder was
+`dist/InTouchOTA-Analytics`), bundles beside it in `dist/`, reports below it.
 A build used to delete all of it: 48 snapshots of live fleet history, more than once. A printed
 warning was tried first and was not enough, because it scrolled past.
 
@@ -827,6 +833,33 @@ stale as the database grows. `PRAGMA optimize` writes, so it may never run on a 
 This is the cheapest fix in the project's history and it was invisible for a month: the wrong
 plan produces the right answer.
 
+## Storage and speed in 2.1.1 (measured 23-10-2026, schema v23)
+
+The live release at snapshot 732 (308 retained, 36,635 devices) held an 828 MB database heading
+for ~1.2 GB at 90 days. Measured on a copy, not guessed:
+
+| Change | Effect on the live data |
+|---|---|
+| Last ping into `device_seen` | 1,343,390 rows that only recorded a ping became 1,500,268 entries of ~45 bytes |
+| Four `device_snapshot` indexes dropped (`ix_ds_imei`, `_queue`, `_model_fw`, `_status`) | 228 MB; nothing read them, and `ix_ds_imei` duplicated `ix_ds_imei_snap` |
+| Together, after one VACUUM | **828 MB → 238 MB**; growth ~10 MB/day → ~2 MB/day; all 308 snapshots resolve identically |
+| 32 MB page cache per connection (`db.CACHE_KIB`) | Changes 5.15 → 0.55s, Overview 0.94 → 0.44s, Devices 1.44 → 0.77s, Pending 1.34 → 0.79s (cache alone) |
+| `device_current` advanced before quality and registry read the new snapshot | two full resolutions per fetch removed (0.8–2.5s) |
+| All of it, 2.1.0 vs 2.1.1 interleaved on the same data | pages: Changes 4.8 → 0.9s, Overview 2.6 → 0.8s, Devices 1.4 → 0.7s; hourly fetch 15–16s → 7–8s (~3,000 device rows → ~65, WAL 52 → 41 MB); full bundle 107s → 102s |
+
+- **A bundle is built by replaying both tables in snapshot order**, carrying each device's state
+  in memory (`bundle._by_snapshot`). Rebuilding each delta row with lookups instead took 167s.
+
+- **The upgrade copies the database first** (`ota_analytics.before-v23.db` beside it), because
+  it rewrites the only history this install has and the platform keeps none. The console says
+  where; the user deletes it once satisfied. The conversion runs in migrate's transaction, then
+  VACUUMs: ~2 minutes on the live file, at startup, before the server answers.
+- **Two proposals were measured and dropped.** Computing the Changes page's fallback events
+  once per request: with the cache its queries fell to 0.02–0.10s each, nothing left to save.
+  Writing only changed registry rows each fetch: 5 MB of the 55 MB a fetch wrote, because the
+  ~3,000 ping changes already touch most of the table's ~2,800 pages — not worth changing what
+  "last checked" means. Measure before restructuring; the obvious culprit was not the cost.
+
 ## Retention has to be able to fire
 
 Retention thins by age — everything for 2 days, then hourly, daily, weekly — and it also refused
@@ -938,6 +971,13 @@ release/dev side by side. Load it before changing any page, nav item, form or st
   physical table. **Resolve through `resolve.py`, not the view itself**: the view is the
   definition, and reading it costs a scan of all history (see the section above). Verified on the real database: 19/19 snapshots resolve identically, rows fell
   88.5% and the file went 305 MB → 52 MB.
+- **The last ping is not in `device_snapshot`; it is in `device_seen` (v23).** One narrow row
+  (imei, snapshot, seen_at) per change of it, resolved on its own: a device's ping at snapshot N
+  is its newest `device_seen` row at or before N. It moves on nearly every fetch, so in
+  `device_snapshot` it was 86.8% of all rows (1.34 M of 1.58 M) — a full device copy per ping.
+  Anything that moves `device_snapshot` rows moves these too (retention, densify, compact,
+  renumber); a bundle still carries one whole row per change, so either side of v23 reads the
+  other's. See "Storage and speed in 2.1.1".
 - **Never store a value derived from the snapshot time.** `seen_age_hours` is `snapshot_at`
   minus `seen_at`, so storing it made *every row of every fetch* differ and defeated the scheme
   entirely — compaction removed 6.7% of rows with it included and 87.2% without. `device_state`

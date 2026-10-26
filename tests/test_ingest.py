@@ -56,11 +56,13 @@ def test_null_markers_become_null(conn, make_export):
     ])
     ingest.ingest_file(conn, path)
 
-    row = conn.execute("SELECT * FROM device_snapshot").fetchone()
+    row = conn.execute("SELECT * FROM device_state").fetchone()
     assert row["device_model"] is None
     assert row["firmware"] is None
     assert row["seen_at"] is None
     assert row["seen_age_hours"] is None
+    # A device that has never pinged has no last-ping row at all, rather than a NULL one.
+    assert conn.execute("SELECT COUNT(*) FROM device_seen").fetchone()[0] == 0
     assert row["first_ping"] is None
     assert row["vin"] is None
     assert row["vin_raw"] == "DL1CAB1234"   # original preserved

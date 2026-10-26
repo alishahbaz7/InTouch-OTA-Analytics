@@ -13,10 +13,17 @@
 # unsigned binary.
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
+sys.path.insert(0, os.path.abspath("."))
+from ota_analytics import __version__  # noqa: E402
+
 NAME = "InTouchOTA-Analytics"
+# The program and its folder carry the release's name, as the zip does (the user, 12-10-2026):
+# build.release_name() spells the same thing from the same __version__.
+RELEASE = f"{NAME}-v{__version__}"
 
 
 def version_resource(internal):
@@ -68,7 +75,7 @@ pyz = PYZ(analysis.pure)
 console_exe = EXE(
     pyz, analysis.scripts, [],
     exclude_binaries=True,
-    name=NAME,
+    name=RELEASE,
     console=True,
     debug=False,
     strip=False,
@@ -80,5 +87,5 @@ COLLECT(
     console_exe,
     analysis.binaries, analysis.datas,
     strip=False, upx=False,
-    name=NAME,
+    name=RELEASE,
 )

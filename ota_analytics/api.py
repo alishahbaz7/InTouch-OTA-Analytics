@@ -332,7 +332,9 @@ def overview(request: Request, snapshot: int | None = None, window: str = "today
         model_choices=_model_choices(all_models, selected),
         kpis=metrics.kpis(conn, sid, selected),
         pending=metrics.pending_by_reason(conn, sid, selected),
-        by_model=metrics.task_state_by(conn, sid, "model", selected),
+        # The same rows as all_models unless the page is narrowed — not asked for twice.
+        by_model=(metrics.task_state_by(conn, sid, "model", selected) if selected
+                  else all_models),
         staleness=metrics.staleness_buckets(conn, sid, selected),
         hourly=hourly,
         hourly_total=sum(h["devices"] for h in hourly),

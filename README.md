@@ -83,6 +83,13 @@ Writing a full copy each time cost ~23 MB per fetch, or ~2.2 GB/day at a 15-minu
 row is written only when a device actually changes, and the `device_state` view reconstructs any
 snapshot from those rows. Same numbers, 88.5% fewer rows, and a database that stays nearly flat.
 
+**The last ping is stored on its own** (2.1.1). A device pings on nearly every fetch, so while
+`seen_at` sat on the device row, 86.8% of all rows were a full copy of a device written to record
+one timestamp. It now has a narrow table, `device_seen`, resolved the same way: on the live data
+the database went from 828 MB to 238 MB with every one of 308 snapshots reading exactly as before.
+The first start of 2.1.1 converts an older database once (about two minutes), after copying it to
+`ota_analytics.before-v23.db` beside it.
+
 **Both `.xlsx` and `.csv` load**, with columns matched by name rather than position, so a
 colleague's file works whatever order its columns are in. Keep the original filename either way —
 the snapshot time is read from it, because no column carries it. A CSV that turns out to be a
@@ -137,9 +144,11 @@ have been doing. `--allow-interleave` does it properly, but rebuilds everything 
 .\.venv\Scripts\python.exe build.py
 ```
 
-Produces `dist\InTouchOTA-Analytics-v<version>.zip` (~27 MB), which unpacks to a folder of the
-same name, e.g. `InTouchOTA-Analytics-v2.1.0\`. The recipient unpacks it anywhere and runs
-`InTouchOTA-Analytics.exe` — no Python, no install. It is the only executable in the release.
+Produces `dist\InTouchOTA-Analytics-v<version>.zip` (~20 MB), which unpacks to a folder of the
+same name, e.g. `InTouchOTA-Analytics-v2.1.1\`, holding a program of the same name too —
+`InTouchOTA-Analytics-v2.1.1.exe`. The recipient unpacks it anywhere and runs it — no Python, no
+install. It is the only executable in the release. On this machine the build also renames the
+working folder in `dist\` and carries its `data` folder across.
 
 **The app is portable: its database lives in a `data` folder beside the .exe.** Copy the folder
 to move or back up the history; delete it and you start empty. `OTA_DATA_DIR` still overrides.
@@ -147,7 +156,7 @@ to move or back up the history; delete it and you start empty. `OTA_DATA_DIR` st
 **Upgrading:** each release unpacks to its own versioned folder, so close the old copy and move
 its `data` folder into the new one before the first start. The database is upgraded on start.
 
-The CLI is the same executable: `InTouchOTA-Analytics.exe db-info`, `... db-export --out
+The CLI is the same executable: `InTouchOTA-Analytics-v<version>.exe db-info`, `... db-export --out
 share.otabundle`, `... passwd --role admin`, `... vacuum`.
 
 Launching the app twice does not start a second copy: it detects the one already running and
@@ -190,8 +199,9 @@ statement took **360 seconds**; with `ANALYZE` it takes 0.74s. And `device_state
 cost grows with every fetch ever taken (18s per reference at 362 snapshots), was being resolved
 eighteen times per fetch. `resolve.py` gives the same rows from a grouped join instead.
 
-**Pages** read the newest snapshot from `device_current`, kept resolved as each fetch lands, so
-the overview, devices and pending pages answer in about a second whatever the history length.
+**Pages** read the newest snapshot from `device_current`, kept resolved as each fetch lands, and
+each connection gets a 32 MB page cache rather than SQLite's 2 MB — every page answers in under a
+second (Changes 4.8s → 0.9s and Overview 2.6s → 0.8s in 2.1.1), whatever the history length.
 
 **Retention actually thins now.** It used to refuse to prune any snapshot that recorded a change,
 which at an hourly cadence was 99% of them. On the live data that is 777 MB → 431 MB, with the
@@ -229,7 +239,8 @@ agreed for sending, the scale figures and the open questions.
 ## Hosting it
 
 Runs on anything: peak memory for a full 35,475-device fetch is **25 MB**. At an hourly cadence the
-database settles at a few hundred MB once retention has thinned old history — run
+database holds ~240 MB for two months of history and grows ~2 MB a day once retention has thinned
+it — run
 `python -m ota_analytics.cli vacuum` (app stopped) to hand freed space back to the disk.
 
 - **On your own machine, for the office network** — free, and the device data never leaves the

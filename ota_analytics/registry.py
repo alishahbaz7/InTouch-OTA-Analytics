@@ -52,10 +52,11 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
     # ordinary fetch. Resolving it once into a temp table leaves fourteen scans of a plain
     # 35,000-row table instead.
     #
-    # Built through `resolve.materialize`, not the view: resolving one snapshot the view's way
-    # scans the whole of device_snapshot, so this single build was 4-18s on the live database
-    # and is now ~1.3s. Same rows, different plan — see resolve.py.
-    resolve.materialize(conn, "_state", snapshot_id, indexes=("imei",))
+    # Through `resolve.source`, not the view: resolving one snapshot the view's way scans the
+    # whole of device_snapshot (4-18s on the live database). A fetch advances `device_current`
+    # before this runs, so for the newest snapshot that costs nothing at all; a replay of older
+    # snapshots builds `_state` (~1.3s each). Same rows either way — see resolve.py.
+    state = resolve.source(conn, snapshot_id, name="_state", indexes=("imei",))
 
     # 1. Record every tracked value that differs from what we currently hold. Devices we have
     #    never seen produce no rows here — their arrival is the 'new device' case below.
@@ -64,15 +65,16 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
         cursor = conn.execute(f"""
             INSERT INTO device_change (imei, changed_at, field, old_value, new_value, snapshot_id)
             SELECT d.imei, ?, ?, r.{field}, d.{field}, ?
-            FROM _state d
+            FROM {state} d
             JOIN device r ON r.imei = d.imei
             -- A change needs a known value on BOTH sides. NULL -> value is a first observation
             -- and value -> NULL means the source stopped reporting the field; neither is the
             -- device changing. Without this, switching from the spreadsheet export to the API
             -- logs ~35k false "changes" per missing column.
-            WHERE r.{field} IS NOT NULL AND d.{field} IS NOT NULL
+            WHERE d.snapshot_id = ?
+              AND r.{field} IS NOT NULL AND d.{field} IS NOT NULL
               AND r.{field} <> d.{field}
-        """, (snapshot_at, field, snapshot_id))
+        """, (snapshot_at, field, snapshot_id, snapshot_id))
         changes += cursor.rowcount
 
     # 2. Which devices changed at all, and which changed firmware specifically.
@@ -100,10 +102,10 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
                 WHERE c.imei = device.imei AND c.snapshot_id = ? AND c.field = ?)
         """, (snapshot_id, field, snapshot_id, field))
 
-    new_devices = conn.execute("""
-        SELECT COUNT(*) FROM _state d
-        WHERE NOT EXISTS (SELECT 1 FROM device r WHERE r.imei = d.imei)
-    """).fetchone()[0]
+    new_devices = conn.execute(f"""
+        SELECT COUNT(*) FROM {state} d
+        WHERE d.snapshot_id = ? AND NOT EXISTS (SELECT 1 FROM device r WHERE r.imei = d.imei)
+    """, (snapshot_id,)).fetchone()[0]
 
     # 3. Upsert current state. last_checked_at always advances; last_changed_at only when this
     #    device actually moved, so "unchanged since" stays truthful across thousands of polls.
@@ -114,9 +116,9 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
             first_seen_at, last_checked_at, last_changed_at, last_fw_change_at, checks, changes)
         SELECT d.imei, {', '.join('d.' + f for f in CARRIED)},
                ?, ?, ?, ?, 1, 0
-        -- `WHERE 1` is required, not decorative: with no WHERE clause on the SELECT, SQLite's
+        -- The WHERE is required, not only a guard: with no WHERE clause on the SELECT, SQLite's
         -- parser cannot tell this ON CONFLICT from the ON of a join and refuses the statement.
-        FROM _state d WHERE 1
+        FROM {state} d WHERE d.snapshot_id = ?
         ON CONFLICT(imei) DO UPDATE SET
             {assignments},
             last_checked_at = excluded.last_checked_at,
@@ -129,11 +131,12 @@ def apply_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict:
             last_fw_change_at = CASE
                 WHEN EXISTS (SELECT 1 FROM _changed c WHERE c.imei = device.imei AND c.fw = 1)
                 THEN excluded.last_checked_at ELSE device.last_fw_change_at END
-    """, (snapshot_at, snapshot_at, None, None))
+    """, (snapshot_at, snapshot_at, None, None, snapshot_id))
 
-    checked = conn.execute("SELECT COUNT(*) FROM _state").fetchone()[0]
-    # Dropped rather than left behind: the scheduler holds one connection for the life of the
-    # process, and this is a full copy of the fleet.
+    checked = conn.execute(f"SELECT COUNT(*) FROM {state} WHERE snapshot_id = ?",
+                           (snapshot_id,)).fetchone()[0]
+    # Dropped rather than left behind when it was built: the scheduler holds one connection for
+    # the life of the process, and this is a full copy of the fleet.
     conn.execute("DROP TABLE IF EXISTS _state")
     conn.commit()
     return {"changes": changes, "new_devices": new_devices, "checked": checked}

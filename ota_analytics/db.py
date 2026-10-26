@@ -9,7 +9,7 @@ from typing import Iterator
 
 from . import config, identity, normalize
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 # Read through config.resource: in a packaged build the DDL is inside the bundle, not beside
 # this module — `__file__` there points at a path that does not exist on disk.
 SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
@@ -19,6 +19,14 @@ SCHEMA_PATH = config.resource("ota_analytics", "schema.sql")
 # surfaces as "database is locked" on a page load, which is the one moment several people are
 # most likely to be looking. Waiting is the correct behaviour here: the writer always finishes.
 BUSY_TIMEOUT_SECONDS = 30.0
+
+# Page cache per connection, in KiB (a negative cache_size is KiB). SQLite's default is 2 MB, and
+# every request opens its own connection, so a page started cold and anything larger than 2 MB —
+# the registry is 11 MB, the change log 35 MB with its indexes — was read again by each of its
+# queries. Measured on the live database (23-10-2026): Changes 5.15s -> 0.55s, Overview 0.94s ->
+# 0.44s, Devices 1.44s -> 0.77s, Pending 1.34s -> 0.79s. Allocated only as pages are read, and
+# returned when the connection closes at the end of the request. 64 MB bought little more.
+CACHE_KIB = 32 * 1024
 
 # Databases this process has already migrated. Applying the schema costs ~0.25s and, because it
 # opens a write transaction, it also serializes against every other connection. Doing that once
@@ -94,6 +102,7 @@ def connect(db_path: Path | None = None, *, apply_schema: bool = True) -> sqlite
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
+    conn.execute(f"PRAGMA cache_size = -{CACHE_KIB}")
 
     # Version ordering in SQL: lets diffing compare firmware and config versions directly,
     # and lets migrations backfill sort keys without a Python pass over every row.
@@ -125,6 +134,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     The DDL is written with IF NOT EXISTS throughout, so applying it to an existing database
     is a no-op. Future versions add numbered migration steps below.
     """
+    # Before anything writes: v23 rewrites the whole history, so it gets a copy of it first.
+    splitting = _backup_before_split(conn)
+
     # Add columns to already-existing tables FIRST: schema.sql creates indexes over the new
     # columns, and CREATE TABLE IF NOT EXISTS leaves an old table untouched — so running the
     # script first would try to index a column that does not exist yet. On a fresh database
@@ -234,6 +246,9 @@ def migrate(conn: sqlite3.Connection) -> None:
                           AND NOT EXISTS (SELECT 1 FROM cota_device o WHERE o.device_id = m.device_id))
         """)
 
+    if current < 23:
+        _split_seen(conn)
+
     if current < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -241,6 +256,115 @@ def migrate(conn: sqlite3.Connection) -> None:
     # a database created by a test or by an older version being upgraded in place.
     identity.ensure(conn)
     conn.commit()
+
+    if splitting:
+        _shrink_after_split(conn, splitting)
+
+
+# The four device_snapshot indexes v23 drops. Kept by name so an upgraded database loses them
+# too: schema.sql no longer creates them, and IF NOT EXISTS never removes anything.
+DROPPED_INDEXES = ("ix_ds_imei", "ix_ds_queue", "ix_ds_model_fw", "ix_ds_status")
+
+
+def _has_seen_column(conn: sqlite3.Connection) -> bool:
+    return any(r["name"] == "seen_at" for r in conn.execute("PRAGMA table_info(device_snapshot)"))
+
+
+def _backup_before_split(conn: sqlite3.Connection) -> Path | None:
+    """Copy a database v23 is about to rewrite, and say so. Returns the copy, or None when
+    there is nothing to rewrite (a new database, or one already converted).
+
+    The split deletes most rows of the only history this install holds — the platform keeps the
+    present, never the past — so a defect in it would be unrecoverable. The copy is the undo.
+    Taken through SQLite's backup API, so it is consistent even with a WAL beside it; ~3s for the
+    828 MB live file.
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 23 or not _has_seen_column(conn):
+        return None
+    if not conn.execute("SELECT 1 FROM device_snapshot LIMIT 1").fetchone():
+        return None
+    path = Path(conn.execute("PRAGMA database_list").fetchone()["file"])
+    copy = path.with_name(f"{path.stem}.before-v23{path.suffix}")
+    print(f"\n  Upgrading the database, once ({path.stat().st_size / 1e6:,.0f} MB, "
+          f"about two minutes on a large history)", flush=True)
+    print(f"  Copy of it as it was: {copy}", flush=True)
+    target = sqlite3.connect(copy)
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+    return copy
+
+
+def _split_seen(conn: sqlite3.Connection) -> None:
+    """v23: last pings into device_seen, and device_snapshot down to the rows that say more.
+
+    A device pings on nearly every fetch, so with seen_at in device_snapshot 1.34 M of its 1.58 M
+    rows on the live database were a full copy of a device written to record one timestamp. Here
+    every move of the ping becomes a ~45-byte row of its own, the copies that recorded nothing
+    else are dropped, and so is the column. Lossless: every snapshot resolves exactly as before,
+    which tests/test_delta_storage.py checks on a database converted this way.
+
+    Runs inside migrate's transaction, so an interruption leaves the database as it was and the
+    next start does the whole step again.
+    """
+    from . import current, retention
+
+    for name in DROPPED_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    if not _has_seen_column(conn):
+        return                                      # created at v23, or converted already
+    # The steps are said only when there is history to convert: ~2 minutes on the live file,
+    # which a silent console would make look like a program that failed to start.
+    has_rows = conn.execute("SELECT 1 FROM device_snapshot LIMIT 1").fetchone() is not None
+    say = print if has_rows else (lambda *args, **kwargs: None)
+
+    # 1. Every move of the last ping, per device, in snapshot order. A tombstone is not a ping
+    #    and is left out of the comparison: a device that left and came back on the same last
+    #    ping has not pinged again. No earlier row compares as NULL, so a device that has never
+    #    pinged writes nothing.
+    say("  1/3 Moving last-ping times to a table of their own...", flush=True)
+    conn.execute("""
+        INSERT OR IGNORE INTO device_seen (imei, snapshot_id, seen_at)
+        SELECT imei, snapshot_id, seen_at FROM (
+          SELECT imei, snapshot_id, seen_at, LAG(seen_at) OVER w AS before
+          FROM device_snapshot WHERE present = 1
+          WINDOW w AS (PARTITION BY imei ORDER BY snapshot_id))
+        WHERE seen_at IS NOT before
+    """)
+    # 2. The rows that differed from the one before only in the ping.
+    say("  2/3 Removing the copies that recorded only a ping...", flush=True)
+    removed = retention.compact_rows(conn, ignore=("seen_at",))
+    # 3. The column itself, and seen_age_hours, unwritten since it was found to defeat compaction.
+    conn.execute("ALTER TABLE device_snapshot DROP COLUMN seen_at")
+    if any(r["name"] == "seen_age_hours"
+           for r in conn.execute("PRAGMA table_info(device_snapshot)")):
+        conn.execute("ALTER TABLE device_snapshot DROP COLUMN seen_age_hours")
+    # The resolved newest snapshot was built from the column that is now gone.
+    current.refresh_latest(conn)
+    # Statistics for the new table and the reshaped one: a planner guessing here is how one
+    # statement once took 367 seconds (v9).
+    conn.execute("ANALYZE device_snapshot")
+    conn.execute("ANALYZE device_seen")
+    say(f"      {removed:,} copies replaced by "
+        f"{conn.execute('SELECT COUNT(*) FROM device_seen').fetchone()[0]:,} ping entries",
+        flush=True)
+
+
+def _shrink_after_split(conn: sqlite3.Connection, copy: Path) -> None:
+    """Give the space v23 freed back to the disk. Outside migrate's transaction, because VACUUM
+    cannot run inside one. Failing is not fatal — the database is converted and correct, only
+    still large — and `cli vacuum` does the same later."""
+    print("  3/3 Compacting the file...", flush=True)
+    try:
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError as exc:
+        print(f"  ! could not compact it now ({exc}); run the vacuum command later", flush=True)
+        return
+    path = Path(conn.execute("PRAGMA database_list").fetchone()["file"])
+    print(f"  Done: {copy.stat().st_size / 1e6:,.0f} MB -> "
+          f"{path.stat().st_size / 1e6:,.0f} MB.\n", flush=True)
 
 
 def _rekey_cota_device(conn: sqlite3.Connection) -> None:
