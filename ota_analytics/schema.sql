@@ -1,5 +1,6 @@
 -- InTouch OTA Analytics schema.
--- Raw tables (snapshot, device_snapshot, device_group) are append-only and never rewritten.
+-- Raw tables (snapshot, device_snapshot, device_seen, device_group) are append-only and never
+-- rewritten.
 -- Every other table is derived and can be rebuilt from them by `cli rollup`.
 
 PRAGMA journal_mode = WAL;
@@ -37,10 +38,11 @@ CREATE INDEX IF NOT EXISTS ix_snapshot_at ON snapshot(snapshot_at);
 -- A device's state at any snapshot is its most recent row at or before that snapshot, which is
 -- what the device_state view resolves. Ingest stays append-only: nothing here is ever updated.
 --
--- seen_age_hours is left in place for older rows but is no longer written. It is derived
--- (snapshot_at - seen_at), so it differed on every row of every fetch and on its own defeated
--- the entire scheme: compacting with it included removed 6.7% of rows, and without it, 87.2%.
--- device_state computes it instead, from values that only change when the device actually pings.
+-- seen_at is not here (v23): it lives in device_seen below. A device pings far more often than
+-- anything else about it changes, so with it here 86.8% of the rows on the live database (1.34 M
+-- of 1.58 M, 23-10-2026) were full copies of a device written to record one new timestamp.
+-- seen_age_hours went before it for the same reason, harder: it is derived from the snapshot
+-- time, so it differed on every row of every fetch. device_state computes it.
 CREATE TABLE IF NOT EXISTS device_snapshot (
   snapshot_id      INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
   imei             TEXT    NOT NULL,
@@ -67,8 +69,6 @@ CREATE TABLE IF NOT EXISTS device_snapshot (
   base_firmware    TEXT,      -- build the device shipped with (baseFirm) — the fallback floor
   target_config    TEXT,      -- newConfigVersion
   base_config      TEXT,      -- baseConfig
-  seen_at          TEXT,
-  seen_age_hours   REAL,
   iccid            TEXT,
   hw_ver           TEXT,
   vin              TEXT,      -- NULL when the source held the DL1CAB1234 placeholder
@@ -77,36 +77,63 @@ CREATE TABLE IF NOT EXISTS device_snapshot (
   first_ping       TEXT,
   PRIMARY KEY (snapshot_id, imei)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS ix_ds_imei     ON device_snapshot(imei);
-CREATE INDEX IF NOT EXISTS ix_ds_queue    ON device_snapshot(snapshot_id, queue_state);
-CREATE INDEX IF NOT EXISTS ix_ds_model_fw ON device_snapshot(snapshot_id, device_model, firmware);
-CREATE INDEX IF NOT EXISTS ix_ds_status   ON device_snapshot(snapshot_id, status);
 -- Drives the per-device "latest row at or before this snapshot" lookup device_state performs.
+-- The only secondary index (v23). ix_ds_imei, ix_ds_queue, ix_ds_model_fw and ix_ds_status were
+-- dropped: they date from when this table held a full copy per fetch, nothing has filtered it by
+-- status, task or model since reads went through resolve.py, and ix_ds_imei held exactly what
+-- this one does (a WITHOUT ROWID index carries the primary key). 228 MB of the 828 MB live file.
 CREATE INDEX IF NOT EXISTS ix_ds_imei_snap ON device_snapshot(imei, snapshot_id);
 
--- Fleet state as of any snapshot, reconstructed from the change rows: for each device, its most
--- recent row at or before that snapshot. Readers query this exactly as they used to query
--- device_snapshot — it carries the same columns plus its own snapshot_id — so `WHERE
--- snapshot_id = ?` keeps working and no query had to be rewritten.
+-- When each device last pinged, one row per CHANGE of it — the column that moves on almost every
+-- fetch, kept narrow so moving it costs ~45 bytes instead of a copy of the whole device (v23).
+-- Resolved exactly like device_snapshot: a device's last ping at snapshot N is its most recent
+-- row here at or before N, independently of which row device_snapshot resolves to. No row means
+-- the device has never reported one. Rows are written for present devices only; a tombstone is
+-- device_snapshot's business.
 --
--- Measured on the real database once compacted: 0.030s for a full snapshot, 0.088s for a
--- KPI-shaped aggregate. On the uncompacted full-copy table the same view took 0.27s, so this
--- gets faster as the delta table stays small, not slower as snapshots accumulate.
+-- Keyed device-first because every read is "this device, latest at or before N"; the snapshot
+-- index serves retention, the cascade from snapshot, and moving device_current forward.
+CREATE TABLE IF NOT EXISTS device_seen (
+  imei        TEXT    NOT NULL,
+  snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,
+  seen_at     TEXT,
+  PRIMARY KEY (imei, snapshot_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_seen_snap ON device_seen(snapshot_id);
+
+-- Fleet state as of any snapshot, reconstructed from the change rows: for each device, its most
+-- recent row at or before that snapshot, and its most recent ping time likewise. Readers query
+-- this exactly as they used to query device_snapshot — it carries the same columns plus its own
+-- snapshot_id — so `WHERE snapshot_id = ?` keeps working and no query had to be rewritten.
+--
+-- This is the readable definition, not the fast path: resolve.py does the same work without a
+-- scan of all history per reference, and tests/test_resolve.py holds the two to the same answer.
 DROP VIEW IF EXISTS device_state;
 CREATE VIEW device_state AS
-SELECT s.id AS snapshot_id,
-       d.imei, d.status, d.queue, d.queue_state, d.device_name, d.created_by,
-       d.device_model_raw, d.device_model, d.firmware_raw, d.firmware, d.fw_family, d.fw_sortkey,
-       d.configuration, d.config_sortkey, d.update_firmware, d.base_firmware, d.target_config,
-       d.base_config, d.seen_at, d.iccid, d.hw_ver, d.vin, d.vin_raw, d.groups_raw, d.first_ping,
+SELECT v.snapshot_id,
+       v.imei, v.status, v.queue, v.queue_state, v.device_name, v.created_by,
+       v.device_model_raw, v.device_model, v.firmware_raw, v.firmware, v.fw_family, v.fw_sortkey,
+       v.configuration, v.config_sortkey, v.update_firmware, v.base_firmware, v.target_config,
+       v.base_config, v.seen_at, v.iccid, v.hw_ver, v.vin, v.vin_raw, v.groups_raw, v.first_ping,
        -- Derived rather than stored, which is what lets a row survive across fetches unchanged.
-       CASE WHEN d.seen_at IS NULL THEN NULL
-            ELSE (julianday(s.snapshot_at) - julianday(d.seen_at)) * 24.0 END AS seen_age_hours
-FROM snapshot s
-JOIN device_snapshot d
-  ON d.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
-                      WHERE x.imei = d.imei AND x.snapshot_id <= s.id)
-WHERE d.present = 1;
+       CASE WHEN v.seen_at IS NULL THEN NULL
+            ELSE (julianday(v.snapshot_at) - julianday(v.seen_at)) * 24.0 END AS seen_age_hours
+FROM (
+  SELECT s.id AS snapshot_id, s.snapshot_at,
+         d.imei, d.status, d.queue, d.queue_state, d.device_name, d.created_by,
+         d.device_model_raw, d.device_model, d.firmware_raw, d.firmware, d.fw_family,
+         d.fw_sortkey, d.configuration, d.config_sortkey, d.update_firmware, d.base_firmware,
+         d.target_config, d.base_config,
+         (SELECT p.seen_at FROM device_seen p
+          WHERE p.imei = d.imei AND p.snapshot_id <= s.id
+          ORDER BY p.snapshot_id DESC LIMIT 1) AS seen_at,
+         d.iccid, d.hw_ver, d.vin, d.vin_raw, d.groups_raw, d.first_ping
+  FROM snapshot s
+  JOIN device_snapshot d
+    ON d.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
+                        WHERE x.imei = d.imei AND x.snapshot_id <= s.id)
+  WHERE d.present = 1
+) v;
 
 CREATE TABLE IF NOT EXISTS device_group (
   snapshot_id INTEGER NOT NULL REFERENCES snapshot(id) ON DELETE CASCADE,

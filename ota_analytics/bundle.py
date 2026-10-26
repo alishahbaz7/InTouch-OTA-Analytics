@@ -33,6 +33,7 @@ first, `retention.renumber_snapshots` restores id-order == time-order afterwards
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import sqlite3
 import zipfile
@@ -154,6 +155,30 @@ def _row_json(sha: str, row: sqlite3.Row, columns: list[str]) -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _travelling(physical: list[str], values: tuple, ping: str | None) -> dict:
+    """A device row as a bundle carries it: its stored values and its last ping. A tombstone
+    carries no ping, as it did when both lived in one row."""
+    row = dict(zip(physical, values))
+    row["seen_at"] = ping if row.get("present", 1) == 1 else None
+    return row
+
+
+def _by_snapshot(changes, moves):
+    """Walk two cursors ordered by snapshot_id together: (snapshot_id, rows, pings) for every
+    snapshot either of them has anything for."""
+    left = itertools.groupby(changes, key=lambda r: r["snapshot_id"])
+    right = itertools.groupby(moves, key=lambda r: r["snapshot_id"])
+    a, b = next(left, None), next(right, None)
+    while a is not None or b is not None:
+        snapshot_id = min(g[0] for g in (a, b) if g is not None)
+        changed, pinged = [], []
+        if a is not None and a[0] == snapshot_id:
+            changed, a = list(a[1]), next(left, None)
+        if b is not None and b[0] == snapshot_id:
+            pinged, b = list(b[1]), next(right, None)
+        yield snapshot_id, changed, pinged
+
+
 # Phases of building a bundle, and what each is worth on the bar. Measured on the live database:
 # the baseline is one resolved fleet (35,475 rows, under a second) and the deltas are everything
 # else (926,020 rows, most of a minute), so even weights would leave the bar stuck at the end.
@@ -180,7 +205,11 @@ def export_bundle(conn: sqlite3.Connection, out, *, since: str | None = None,
         raise BundleError("There are no snapshots to export"
                           + (" in that period." if since or until else " yet."))
 
-    columns = retention.device_columns(conn)
+    # A row as it travels: device_snapshot's columns plus the last ping, which this install keeps
+    # in its own table (v23). Rebuilt into one row per device per change on the way out, so the
+    # format is exactly what it was before the split and either side of it can read the other.
+    physical = retention.device_columns(conn)
+    columns = [*physical, "seen_at"]
     baseline = selected[0]
     rest_ids = [s["id"] for s in selected[1:]]
     device_rows = baseline_rows = 0
@@ -221,36 +250,67 @@ def export_bundle(conn: sqlite3.Connection, out, *, since: str | None = None,
                           "SELECT COUNT(DISTINCT imei) FROM device_snapshot "
                           "WHERE snapshot_id <= ?", (baseline["id"],)).fetchone()[0])
             cursor = conn.execute(f"""
-                SELECT {', '.join('d.' + c for c in columns)} FROM device_snapshot d
+                SELECT {', '.join('d.' + c for c in physical)}, k.seen_at AS ping
+                FROM device_snapshot d
                 JOIN (SELECT imei, MAX(snapshot_id) AS ms FROM device_snapshot
                       WHERE snapshot_id <= ?1 GROUP BY imei) m
-                  ON m.imei = d.imei AND m.ms = d.snapshot_id
+                  ON m.imei = d.imei AND m.ms = d.snapshot_id{resolve.SEEN_JOIN}
             """, (baseline["id"],))
+            # Each device's values and last ping as the export walks forward, for the deltas.
+            # Kept apart because they resolve apart: a device that left still has a last ping,
+            # and it is the one in force if the device comes back.
+            values: dict[str, tuple] = {}
+            pings: dict[str, str | None] = {}
             for row in cursor:
-                stream.write(_row_json(baseline["file_sha256"], row, columns))
+                values[row["imei"]] = tuple(row[c] for c in physical)
+                pings[row["imei"]] = row["ping"]
+                stream.write(_row_json(baseline["file_sha256"],
+                                       _travelling(physical, values[row["imei"]], row["ping"]),
+                                       columns))
                 baseline_rows += 1
                 if baseline_rows % 2000 == 0:
                     job.advance(baseline_rows, detail=f"{baseline_rows:,} devices")
 
-            # Everything after it is deltas, exactly as stored — which is why a bundle covering
+            # Everything after it is deltas: one row for each device something moved for at that
+            # snapshot — its values, or its last ping, or both — which is why a bundle covering
             # weeks of fetches is barely larger than one covering a single day.
+            #
+            # Both tables are replayed in snapshot order, carrying each device's state forward in
+            # memory. Looking each row's state up instead cost three index probes a row — 1.54 M
+            # rows took 167s against 107s before the split, on the live database.
             if rest_ids:
-                placeholders = ','.join('?' * len(rest_ids))
-                job.begin("Writing the changes",
-                          total=conn.execute(
-                              f"SELECT COUNT(*) FROM device_snapshot "
-                              f"WHERE snapshot_id IN ({placeholders})", rest_ids).fetchone()[0])
+                first, last = baseline["id"], rest_ids[-1]
+                window = "WHERE snapshot_id > ? AND snapshot_id <= ? ORDER BY snapshot_id"
+                # Both counts, so the bar may finish slightly early — where a device's values
+                # and its ping moved in the same fetch it is one row, not two. Under-reporting
+                # and then completing is the safe direction.
+                total = sum(conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE snapshot_id > ? AND snapshot_id <= ?",
+                    (first, last)).fetchone()[0] for table in ("device_snapshot", "device_seen"))
+                job.begin("Writing the changes", total=total)
                 sha_by_id = {s["id"]: s["file_sha256"] for s in selected[1:]}
-                cursor = conn.execute(f"""
-                    SELECT snapshot_id, {', '.join(columns)} FROM device_snapshot
-                    WHERE snapshot_id IN ({placeholders})
-                    ORDER BY snapshot_id
-                """, rest_ids)
-                for row in cursor:
-                    stream.write(_row_json(sha_by_id[row["snapshot_id"]], row, columns))
-                    device_rows += 1
-                    if device_rows % 10_000 == 0:
-                        job.advance(device_rows, detail=f"{device_rows:,} changes")
+                changes = conn.execute(
+                    f"SELECT snapshot_id, {', '.join(physical)} FROM device_snapshot {window}",
+                    (first, last))
+                moves = conn.execute(
+                    f"SELECT snapshot_id, imei, seen_at FROM device_seen {window}", (first, last))
+                for snapshot_id, changed, pinged in _by_snapshot(changes, moves):
+                    for row in changed:
+                        values[row["imei"]] = tuple(row[c] for c in physical)
+                    for row in pinged:
+                        pings[row["imei"]] = row["seen_at"]
+                    sha = sha_by_id.get(snapshot_id)
+                    if sha is None:
+                        continue                 # applied, but not a snapshot being exported
+                    for imei in sorted({r["imei"] for r in changed}
+                                       | {r["imei"] for r in pinged}):
+                        if imei not in values:
+                            continue             # a ping for a device with no row: none exist
+                        stream.write(_row_json(
+                            sha, _travelling(physical, values[imei], pings.get(imei)), columns))
+                        device_rows += 1
+                        if device_rows % 10_000 == 0:
+                            job.advance(device_rows, detail=f"{device_rows:,} changes")
 
         job.begin("Finishing the file")
         manifest_data["baseline_rows"] = baseline_rows
@@ -655,9 +715,9 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
             message=f"Dry run: {len(new)} of {len(incoming)} snapshot(s) would be imported"
                     + (" (interleaved into existing history)." if interleaved else "."))
 
-    local_columns = set(retention.device_columns(conn))
+    local_columns = set(retention.row_columns(conn))
     bundle_columns = data.get("device_columns") or []
-    columns = [c for c in retention.device_columns(conn)
+    columns = [c for c in retention.row_columns(conn)
                if c in set(bundle_columns) or c == "imei"]
     unknown = [c for c in bundle_columns if c not in local_columns]
     if "imei" not in columns:
@@ -718,14 +778,25 @@ def import_bundle(conn: sqlite3.Connection, source, *, allow_interleave: bool = 
             id_by_seq[seq] = cursor.lastrowid
             imported_shas.append(sha)
 
-        # 4. Move the staged rows across under their new ids.
+        # 4. Move the staged rows across under their new ids — split by this install's layout:
+        #    the last ping into device_seen, the rest into device_snapshot. Every staged row
+        #    carries its ping, so this writes one per device per snapshot; compacting afterwards
+        #    keeps only the ones that moved.
+        physical = [c for c in columns if c in set(retention.device_columns(conn))]
+        to_seen = "seen_at" in columns and "seen_at" not in physical
+        listed = " AND present = 1" if "present" in columns else ""
         written = 0
         for seq, snapshot_id in id_by_seq.items():
             cursor = conn.execute(f"""
-                INSERT OR IGNORE INTO device_snapshot (snapshot_id, {', '.join(columns)})
-                SELECT ?, {', '.join(columns)} FROM stage_bundle WHERE seq = ?
+                INSERT OR IGNORE INTO device_snapshot (snapshot_id, {', '.join(physical)})
+                SELECT ?, {', '.join(physical)} FROM stage_bundle WHERE seq = ?
             """, (snapshot_id, seq))
             written += cursor.rowcount
+            if to_seen:
+                conn.execute(f"""
+                    INSERT OR IGNORE INTO device_seen (imei, snapshot_id, seen_at)
+                    SELECT imei, ?, seen_at FROM stage_bundle WHERE seq = ?{listed}
+                """, (snapshot_id, seq))
         conn.execute("DROP TABLE IF EXISTS stage_bundle")
         conn.commit()
     except Exception:

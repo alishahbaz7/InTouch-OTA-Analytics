@@ -6,11 +6,14 @@
 __version__ = "2.1.1"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-10-12"
+RELEASED = "2026-10-26"
 CODENAME = "relay"
 
 VERSION_HISTORY = [
-    ("2.1.1", "2026-10-12", "Fixes and refinements after 2.1.0"),
+    ("2.1.1", "2026-10-26", "One name per release — zip, folder and program; the database a "
+                            "quarter of the size (last pings stored on their own, four unused "
+                            "indexes dropped), every page opening in under a second and a fetch "
+                            "in half the time"),
     ("2.1.0", "2026-10-12", "One design through the application: Web FOTA on the Intouch COTA "
                             "tables, tiles and list filters; a Devices list to manage the "
                             "COTA fleet — filters and sort on every column, groups, tags; a "

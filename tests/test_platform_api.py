@@ -54,9 +54,11 @@ def test_parse_epoch_detects_seconds_versus_milliseconds():
 def test_epoch_fields_survive_ingest_as_real_dates(conn):
     result = ingest.ingest_records(conn, [api_record("111")], source_name="API",
                                    snapshot_at=datetime(2026, 8, 15, 15, 11))
-    row = conn.execute("SELECT seen_at, first_ping FROM device_snapshot").fetchone()
-    assert row["seen_at"].startswith("2025-08-15")
+    row = conn.execute("SELECT first_ping FROM device_snapshot").fetchone()
     assert row["first_ping"].startswith("2026-02-06")     # seconds, not 1970
+    # The last ping is stored on its own (device_seen), not on the device row.
+    seen = conn.execute("SELECT seen_at FROM device_seen").fetchone()
+    assert seen["seen_at"].startswith("2025-08-15")
     assert result.rows == 1
 
 

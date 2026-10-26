@@ -5,9 +5,60 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
-## 2.1.1 — in development
+## 2.1.1 — 2026-10-26
 
-Fixes and refinements after 2.1.0.
+Refinements after 2.1.0: one name per release, and the warehouse made smaller and faster — a
+patch, because nothing here is a new feature (the user's rule: patch for fixes and improvements).
+
+### A release carries one name — zip, folder and program
+
+The user, after 2.1.0 (12 Oct 2026): "use the same name as the zip for the folder and the
+utility". 2.1.0 shipped `InTouchOTA-Analytics-v2.1.0.zip` holding `InTouchOTA-Analytics.exe`,
+and the working copy in `dist\` was a plain `InTouchOTA-Analytics\` — three names for one release.
+
+- **The program is `InTouchOTA-Analytics-v<version>.exe`, in a folder of the same name**, beside
+  `InTouchOTA-Analytics-v<version>.zip`. The spec takes the name from `__version__`, as
+  `build.release_name()` does, so the three cannot disagree. Task Manager and the taskbar now say
+  which version is running; a shortcut to the program is re-pointed at each upgrade.
+- **The data moves with the program.** This install keeps its database in the program folder in
+  `dist\`, so a build carries the user's files from the previous folder — the unversioned one, or
+  an earlier release's — into the new one. With two program folders holding files it stops and
+  names them rather than guessing which history is live.
+- The tests' guard against opening this machine's release database covers every release folder.
+
+### A database a quarter of the size, and pages that open in under a second
+
+The user, 23 Oct 2026, with the release at snapshot 732: "tour the data management, see what
+optimization we can do in terms of space, speed and system utilization". Everything below was
+measured on a copy of that database (828 MB, 308 snapshots kept, 36,635 devices).
+
+- **The last ping has a table of its own** (schema v23, `device_seen`). A device pings on nearly
+  every fetch, and each new ping was stored as a full copy of the device: 86.8% of all rows
+  (1.34 M of 1.58 M) existed only to record a timestamp. Each ping is now ~45 bytes. Every one of
+  the 308 snapshots resolves exactly as before.
+- **Four indexes nothing read are gone** — 228 MB. They date from when every fetch stored the
+  whole fleet; one duplicated another outright.
+- Together: **828 MB → 238 MB**, and growth from ~10 MB a day to ~2 MB.
+- **Every page opens in under a second**: a 32 MB page cache per connection instead of SQLite's
+  2 MB, so a page's queries stop re-reading the same data. 2.1.0 against 2.1.1 on the same data:
+  Changes 4.8s → 0.9s, Overview 2.6s → 0.8s, Pending 1.3s → 0.8s, Devices 1.4s → 0.7s, Firmware
+  0.8s → 0.5s, Reachability 0.75s → 0.37s. The Overview also stopped asking for its model table
+  twice.
+- **A fetch takes half the time** (15–16s → 7–8s for an hourly fetch moving ~3,000 pings): it
+  writes ~65 device rows instead of ~3,000, and resolves the new snapshot once instead of three
+  times — the kept-current copy is moved forward before data quality and the registry read it.
+- **Sharing history is no slower**: a bundle of the whole history builds in 102s (107s before),
+  replaying both tables in order rather than looking each row up.
+- **Upgrading converts the database once, at startup** (~2 minutes on the live file, said in the
+  console), after copying it to `ota_analytics.before-v23.db` beside it — the history cannot be
+  fetched again, so the conversion gets an undo. Delete the copy once the dashboard looks right.
+- Bundles are unchanged: one whole row per device per change, so 2.1.0 and 2.1.1 exchange them
+  both ways. A 2.1.1 bundle of the live history carries every row 2.1.0's did except 5,034 that
+  differed from the row before them only in `seen_age_hours`, a column unwritten since 1.x.
+
+Measured and left alone: idle use (91 MB, no CPU between fetches, ~9s of work an hour) was never
+the problem, and writing only the changed registry rows would have saved 5 MB of the 55 MB a
+fetch writes.
 
 ---
 

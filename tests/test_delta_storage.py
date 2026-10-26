@@ -185,3 +185,176 @@ def test_pruning_a_snapshot_carries_its_changes_forward(conn):
 
     # Whatever survived, the newest snapshot must still know the device reached 8.0.0.
     assert resolved(conn, newest.snapshot_id)["1"]["firmware"] == "8.0.0"
+
+
+# ─── the last ping lives on its own (v23) ────────────────────────────────────
+#
+# On the live database 86.8% of all device rows (1.34 M of 1.58 M, 23-10-2026) differed from the
+# row before them only in seen_at: a full copy of a device, written to record one timestamp.
+
+def pinged(imei: str, at: str, **kwargs) -> dict:
+    record = api_device(imei, **kwargs)
+    record["seenAt"] = at
+    return record
+
+
+def plain(rows: dict) -> dict:
+    return {imei: dict(row) for imei, row in rows.items()}
+
+
+def test_a_fetch_where_only_pings_moved_stores_no_device_rows(conn):
+    fetch(conn, [api_device(str(i)) for i in range(50)], when="2026-08-15 10:00:00", tag="a")
+    moved = [pinged(str(i), "15-08-26 10:40:00") if i < 10 else api_device(str(i))
+             for i in range(50)]
+    second = fetch(conn, moved, when="2026-08-15 10:45:00", tag="b")
+
+    assert stored(conn, second.snapshot_id) == 0
+    assert second.seen_rows == 10
+    state = resolved(conn, second.snapshot_id)
+    assert state["3"]["seen_at"] == "2026-08-15 10:40:00"
+    assert state["30"]["seen_at"] == "2026-08-15 10:00:00"
+
+
+def test_a_ping_resolves_per_snapshot_like_any_other_change(conn):
+    first = fetch(conn, [pinged("1", "15-08-26 09:00:00")], when="2026-08-15 10:00:00", tag="a")
+    second = fetch(conn, [pinged("1", "15-08-26 10:30:00")], when="2026-08-15 11:00:00", tag="b")
+    third = fetch(conn, [pinged("1", "15-08-26 10:30:00", firmware="8.0.0")],
+                  when="2026-08-15 12:00:00", tag="c")
+
+    assert resolved(conn, first.snapshot_id)["1"]["seen_at"] == "2026-08-15 09:00:00"
+    assert resolved(conn, second.snapshot_id)["1"]["seen_at"] == "2026-08-15 10:30:00"
+    # A firmware move with the ping unchanged: a device row, and no new ping row.
+    assert (third.changed_rows, third.seen_rows) == (1, 0)
+    assert resolved(conn, third.snapshot_id)["1"]["seen_at"] == "2026-08-15 10:30:00"
+    assert resolved(conn, third.snapshot_id)["1"]["seen_age_hours"] == pytest.approx(1.5)
+
+
+def test_the_newest_snapshot_kept_resolved_follows_the_pings(conn):
+    """device_current advances from both tables — including a device that comes back on a
+    ping from before it left, which has no ping row of its own in the fetch it returns in."""
+    fetch(conn, [pinged("1", "15-08-26 09:00:00"), pinged("2", "15-08-26 08:00:00")],
+          when="2026-08-15 10:00:00", tag="a")
+    fetch(conn, [pinged("1", "15-08-26 10:30:00")], when="2026-08-15 11:00:00", tag="b")
+    last = fetch(conn, [pinged("1", "15-08-26 11:30:00"), pinged("2", "15-08-26 08:00:00")],
+                 when="2026-08-15 12:00:00", tag="c")
+
+    now = {r["imei"]: dict(r) for r in conn.execute(
+        "SELECT * FROM device_now WHERE snapshot_id = ?", (last.snapshot_id,))}
+    assert now == plain(resolved(conn, last.snapshot_id))
+    assert now["2"]["seen_at"] == "2026-08-15 08:00:00"
+
+
+def test_pruning_carries_last_pings_forward(conn):
+    """A pruned snapshot's ping moves to the survivor, like its device rows: without it, the
+    newest snapshot would report the ping from before the pruned fetch."""
+    from ota_analytics import retention
+
+    fetch(conn, [pinged("1", "01-06-26 09:00:00")], when="2026-06-01 10:00:00", tag="a")
+    fetch(conn, [pinged("1", "01-06-26 10:05:00")], when="2026-06-01 10:10:00", tag="b")
+    fetch(conn, [pinged("1", "01-06-26 10:05:00")], when="2026-06-01 10:20:00", tag="c")
+    newest = fetch(conn, [pinged("1", "01-06-26 10:05:00")],
+                   when="2026-08-15 10:00:00", tag="d")
+
+    removed = retention.prune(conn, now=datetime(2026, 8, 15, 12, 0), vacuum=False).removed
+    assert removed == 2                                   # b and c share a's day
+    assert resolved(conn, newest.snapshot_id)["1"]["seen_at"] == "2026-06-01 10:05:00"
+
+
+V22_INDEXES = {
+    "ix_ds_imei": "device_snapshot(imei)",
+    "ix_ds_queue": "device_snapshot(snapshot_id, queue_state)",
+    "ix_ds_model_fw": "device_snapshot(snapshot_id, device_model, firmware)",
+    "ix_ds_status": "device_snapshot(snapshot_id, status)",
+}
+
+
+def to_v22(conn) -> None:
+    """Lay a database out as 2.1.0 stored it: the last ping on every device row, a full copy of
+    the device wherever only its ping moved, and the four indexes v23 drops."""
+    from ota_analytics import retention
+
+    columns = retention.device_columns(conn)
+    conn.execute("ALTER TABLE device_snapshot ADD COLUMN seen_at TEXT")
+    conn.execute("ALTER TABLE device_snapshot ADD COLUMN seen_age_hours REAL")
+    conn.execute(f"""
+        INSERT INTO device_snapshot (snapshot_id, {', '.join(columns)})
+        SELECT k.snapshot_id, {', '.join('d.' + c for c in columns)}
+        FROM device_seen k
+        JOIN device_snapshot d
+          ON d.imei = k.imei
+         AND d.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_snapshot x
+                              WHERE x.imei = k.imei AND x.snapshot_id <= k.snapshot_id)
+        WHERE NOT EXISTS (SELECT 1 FROM device_snapshot e
+                          WHERE e.snapshot_id = k.snapshot_id AND e.imei = k.imei)
+    """)
+    conn.execute("""
+        UPDATE device_snapshot SET seen_at = (
+            SELECT p.seen_at FROM device_seen p
+            WHERE p.imei = device_snapshot.imei AND p.snapshot_id <= device_snapshot.snapshot_id
+            ORDER BY p.snapshot_id DESC LIMIT 1)
+        WHERE present = 1
+    """)
+    conn.execute("DELETE FROM device_seen")
+    for name, target in V22_INDEXES.items():
+        conn.execute(f"CREATE INDEX {name} ON {target}")
+    conn.execute("PRAGMA user_version = 22")
+    conn.commit()
+
+
+def test_v23_converts_a_v22_database_without_changing_any_snapshot(tmp_path):
+    """The upgrade the live install runs once. Every snapshot must resolve exactly as before,
+    with the rows that recorded only a ping gone and the four indexes with them."""
+    from ota_analytics import db
+
+    path = tmp_path / "upgrade.db"
+    conn = db.connect(path)
+    fetch(conn, [pinged("1", "15-08-26 09:00:00"), pinged("2", "15-08-26 08:00:00"),
+                 api_device("3")], when="2026-08-15 10:00:00", tag="a")
+    fetch(conn, [pinged("1", "15-08-26 10:30:00"), pinged("2", "15-08-26 08:00:00")],
+          when="2026-08-15 11:00:00", tag="b")                 # 3 leaves
+    fetch(conn, [pinged("1", "15-08-26 11:30:00", firmware="8.0.0"),
+                 pinged("2", "15-08-26 11:45:00"), api_device("3")],
+          when="2026-08-15 12:00:00", tag="c")                 # 3 comes back
+    fetch(conn, [pinged("1", "15-08-26 12:30:00", firmware="8.0.0"),
+                 pinged("2", "15-08-26 11:45:00"), api_device("3")],
+          when="2026-08-15 13:00:00", tag="d")
+    ids = [r[0] for r in conn.execute("SELECT id FROM snapshot ORDER BY id")]
+    expected = {sid: plain(resolved(conn, sid)) for sid in ids}
+    split_rows = conn.execute("SELECT COUNT(*) FROM device_snapshot").fetchone()[0]
+
+    to_v22(conn)
+    v22_rows = conn.execute("SELECT COUNT(*) FROM device_snapshot").fetchone()[0]
+    assert v22_rows > split_rows                     # the copies that only carried a ping
+    assert {sid: plain(resolved(conn, sid)) for sid in ids} != expected   # view now sees no pings
+    conn.close()
+
+    conn = db.connect(path)                          # migrates: user_version 22 < 23
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(device_snapshot)")}
+    assert not {"seen_at", "seen_age_hours"} & columns
+    indexes = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'device_snapshot'")}
+    assert not set(V22_INDEXES) & indexes
+    assert conn.execute("SELECT COUNT(*) FROM device_snapshot").fetchone()[0] == split_rows
+    assert {sid: plain(resolved(conn, sid)) for sid in ids} == expected
+    now = {r["imei"]: dict(r) for r in conn.execute(
+        "SELECT * FROM device_now WHERE snapshot_id = ?", (ids[-1],))}
+    assert now == expected[ids[-1]]
+
+    # The copy taken before the rewrite holds the 2.1.0 layout, untouched.
+    backup = db.sqlite3.connect(path.with_name("upgrade.before-v23.db"))
+    assert backup.execute("SELECT COUNT(*) FROM device_snapshot").fetchone()[0] == v22_rows
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == 22
+    backup.close()
+    conn.close()
+
+
+def test_a_new_database_needs_no_copy_and_has_no_dropped_index(tmp_path):
+    from ota_analytics import db
+
+    conn = db.connect(tmp_path / "fresh.db")
+    indexes = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert not set(V22_INDEXES) & indexes
+    assert {"ix_ds_imei_snap", "ix_seen_snap"} <= indexes
+    assert not list(tmp_path.glob("*.before-v23.db"))
+    conn.close()

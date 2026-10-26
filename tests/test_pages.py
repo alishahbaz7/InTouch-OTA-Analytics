@@ -1188,13 +1188,16 @@ def test_a_range_over_15_days_is_cut_and_a_backwards_one_refused(client, cloud):
 
 
 def test_after_a_send_the_start_stays_and_the_end_moves_to_today(client, cloud):
+    # Relative to today: a fixed date aged past MAX_RANGE_DAYS on 16-10-2026 and the start was
+    # then rightly moved up — the case below is a start the range still holds.
+    start = (datetime.now() - timedelta(days=3)).strftime("%d-%m-%Y") + " 06:00"
     reply = client.post("/cota/console/send", data={
         "device_id": "14906", "device_type": "124", "cmd_type": "36", "val1": "X1",
-        "from": "01-10-2026 06:00"}, follow_redirects=False)
+        "from": start}, follow_redirects=False)
     location = html.unescape(reply.headers["location"])
     from urllib.parse import parse_qs, urlsplit
     query = parse_qs(urlsplit(location).query)
-    assert query["from"] == ["01-10-2026 06:00"]
+    assert query["from"] == [start]
     assert query["to"] == [datetime.now().strftime("%d-%m-%Y") + " 23:59"]
 
 

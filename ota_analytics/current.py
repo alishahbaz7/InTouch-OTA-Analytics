@@ -80,11 +80,14 @@ def advance(conn: sqlite3.Connection, snapshot_id: int) -> int:
     if previous == snapshot_id:
         return 0
 
-    columns = ", ".join(COLUMNS)
-    updates = ", ".join(f"{c} = excluded.{c}" for c in COLUMNS if c != "imei")
+    # The last ping is not in device_snapshot (v23); it is applied from device_seen below.
+    stored = [c for c in COLUMNS if c != "seen_at"]
+    columns = ", ".join(stored)
+    updates = ", ".join(f"{c} = excluded.{c}" for c in stored if c != "imei")
 
     # Devices the crossed fetches reported. Ordered by snapshot so the newest row for a device
     # is applied last and wins; ON CONFLICT then leaves exactly its values in place.
+    before = conn.total_changes
     conn.execute(f"""
         INSERT INTO device_current ({columns})
         SELECT {columns} FROM device_snapshot
@@ -92,7 +95,22 @@ def advance(conn: sqlite3.Connection, snapshot_id: int) -> int:
         ORDER BY snapshot_id
         ON CONFLICT(imei) DO UPDATE SET {updates}
     """, (previous, snapshot_id))
-    touched = conn.total_changes
+
+    # Last pings, for every device either table moved in the crossed fetches: a ping that moved,
+    # and a device that arrived or came back — inserted above with no ping, its newest one may be
+    # from before it left. Resolved, not copied, so either case reads what device_state would.
+    conn.execute("""
+        UPDATE device_current SET seen_at = (
+            SELECT p.seen_at FROM device_seen p
+            WHERE p.imei = device_current.imei AND p.snapshot_id <= ?2
+            ORDER BY p.snapshot_id DESC LIMIT 1)
+        WHERE imei IN (SELECT imei FROM device_seen
+                       WHERE snapshot_id > ?1 AND snapshot_id <= ?2
+                       UNION
+                       SELECT imei FROM device_snapshot
+                       WHERE snapshot_id > ?1 AND snapshot_id <= ?2 AND present = 1)
+    """, (previous, snapshot_id))
+    touched = conn.total_changes - before
 
     # Devices that left. A tombstone can be followed by the device coming back, so this runs
     # after the upsert and only removes those whose newest crossed row is the tombstone.

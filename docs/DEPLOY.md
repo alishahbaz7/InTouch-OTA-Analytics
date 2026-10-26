@@ -7,7 +7,7 @@
 ## Option A — your own machine (Windows)
 
 Free, no signup, no card, and the device data never leaves the building. The application needs
-25 MB of RAM and 52 MB of disk, so any machine that stays powered on will do.
+25 MB of RAM and a few hundred MB of disk, so any machine that stays powered on will do.
 
 **1. Set a dashboard password.** This is the step that matters: without it the launcher refuses
 to bind to the network at all, because every page lists IMEIs, VINs and ICCIDs.
@@ -98,7 +98,7 @@ than it looks**, measured rather than estimated:
 |---|---|
 | Peak memory, API fetch of all 35,475 devices | **25 MB** |
 | Peak memory, 22 MB spreadsheet ingest (streamed) | **12 MB** |
-| Disk | 52 MB, growing ~13 MB/day |
+| Disk | ~240 MB for two months of hourly history, growing ~2 MB/day (2.1.1) |
 
 So a 1 GB shared-core instance is comfortable, and a Raspberry Pi is genuinely enough. Do not
 pay for RAM this application will not use.
@@ -238,9 +238,10 @@ systemctl status cloudflared                  # tunnel up?
 du -h /opt/ota-analytics/data/ota_analytics.db
 ```
 
-Expect the database to grow roughly **13 MB/day** at a 15-minute cadence — it stores changes,
-not fetches, so a fixed fleet stays nearly flat. If it grows much faster than that, something is
-writing a row per device per fetch again; check `docs/` and the delta notes in `CLAUDE.md`.
+Expect the database to grow roughly **2 MB/day** at an hourly cadence once retention has thinned
+it (measured on the live install, 2.1.1) — it stores changes, not fetches, and a ping is a small
+row of its own, so a fixed fleet stays nearly flat. If it grows much faster than that, something
+is writing a row per device per fetch again; check `docs/` and the delta notes in `CLAUDE.md`.
 
 Enable unattended upgrades, since nobody else is patching this machine:
 

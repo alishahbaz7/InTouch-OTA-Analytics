@@ -1,6 +1,6 @@
 ---
 name: db-performance
-description: Rules for touching the snapshot warehouse in InTouch OTA Analytics — reading a snapshot, writing an ingest, adding a query, changing retention, or investigating anything described as slow, hanging, locked, or growing. Use before writing SQL against device_snapshot, device_state, device_change or device_current, before adding a step to ingest/rollup/quality/registry, and whenever a report says the app is slow or the database is large.
+description: Rules for touching the snapshot warehouse in InTouch OTA Analytics — reading a snapshot, writing an ingest, adding a query, adding a column or an index, changing retention, or investigating anything described as slow, hanging, locked, or growing. Use before writing SQL against device_snapshot, device_seen, device_state, device_change or device_current, before adding a step to ingest/rollup/quality/registry, and whenever a report says the app is slow, the database is large, or the disk is busy.
 ---
 
 # Keeping this database fast
@@ -72,9 +72,32 @@ for k, (n, s) in sorted(prof.items(), key=lambda kv: -kv[1][1])[:10]:
 That one snippet found every problem in 1.9.0, including two that were nothing like what was
 suspected: a single `UPDATE` at 367 seconds, and a helper called 196 times in one prune.
 
-Work on a **copy** of `dist/InTouchOTA-Analytics/data/ota_analytics.db`. It is the user's live
-data — 574 MB, a month of real history, and the only place these problems are visible. Never
-profile against the live file.
+Work on a **copy** of `dist/InTouchOTA-Analytics-v<version>/data/ota_analytics.db` (`dist/InTouchOTA-Analytics/data` before 2.1.1). It is the user's live
+data — 828 MB at 2.1.0 (238 MB after v23), two months of real history, and the only place these
+problems are visible. Never profile against the live file. Take the copy with SQLite's backup
+API from a `mode=ro` connection — it is consistent with the WAL beside it, and the running
+release does not notice:
+
+```python
+src = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
+dst = sqlite3.connect(copy); src.backup(dst)
+```
+
+Three more instruments, each of which found something the statement profile could not:
+
+- **Where the bytes are.** This SQLite has no `dbstat`. Inside a transaction you roll back,
+  `DROP INDEX x` (or `DROP TABLE`, views and triggers first) puts exactly that object's pages on
+  the freelist: `PRAGMA freelist_count` before and after is its size. That is how 228 MB of the
+  828 MB file turned out to be four indexes nothing read.
+- **Why rows exist.** For a table storing changes, ask which column changed:
+  `LAG(...) OVER (PARTITION BY imei ORDER BY snapshot_id)` and count `a.col IS NOT b.col` per
+  column. 86.8% of `device_snapshot` differed from the row before it only in `seen_at`.
+- **What a fetch writes.** `PRAGMA wal_autocheckpoint = 0`, then the WAL file's size after each
+  statement (from the trace callback) is that statement's disk write. A fetch recording ~3,100
+  changes wrote 55 MB, half of it scattered pages of two IMEI-ordered indexes.
+
+And time a page per function, not per statement: wrap the module's functions with a timer. A
+route runs in a worker thread, so `cProfile` from the test thread sees nothing.
 
 ## Statistics are not optional
 
@@ -86,7 +109,17 @@ statement, on every fetch**. With statistics, 0.21s.
 
 If you add a table or an index that a hot query depends on, check the plan
 (`EXPLAIN QUERY PLAN`) with statistics present, not on an empty test database where every plan
-looks the same.
+looks the same. A migration that creates or reshapes a big table runs `ANALYZE` on it (v23 does).
+
+## A connection starts cold
+
+Every request opens its own connection (`api.get_conn`), and SQLite's default page cache is
+2 MB — smaller than the registry (11 MB) and the change log (35 MB with its indexes). Each
+query on a page then re-read the same pages through the OS. `db.CACHE_KIB` (32 MB) gave
+Changes 5.15s → 0.55s, Overview 0.94s → 0.44s, Devices 1.44s → 0.77s, with no query touched.
+The same query measured alone, on a warm connection, ran in 110 ms — which is why it looked
+fine in isolation. **Measure a page through the app, not a query in a REPL.** `mmap_size` helped
+as much but was not used: on Windows a mapped file can block the truncation VACUUM needs.
 
 ## Writing
 
@@ -94,12 +127,32 @@ looks the same.
   or DELETE snapshot rows outside `retention`.
 - **`device_snapshot` stores changes, not fetches.** A row is written only when a device
   actually differs, plus a `present = 0` tombstone when the platform stops listing it.
+- **A column that moves on most fetches does not belong in `device_snapshot`.** Every change
+  copies the whole row (~300 bytes plus its index entries). `seen_at` moved for ~3,000 devices
+  every hour, and was 86.8% of all rows until v23 gave it `device_seen` (~45 bytes a move):
+  828 MB → 238 MB, every snapshot resolving identically. Before adding a column, ask how often
+  it changes; if the answer is "most fetches", it gets a narrow table of its own.
+- **`device_seen` moves with `device_snapshot` everywhere.** Retention carries it forward,
+  densify writes it (an explicit NULL for "never pinged" included), compact squeezes it,
+  renumbering remaps it, a bundle rebuilds one whole row per change from both. They resolve
+  independently: a device's ping is its newest `device_seen` row at or before the snapshot,
+  whichever `device_snapshot` row its other values come from.
 - **Never store anything derived from the snapshot time.** `seen_age_hours` is computed at read
   time for exactly this reason: stored, it differs on every row of every fetch and defeats delta
   storage entirely (measured: 6.7% compaction with it, 87.2% without).
-- **Anything that writes `device_snapshot` directly must refresh the materialization** —
-  `current.refresh_latest`, or `current.invalidate` to fall back to the view. Empty is always
-  safe: slower, never wrong.
+- **An index must name the query it serves.** `device_snapshot` carries its primary key and
+  `ix_ds_imei_snap`, nothing else. Four more were dropped in v23 — 228 MB — because nothing had
+  filtered the physical table by status, task or model since reads went through `resolve`. On a
+  `WITHOUT ROWID` table a secondary index carries the primary key, so `(imei)` there *was*
+  `(imei, snapshot_id)`, a byte-for-byte duplicate. An index ordered by IMEI also costs a
+  scattered page per changed device on every fetch.
+- **Anything that writes `device_snapshot` or `device_seen` directly must refresh the
+  materialization** — `current.refresh_latest`, or `current.invalidate` to fall back to the view.
+  Empty is always safe: slower, never wrong.
+- **In a fetch, advance `device_current` before anything reads the new snapshot.** Quality and
+  the registry used to run first and each resolved the snapshot from scratch (0.8–2.5s per
+  fetch) for the answer advancing produces from ~3,000 changed rows. `ingest._fold_in` holds
+  the order.
 - **Refresh statistics after bulk writes** (`db.refresh_statistics`). It writes, so it may never
   run on a read path.
 

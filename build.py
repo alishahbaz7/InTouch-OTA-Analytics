@@ -2,16 +2,21 @@
 
     .\\.venv\\Scripts\\python.exe build.py
 
-Produces `dist\\InTouchOTA-Analytics\\` and zips it as `InTouchOTA-Analytics-v<version>.zip`,
-which unpacks to a folder of the same name. The zip is what a colleague receives: they unpack it
-anywhere, run the .exe, and the database is created in a `data` folder beside it — so the whole
-install is one folder that can be copied or backed up.
+Produces `dist\\InTouchOTA-Analytics-v<version>\\InTouchOTA-Analytics-v<version>.exe` and zips the
+folder as `InTouchOTA-Analytics-v<version>.zip`, which unpacks to a folder of the same name. The
+zip is what a colleague receives: they unpack it anywhere, run the .exe, and the database is
+created in a `data` folder beside it — so the whole install is one folder that can be copied or
+backed up.
 
-A release is named `InTouchOTA-Analytics-v1.9.1` — the version and nothing else, no platform
-suffix — and carries one executable. That naming is the user's rule for every release, in this
-project and their others; see the `ship` skill. The working folder in `dist\\` stays unversioned
-on purpose: an install run from there keeps its database inside it, and a folder renamed at
-every release would leave the history behind in the old one.
+A release is named `InTouchOTA-Analytics-v2.1.1` — the version and nothing else, no platform
+suffix — and the zip, the folder and the program all carry that one name (the user, 12-10-2026:
+"use the same name as the zip for the folder and the utility"). It carries one executable. That
+naming is the user's rule for every release, in this project and their others; see the `ship`
+skill.
+
+The working folder in `dist\\` is renamed with it, and this install keeps its database inside
+that folder — so a build carries the user's files from the previous release's folder into the new
+one (`restore_data`), rather than leaving the history behind under the old name.
 
 Deliberately not a one-file build. One-file unpacks itself to a temp directory on every launch,
 which costs several seconds each time, and a single large unsigned executable is what antivirus
@@ -29,7 +34,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 NAME = "InTouchOTA-Analytics"
 SPEC = ROOT / f"{NAME}.spec"
-DIST = ROOT / "dist" / NAME
 
 
 def version() -> str:
@@ -39,11 +43,22 @@ def version() -> str:
 
 
 def release_name() -> str:
-    """What a release is called — the zip, and the folder it unpacks to: `InTouchOTA-Analytics-v1.9.1`.
+    """What a release is called — the zip, the folder, and the program: `InTouchOTA-Analytics-v2.1.1`.
 
-    One function, so the zip and the folder inside it cannot disagree about the version.
+    One function, so the zip, the folder inside it and the .exe cannot disagree about the version.
+    The spec derives the same name from the same __version__.
     """
     return f"{NAME}-v{version()}"
+
+
+# The program folder this build writes in dist\ — named for the release, like everything else.
+DIST = ROOT / "dist" / release_name()
+
+
+def is_app_folder(entry: Path) -> bool:
+    r"""A program folder in dist\: this release's, an earlier one's, or the unversioned one used
+    before 2.1.1 — each holds the program (the build's) and possibly the user's data (theirs)."""
+    return entry.is_dir() and (entry.name == NAME or entry.name.startswith(f"{NAME}-v"))
 
 
 # Windows reads the version out of a resource compiled into the .exe, not out of its name.
@@ -51,9 +66,8 @@ def release_name() -> str:
 # file cannot drift from the number in the code — a version that lags is worse than none, because
 # a bug report then points at the wrong build.
 #
-# The executable's own name stays unversioned on purpose: the release folder and the zip carry
-# the version, and an .exe renamed at every release would break shortcuts and pinned taskbar
-# icons at every upgrade.
+# The executable is named for the release too (the user, 12-10-2026), so Task Manager and the
+# taskbar say which version is running; a shortcut to it is re-pointed at each upgrade.
 VERSION_RESOURCE = """VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=({parts}),
@@ -95,7 +109,7 @@ def write_version_resources() -> dict[str, Path]:
         path = ROOT / f"version_{internal}.txt"
         path.write_text(VERSION_RESOURCE.format(
             parts=parts, version=number, description=description,
-            internal=internal, filename=f"{internal}.exe"), encoding="utf-8")
+            internal=internal, filename=f"{release_name()}.exe"), encoding="utf-8")
         written[internal] = path
     return written
 
@@ -147,10 +161,16 @@ PRESERVE = ROOT / ".build-preserved-data"
 # thought about is preserved by omission instead of destroyed by it — the same reason auth.py
 # denies by default.
 #
-# `-silent.exe` stays listed although it is no longer built (dropped in 1.9.1): a dist\ folder
-# left by an older build still has one, and unlisted it would be "rescued" as the user's file
-# and put back beside every new build for ever.
-BUILD_OUTPUTS = {"_internal", f"{NAME}.exe", f"{NAME}-silent.exe", "READ ME FIRST.txt"}
+# Every executable this build or an earlier one named — `InTouchOTA-Analytics.exe` before 2.1.1,
+# `InTouchOTA-Analytics-v<version>.exe` since, and the `-silent.exe` twin dropped in 1.9.1 — is
+# the build's. Unlisted, an old one would be "rescued" as the user's file and put back beside
+# every new build for ever.
+BUILD_OUTPUTS = {"_internal", "READ ME FIRST.txt"}
+
+
+def is_build_output(inner: Path) -> bool:
+    return inner.name in BUILD_OUTPUTS or (inner.suffix.lower() == ".exe"
+                                           and inner.name.startswith(NAME))
 
 
 def user_files() -> list[Path]:
@@ -161,9 +181,8 @@ def user_files() -> list[Path]:
 
     theirs: list[Path] = []
     for entry in sorted(root.iterdir()):
-        if entry.name == NAME and entry.is_dir():
-            theirs.extend(inner for inner in sorted(entry.iterdir())
-                          if inner.name not in BUILD_OUTPUTS)
+        if is_app_folder(entry):
+            theirs.extend(inner for inner in sorted(entry.iterdir()) if not is_build_output(inner))
         elif not (entry.name.startswith(f"{NAME}-v") and entry.suffix == ".zip"):
             theirs.append(entry)
     return theirs
@@ -182,6 +201,17 @@ def rescue_data() -> list[Path] | None:
     theirs = user_files()
     if not theirs:
         return None
+    # Their files from a program folder move into the new release's folder (restore_data). With
+    # two program folders holding files there is no telling which database is the live one, and
+    # guessing could put the wrong history in front of them — so refuse and say which.
+    holders = sorted({item.parent.name for item in theirs
+                      if item.parent != ROOT / "dist" and is_app_folder(item.parent)})
+    if len(holders) > 1:
+        raise SystemExit(
+            "More than one program folder in dist holds your files:\n    "
+            + "\n    ".join(f"dist\\{name}" for name in holders)
+            + "\nKeep the one you use (its 'data' folder is your history) and move the others out "
+              "of dist, then build again.")
     if PRESERVE.exists():
         raise SystemExit(
             f"{PRESERVE} already exists — an earlier build was interrupted before it could put\n"
@@ -207,13 +237,17 @@ def rescue_data() -> list[Path] | None:
 
 
 def restore_data(parked: list[Path] | None) -> None:
-    """Put back everything rescue_data moved, at the same relative path."""
+    """Put back everything rescue_data moved — files from a program folder into this release's
+    folder (the data moves with the program), everything else at the same relative path."""
     if not parked:
         return
     for relative in parked:
         source = PRESERVE / relative
         if not source.exists():
             continue
+        if len(relative.parts) > 1 and (relative.parts[0] == NAME
+                                        or relative.parts[0].startswith(f"{NAME}-v")):
+            relative = Path(DIST.name, *relative.parts[1:])
         target = ROOT / "dist" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
@@ -244,7 +278,7 @@ def build() -> None:
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
-    console = DIST / f"{NAME}.exe"
+    console = DIST / f"{release_name()}.exe"
     for required in (console,):
         if not required.exists():
             print(f"Build finished but {required.name} is missing.", file=sys.stderr)
@@ -253,10 +287,11 @@ def build() -> None:
 
     # A README next to the exe, because the person who receives the zip has no other
     # instructions and the data-folder behaviour is the thing they need to know.
+    exe = f"{release_name()}.exe"
     (DIST / "READ ME FIRST.txt").write_text(
         f"InTouch OTA Analytics v{version()}\n"
         f"{'=' * 40}\n\n"
-        f"Run {NAME}.exe to start the dashboard. It opens at http://127.0.0.1:8000\n\n"
+        f"Run {exe} to start the dashboard. It opens at http://127.0.0.1:8000\n\n"
         "YOUR DATA LIVES IN THE 'data' FOLDER NEXT TO THIS FILE.\n"
         "Keep the whole folder together. Copy it to move or back up your history;\n"
         "delete it and you start from an empty database.\n\n"
@@ -266,15 +301,16 @@ def build() -> None:
         "on the Update Data page. Starting the app twice is safe: it opens the copy that\n"
         "is already running rather than starting another.\n\n"
         "Command line (same program):\n"
-        f"  {NAME}.exe db-info                 who this install is and what it holds\n"
-        f"  {NAME}.exe db-export --out share.otabundle    hand your history to a colleague\n"
-        f"  {NAME}.exe db-import share.otabundle          merge theirs into yours\n"
-        f"  {NAME}.exe passwd --role admin     set a dashboard password\n"
-        f"  {NAME}.exe --help                  everything else\n\n"
+        f"  {exe} db-info                 who this install is and what it holds\n"
+        f"  {exe} db-export --out share.otabundle    hand your history to a colleague\n"
+        f"  {exe} db-import share.otabundle          merge theirs into yours\n"
+        f"  {exe} passwd --role admin     set a dashboard password\n"
+        f"  {exe} --help                  everything else\n\n"
         "UPGRADING FROM AN EARLIER VERSION\n"
-        "Each release unpacks to its own folder, named for the version. Close the old\n"
-        "copy, then move its 'data' folder into this one before the first start — that\n"
-        "folder is your whole history. The database is upgraded on first start.\n",
+        "Each release unpacks to its own folder, named for the version, and its program\n"
+        "carries the same name. Close the old copy, then move its 'data' folder into this\n"
+        "one before the first start — that folder is your whole history. The database is\n"
+        "upgraded on first start. A shortcut to the old program needs pointing at this one.\n",
         encoding="utf-8")
 
     archive = ROOT / "dist" / f"{release_name()}.zip"

@@ -213,6 +213,96 @@ def test_interleave_does_not_rewrite_the_snapshots_around_it(tmp_path: Path, exp
     theirs.close()
 
 
+# ─── last pings, which live in their own table (v23) ────────────────────────
+
+def state_at(conn, snapshot_at: str) -> dict:
+    """Every device's firmware and last ping as of one snapshot."""
+    row = conn.execute("SELECT id FROM snapshot WHERE snapshot_at = ?", (snapshot_at,)).fetchone()
+    assert row is not None, f"no snapshot at {snapshot_at}"
+    return {r["imei"]: (r["firmware"], r["seen_at"]) for r in conn.execute(
+        "SELECT imei, firmware, seen_at FROM device_state WHERE snapshot_id = ?", (row["id"],))}
+
+
+@pytest.fixture
+def pings(make_export):
+    """The merge hazard again, on the last ping. Device 2 reports the same ping at 10:00 and
+    12:00, so 12:00 stores nothing for it; at 11:00 it reports a later one. Device 3 has never
+    pinged, so it has no ping row anywhere — and 11:00 says it pinged. Device 1 pings every
+    fetch and nothing else about it moves, which is what most of the fleet does."""
+    def fleet(one, two, three):
+        return [device("1", seen_at=one), device("2", seen_at=two),
+                device("3", status="-", seen_at=three)]
+    return {
+        "10:00": make_export(fleet("15-08-26 09:50:00", "15-08-26 08:00:00", "-"),
+                             name="Devices_3_15Aug26_1000.xlsx"),
+        "11:00": make_export(fleet("15-08-26 10:50:00", "15-08-26 10:30:00", "15-08-26 10:40:00"),
+                             name="Devices_3_15Aug26_1100.xlsx"),
+        "12:00": make_export(fleet("15-08-26 11:50:00", "15-08-26 08:00:00", "-"),
+                             name="Devices_3_15Aug26_1200.xlsx"),
+    }
+
+
+def test_export_import_reproduces_every_last_ping(tmp_path: Path, pings):
+    source = db.connect(tmp_path / "source.db")
+    load(source, pings.values())
+    path = tmp_path / f"share{bundle.SUFFIX}"
+    bundle.export_bundle(source, path)
+
+    target = db.connect(tmp_path / "target.db")
+    assert bundle.import_bundle(target, path).status == "imported"
+    for at in ("2026-08-15 10:00:00", "2026-08-15 11:00:00", "2026-08-15 12:00:00"):
+        assert state_at(target, at) == state_at(source, at), at
+    # Imported pings are compacted like fetched ones: one row per move, nothing more.
+    assert (target.execute("SELECT COUNT(*) FROM device_seen").fetchone()[0]
+            == source.execute("SELECT COUNT(*) FROM device_seen").fetchone()[0])
+    source.close()
+    target.close()
+
+
+def test_a_bundle_still_carries_one_whole_row_per_change(tmp_path: Path, pings):
+    """The split is this install's layout, not the bundle's: a ping that moved travels as a
+    complete device row, exactly as before v23, so either side of the split reads the other."""
+    import json
+    import zipfile
+
+    source = db.connect(tmp_path / "source.db")
+    load(source, pings.values())
+    path = tmp_path / f"share{bundle.SUFFIX}"
+    bundle.export_bundle(source, path)
+    with zipfile.ZipFile(path) as archive:
+        manifest = json.loads(archive.read(bundle.MANIFEST))
+        rows = [json.loads(line) for line in archive.read(bundle.DEVICES).splitlines() if line]
+    assert "seen_at" in manifest["device_columns"]
+    one = [r for r in rows if r["imei"] == "1"]
+    assert len(one) == 3                                   # a ping-only move at 11:00 and 12:00
+    assert all(r.get("firmware") == "7.5.0.51A" for r in one)
+    assert [r["seen_at"] for r in one] == ["2026-08-15 09:50:00", "2026-08-15 10:50:00",
+                                           "2026-08-15 11:50:00"]
+    source.close()
+
+
+def test_interleave_does_not_rewrite_the_last_ping_around_it(tmp_path: Path, pings):
+    """Device 2 inherits its 12:00 ping from 10:00, and device 3 inherits "never pinged". A
+    foreign 11:00 with later pings must not become the answer at 12:00 for either."""
+    mine = db.connect(tmp_path / "mine.db")
+    load(mine, [pings["10:00"], pings["12:00"]])
+    before = {at: state_at(mine, at) for at in ("2026-08-15 10:00:00", "2026-08-15 12:00:00")}
+    assert before["2026-08-15 12:00:00"]["2"][1] == "2026-08-15 08:00:00"
+    assert before["2026-08-15 12:00:00"]["3"][1] is None
+
+    theirs = db.connect(tmp_path / "theirs.db")
+    load(theirs, [pings["11:00"]])
+    path = tmp_path / f"middle{bundle.SUFFIX}"
+    bundle.export_bundle(theirs, path)
+    assert bundle.import_bundle(mine, path, allow_interleave=True).status == "imported"
+
+    for at, expected in before.items():
+        assert state_at(mine, at) == expected, at
+    assert state_at(mine, "2026-08-15 11:00:00") == state_at(theirs, "2026-08-15 11:00:00")
+    mine.close()
+    theirs.close()
+
+
 def test_interleave_leaves_ids_in_chronological_order(tmp_path: Path, exports):
     """device_state resolves by comparing snapshot ids, so id order is a correctness property."""
     mine = db.connect(tmp_path / "mine.db")

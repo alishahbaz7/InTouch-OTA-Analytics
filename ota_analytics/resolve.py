@@ -26,6 +26,12 @@ other formulations were tried and are slower than the view, not faster — a win
 (`ROW_NUMBER() OVER (PARTITION BY imei)`) at 17.4s, and restricting the view's join with
 `d.snapshot_id <= s.id` at 12.5s.
 
+The last-ping time is resolved the same way from its own table, `device_seen` (v23), because it
+moves on nearly every fetch and was 86.8% of all stored rows while it sat in `device_snapshot`.
+It is fetched per resolved device by a seek on its primary key rather than by a second grouped
+join: on the live database (308 snapshots) the seek was 1.16-1.26s against 1.69-1.89s for the
+grouped form, identical output on the first, a middle and the newest snapshot.
+
 **This cannot be a view.** The snapshot id has to reach the inner `GROUP BY` to bound it, and
 SQLite has no LATERAL, so a view would have to resolve every snapshot before filtering to one.
 `device_state` therefore stays exactly as it is: it is the readable statement of what resolution
@@ -54,11 +60,22 @@ STORED_COLUMNS = (
     "base_config", "seen_at", "iccid", "hw_ver", "vin", "vin_raw", "groups_raw", "first_ping",
 )
 
+# The one column that is not in device_snapshot: it has its own table, resolved on its own.
+SEEN = "seen_at"
+
 # Kept in step with device_state's own expression. Both read snapshot.snapshot_at, so a snapshot
 # whose time is edited moves both together.
-SEEN_AGE = ("CASE WHEN d.seen_at IS NULL THEN NULL "
+SEEN_AGE = ("CASE WHEN k.seen_at IS NULL THEN NULL "
             "ELSE (julianday((SELECT snapshot_at FROM snapshot WHERE id = ?1)) "
-            "- julianday(d.seen_at)) * 24.0 END AS seen_age_hours")
+            "- julianday(k.seen_at)) * 24.0 END AS seen_age_hours")
+
+# A device's last ping at the snapshot being resolved: its newest device_seen row at or before
+# it. LEFT, because a device that has never pinged has no row and resolves to NULL.
+SEEN_JOIN = """
+LEFT JOIN device_seen k
+  ON k.imei = d.imei
+ AND k.snapshot_id = (SELECT MAX(x.snapshot_id) FROM device_seen x
+                      WHERE x.imei = d.imei AND x.snapshot_id <= ?1)"""
 
 VIEW = "device_state"
 
@@ -66,23 +83,27 @@ VIEW = "device_state"
 def select(columns=None, *, with_snapshot_id: bool = True, with_seen_age: bool = True) -> str:
     """The SELECT that resolves a snapshot. Takes the snapshot id once, as `?1`.
 
-    `?1` rather than three separate placeholders because the id appears three times — in the
-    projection, in the last-seen arithmetic and in the group-by bound — and three copies of one
-    value is how they drift apart. Callers pass a one-element parameter tuple.
+    `?1` rather than separate placeholders because the id appears up to four times — in the
+    projection, in the last-seen arithmetic and in both bounds — and four copies of one value is
+    how they drift apart. Callers pass a one-element parameter tuple.
+
+    The ping-time join is added only when the last ping is asked for, directly or through its
+    age, so a caller that wants groups or firmware does not pay for it.
     """
     chosen = tuple(columns) if columns is not None else STORED_COLUMNS
-    projected = [f"d.{c}" for c in chosen]
+    projected = [f"k.{c}" if c == SEEN else f"d.{c}" for c in chosen]
     if with_snapshot_id:
         projected.insert(0, "?1 AS snapshot_id")
     if with_seen_age:
         projected.append(SEEN_AGE)
+    seen = SEEN_JOIN if SEEN in chosen or with_seen_age else ""
 
     return f"""
 SELECT {', '.join(projected)}
 FROM device_snapshot d
 JOIN (SELECT imei, MAX(snapshot_id) AS ms FROM device_snapshot
       WHERE snapshot_id <= ?1 GROUP BY imei) m
-  ON m.imei = d.imei AND m.ms = d.snapshot_id
+  ON m.imei = d.imei AND m.ms = d.snapshot_id{seen}
 WHERE d.present = 1
 """
 
