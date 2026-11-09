@@ -260,6 +260,9 @@ class Scheduler:
 
         job.begin("Rebuilding metrics")
         rollup.rollup_snapshot(conn, result.snapshot_id)
+        # And any earlier snapshot whose rollup failed after its data was stored, so a gap in the
+        # history's totals closes at the next fetch. One indexed query when there is none.
+        rollup.rollup_missing(conn)
 
         job.begin("Thinning old snapshots")
         # Retention runs with every fetch: at a short interval the database would otherwise grow

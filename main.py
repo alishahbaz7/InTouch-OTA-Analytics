@@ -505,6 +505,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\nLoading exports...")
         load_new_exports()
 
+    # Totals a failed rollup left out — every hourly fetch from 09-11-2026 until 2.1.2, on the
+    # release. Filled before the dashboard serves, so the history it charts has no gap.
+    repaired = rollup.rollup_missing(db.connect())
+    if repaired:
+        print(f"  * metrics rebuilt for {len(repaired)} snapshot(s) that were missing them")
+
     summarize()
 
     port = find_free_port(args.host, args.port)

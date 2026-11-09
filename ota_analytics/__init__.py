@@ -3,13 +3,16 @@
 # Semantic versioning: MAJOR for a breaking change to the data model or API, MINOR for new
 # capability, PATCH for fixes. Bump this in the same commit as the change it describes — a
 # version that lags is worse than none, because it makes a bug report point at the wrong code.
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 # What shipped in this version, shown in the UI so a screenshot is self-identifying.
-RELEASED = "2026-10-26"
+RELEASED = "2026-11-09"
 CODENAME = "relay"
 
 VERSION_HISTORY = [
+    ("2.1.2", "2026-11-09", "A fetch no longer fails on a group of devices that have never "
+                            "pinged, and the totals it missed are filled in; the firmware "
+                            "distribution split by online, offline and activation-pending"),
     ("2.1.1", "2026-10-26", "One name per release — zip, folder and program; the database a "
                             "quarter of the size (last pings stored on their own, four unused "
                             "indexes dropped), every page opening in under a second and a fetch "

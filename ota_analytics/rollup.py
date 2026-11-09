@@ -11,6 +11,10 @@ import sqlite3
 
 from . import config
 
+# Every conditional count is COALESCEd: SUM over a group in which the condition is NULL for every
+# row is NULL, not 0, and these columns are NOT NULL. A device that has never pinged has a NULL
+# age, so a group made only of such devices broke the fetch on 09-11-2026 — one new device, never
+# pinged, listed with its own IMEI as its model, alone in its group.
 FLEET_VERSION_SQL = f"""
 INSERT INTO fact_fleet_version (
   snapshot_id, snapshot_at, device_model, firmware, hw_ver,
@@ -25,16 +29,16 @@ SELECT
   COALESCE(d.firmware, '(unknown)'),
   COALESCE(d.hw_ver, '(unknown)'),
   COUNT(*),
-  SUM(d.status = 'Online'),
-  SUM(d.status = 'Offline'),
-  SUM(d.status = 'Inactive'),
-  SUM(d.queue_state = 'never_tasked'),
-  SUM(d.queue_state = 'completed'),
-  SUM(d.queue_state = 'pending'),
+  COALESCE(SUM(d.status = 'Online'), 0),
+  COALESCE(SUM(d.status = 'Offline'), 0),
+  COALESCE(SUM(d.status = 'Inactive'), 0),
+  COALESCE(SUM(d.queue_state = 'never_tasked'), 0),
+  COALESCE(SUM(d.queue_state = 'completed'), 0),
+  COALESCE(SUM(d.queue_state = 'pending'), 0),
   COALESCE(SUM(CASE WHEN d.queue_state = 'pending' THEN d.queue ELSE 0 END), 0),
-  SUM(d.seen_age_hours > {config.STALE_7D_HOURS}),
-  SUM(d.seen_age_hours > {config.STALE_30D_HOURS}),
-  SUM(d.seen_at IS NULL)
+  COALESCE(SUM(d.seen_age_hours > {config.STALE_7D_HOURS}), 0),
+  COALESCE(SUM(d.seen_age_hours > {config.STALE_30D_HOURS}), 0),
+  COALESCE(SUM(d.seen_at IS NULL), 0)
 FROM device_state d
 JOIN snapshot s ON s.id = d.snapshot_id
 WHERE d.snapshot_id = ?
@@ -51,19 +55,19 @@ SELECT
   d.snapshot_id,
   s.snapshot_at,
   COUNT(*),
-  SUM(d.status = 'Online'),
-  SUM(d.status = 'Offline'),
-  SUM(d.status = 'Inactive'),
-  SUM(d.queue_state = 'never_tasked'),
-  SUM(d.queue_state = 'completed'),
-  SUM(d.queue_state = 'pending'),
+  COALESCE(SUM(d.status = 'Online'), 0),
+  COALESCE(SUM(d.status = 'Offline'), 0),
+  COALESCE(SUM(d.status = 'Inactive'), 0),
+  COALESCE(SUM(d.queue_state = 'never_tasked'), 0),
+  COALESCE(SUM(d.queue_state = 'completed'), 0),
+  COALESCE(SUM(d.queue_state = 'pending'), 0),
   COALESCE(SUM(CASE WHEN d.queue_state = 'pending' THEN d.queue ELSE 0 END), 0),
   COUNT(DISTINCT d.firmware),
   COUNT(DISTINCT d.device_model),
   0.0,
-  SUM(d.seen_age_hours > {config.STALE_7D_HOURS}),
-  SUM(d.seen_age_hours > {config.STALE_30D_HOURS}),
-  SUM(d.seen_at IS NULL)
+  COALESCE(SUM(d.seen_age_hours > {config.STALE_7D_HOURS}), 0),
+  COALESCE(SUM(d.seen_age_hours > {config.STALE_30D_HOURS}), 0),
+  COALESCE(SUM(d.seen_at IS NULL), 0)
 FROM device_state d
 JOIN snapshot s ON s.id = d.snapshot_id
 WHERE d.snapshot_id = ?
@@ -132,6 +136,25 @@ def rollup_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> None:
     conn.execute("UPDATE fact_snapshot_kpi SET fragmentation = ? WHERE snapshot_id = ?",
                  (fragmentation(conn, snapshot_id), snapshot_id))
     conn.commit()
+
+
+def rollup_missing(conn: sqlite3.Connection) -> list[int]:
+    """Roll up every snapshot that has data but no totals. Returns the ids it rolled up.
+
+    A fetch stores its snapshot before rolling it up, so a rollup that fails leaves the data in
+    place and a gap in the history's totals — after 09-11-2026, one per hourly fetch until the fix
+    was installed. Called after each fetch and at startup, so a gap closes by itself; when there
+    is none it costs one indexed query.
+    """
+    missing = [r["id"] for r in conn.execute("""
+        SELECT s.id FROM snapshot s
+        WHERE s.row_count > 0
+          AND NOT EXISTS (SELECT 1 FROM fact_snapshot_kpi k WHERE k.snapshot_id = s.id)
+        ORDER BY s.snapshot_at, s.id
+    """)]
+    for snapshot_id in missing:
+        rollup_snapshot(conn, snapshot_id)
+    return missing
 
 
 def rollup_all(conn: sqlite3.Connection, on_step=None) -> int:

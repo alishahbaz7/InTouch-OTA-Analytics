@@ -978,6 +978,11 @@ release/dev side by side. Load it before changing any page, nav item, form or st
   Anything that moves `device_snapshot` rows moves these too (retention, densify, compact,
   renumber); a bundle still carries one whole row per change, so either side of v23 reads the
   other's. See "Storage and speed in 2.1.1".
+- **A conditional count into a NOT NULL column is `COALESCE(SUM(...), 0)`.** `SUM(cond)` over a
+  group where `cond` is NULL on every row is NULL, not 0 — a device that has never pinged has a
+  NULL age. On 09-11-2026 one new, never-pinged device listed with its own IMEI as its model sat
+  alone in its group and broke every fetch at the rollup. A fetch stores its data before rolling
+  up, so `rollup.rollup_missing` (startup and every fetch) fills any totals a failure left out.
 - **Never store a value derived from the snapshot time.** `seen_age_hours` is `snapshot_at`
   minus `seen_at`, so storing it made *every row of every fetch* differ and defeated the scheme
   entirely — compaction removed 6.7% of rows with it included and 87.2% without. `device_state`

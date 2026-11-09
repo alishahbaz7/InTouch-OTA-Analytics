@@ -671,6 +671,18 @@ button[data-tip], a[data-tip], summary[data-tip] { cursor: pointer; }
 .stack-seg.neutral { background: var(--muted); }
 .stack-legend { display: none; }
 
+/* Devices per firmware version: each version's size against the largest, split by status.
+   Capped in width — stretched over half a wide table, one version's bar dwarfed the page — with
+   no track behind it, and square-cornered so a small version is a tick rather than a dot. */
+.dist { max-width: 420px; }
+.dist-bar { display: flex; height: 10px; min-width: 3px; border-radius: 2px; overflow: hidden; }
+.dist-bar .stack-seg { flex: none; }
+.dist-head { min-width: 200px; }
+.dist-key { display: flex; gap: 12px; margin-top: 5px; font-size: 11.5px; font-weight: 500;
+            color: var(--dim); text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.dist-key i { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+              margin-right: 5px; vertical-align: -1px; }
+
 /* Charts — inline SVG, no JS */
 .svg-chart { width: 100%; height: auto; display: block; }
 .svg-chart .grid { stroke: var(--line); stroke-width: 1; }
