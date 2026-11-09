@@ -53,7 +53,8 @@
         <th class="n" colspan="3">Devices</th>
         <th class="n" colspan="3">Online</th>
         <th class="n" colspan="3">Offline</th>
-        <th rowspan="2">Distribution</th>
+        <th rowspan="2" class="dist-head"><span>Distribution</span>
+          <span class="dist-key"><span><i class="stack-seg ok"></i>Online</span><span><i class="stack-seg warn"></i>Offline</span><span><i class="stack-seg neutral"></i>{{ 'Inactive' | status }}</span></span></th>
       </tr>
       <tr class="sub-row">
         <th class="n fit">Count</th><th class="n fit">% of fleet</th><th class="n fit">Task</th>
@@ -94,9 +95,16 @@
         <td class="n">{{ r.offline | comma }}</td>
         <td class="n dim">{{ m.ratio(r.offline, r.devices) }}</td>
         <td class="n {{ 'tone-orange-text' if r.pending_offline }}">{{ r.pending_offline | comma }}</td>
+        {# The version's size against the largest, split by status in the status donut's
+           colours — so a version whose devices are all offline reads as such at a glance. #}
         <td class="barcell">
-          <div class="bar-track slim"><div class="bar-fill neutral"
-               style="width: {{ '%.2f' % (r.devices / biggest * 100) }}%"></div></div>
+          <div class="dist" title="{{ r.devices | comma }} devices · {{ r.online | comma }} online · {{ r.offline | comma }} offline{% if r.inactive %} · {{ r.inactive | comma }} {{ 'Inactive' | status }}{% endif %}">
+            <div class="dist-bar" style="width: {{ '%.2f' % (r.devices / biggest * 100) }}%">
+              {%- for value, tone in ((r.online, 'ok'), (r.offline, 'warn'), (r.inactive, 'neutral')) if value %}
+              <i class="stack-seg {{ tone }}" style="width: {{ '%.3f' % (value / r.devices * 100) }}%"></i>
+              {%- endfor %}
+            </div>
+          </div>
         </td>
       </tr>
       {% endfor %}

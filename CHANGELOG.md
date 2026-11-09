@@ -5,6 +5,38 @@ carries one line per release; this file explains the reasoning.
 
 ---
 
+## 2.1.2 — 2026-11-09
+
+A fix after 2.1.1, and one chart made readable.
+
+### A fetch failed on a device that had never pinged
+
+The user, 9 Nov 2026: "getting error while fetching data — IntegrityError: NOT NULL constraint
+failed: fact_fleet_version.stale_7d_count". The 09:53 fetch listed one new device, IMEI
+866685088278487, that had never pinged and whose model the platform gives as its own IMEI. Alone
+in its model/firmware/hardware group, with no last ping in it, the group's "stale 7 days" sum was
+`SUM()` over nothing but NULLs — NULL, not 0 — and the fact table refused it. Every earlier group
+had held at least one device that had pinged, so the arithmetic had always been one such device
+away from failing; 2.1.0 would have failed the same way.
+
+- Every conditional count in the fleet totals now reads 0 when nothing in the group qualifies.
+- The fetch stores its data before rolling it up, so each failed fetch had left its data and a
+  gap in the history's totals. Those are filled in at startup and after every fetch from now on
+  (`rollup.rollup_missing`) — one indexed query when there is no gap.
+- Checked on a copy of the live database: the failed snapshot rolls up in 0.1s, the lone device
+  counting 0 stale.
+
+### The firmware distribution, readable
+
+The user, same day: "this distribution graph looks very ugly". The bar stretched across half the
+table — 950 px for the largest version over a full-width dark track on every row — and the long
+tail of versions rendered as round dots. Each bar is now capped at 420 px with no track, square
+at the corners so a small version is a tick rather than a dot, and split by status in the status
+donut's colours — online, offline, activation-pending — with the key in the column's header. The
+older versions now read at once as almost entirely offline.
+
+---
+
 ## 2.1.1 — 2026-10-26
 
 Refinements after 2.1.0: one name per release, and the warehouse made smaller and faster — a
