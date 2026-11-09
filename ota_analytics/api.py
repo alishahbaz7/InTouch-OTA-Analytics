@@ -6,12 +6,14 @@ consumer. Filters travel as query params, so every view is linkable and bookmark
 
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import sqlite3
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -41,8 +43,45 @@ app.mount("/static", StaticFiles(directory=WEB / "static"), name="static")
 templates = Jinja2Templates(directory=str(WEB / "templates"))
 
 
+# The connections one request or one background job opened, closed when it ends.
+#
+# Since Python 3.11 a sqlite3 connection keeps its statement cache in an lru_cache that refers
+# back to the connection, so dropping the last reference does not free it: only close() or the
+# cyclic garbage collector does, and on a quiet server the collector can be hours away. That was
+# harmless for a page that only read. It was not on 09-11-2026, when a fetch failed part-way
+# through a write and its open transaction held the write lock for three hours, locking out
+# every fetch after it. Closing at the end also hands each request's 32 MB page cache back.
+_open_conns: contextvars.ContextVar[list | None] = contextvars.ContextVar("_open_conns",
+                                                                          default=None)
+
+
+def _track(conn: sqlite3.Connection) -> sqlite3.Connection:
+    held = _open_conns.get()
+    if held is not None:
+        held.append(conn)
+    return conn
+
+
+@contextmanager
+def closing_connections():
+    """Close every connection opened through `get_conn` (or `_track`) inside the block. A
+    connection still in a transaction rolls it back as it closes."""
+    held: list = []
+    token = _open_conns.set(held)
+    try:
+        yield
+    finally:
+        _open_conns.reset(token)
+        for conn in held:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def get_conn() -> sqlite3.Connection:
-    conn = db.connect()
+    # Closed by whoever set up the scope: a request on the event loop's thread, a job on its own.
+    conn = _track(db.connect(any_thread=True))
     # The day's COTA record lives for the day: earlier days are cleared once per process, here,
     # before any page reads anything. In _cota_context it ran after a page had already computed
     # its figures — the first visit of a new day showed yesterday's jobs as today's.
@@ -51,6 +90,15 @@ def get_conn() -> sqlite3.Connection:
     # and the first page after a restart — names commands the user's way. Saving refreshes it.
     cota_library.ensure_loaded(conn)
     return conn
+
+
+@app.middleware("http")
+async def close_connections(request: Request, call_next):
+    """Every request closes what it opened, once its route has returned. Pages render in the
+    route, so nothing reads a connection after this; the one response that streams from the
+    database (a job's CSV) opens and closes its own."""
+    with closing_connections():
+        return await call_next(request)
 
 
 @app.middleware("http")
@@ -855,17 +903,24 @@ def cota_job_export(job_id: int, format: str = "csv"):
 
     def stream():
         import csv as _csv
-        yield "\ufeff"
-        buffer = io.StringIO()
-        writer = _csv.writer(buffer, lineterminator="\n")
-        writer.writerow([h for _, h in cota_campaign.EXPORT_COLUMNS])
-        for row in cota_campaign.export_rows(get_conn(), job_id):
-            writer.writerow([exports._clean(row.get(k)) for k, _ in cota_campaign.EXPORT_COLUMNS])
-            if buffer.tell() > 64_000:
-                yield buffer.getvalue()
-                buffer.seek(0)
-                buffer.truncate()
-        yield buffer.getvalue()
+        # Read after the route has returned, a chunk at a time on whichever worker thread is free,
+        # so it has a connection of its own that it closes when the last row is out.
+        conn = db.connect(any_thread=True)
+        try:
+            yield "\ufeff"
+            buffer = io.StringIO()
+            writer = _csv.writer(buffer, lineterminator="\n")
+            writer.writerow([h for _, h in cota_campaign.EXPORT_COLUMNS])
+            for row in cota_campaign.export_rows(conn, job_id):
+                writer.writerow([exports._clean(row.get(k))
+                                 for k, _ in cota_campaign.EXPORT_COLUMNS])
+                if buffer.tell() > 64_000:
+                    yield buffer.getvalue()
+                    buffer.seek(0)
+                    buffer.truncate()
+            yield buffer.getvalue()
+        finally:
+            conn.close()
 
     return StreamingResponse(stream(), media_type=EXPORT_MEDIA["csv"], headers={
         "Content-Disposition": f'attachment; filename="{exports.timestamped(stem, "csv")}"'})
@@ -1943,7 +1998,10 @@ def run_job(job: progress.Job, work) -> None:
     """
     def body() -> None:
         try:
-            work(job)
+            # Closed on this thread, and before a failure is recorded: the error log's own insert
+            # would otherwise wait out the lock a half-written transaction still holds.
+            with closing_connections():
+                work(job)
         except Exception as exc:                      # noqa: BLE001 — recorded, not swallowed
             errors.record("web", exc, path=f"job:{job.kind}")
             job.fail(exc)
@@ -2177,7 +2235,7 @@ def _build_bundle(since: str | None, job=None) -> tuple[Path, str]:
     Opens its own connection: this runs on a worker thread, and sqlite3 objects belong to the
     thread that created them.
     """
-    conn = db.connect()
+    conn = _track(db.connect())
     scratch = Path(tempfile.gettempdir()) / f"ota-bundle-{uuid.uuid4().hex}.zip"
     try:
         bundle.export_bundle(conn, scratch, since=since or None, job=job)
@@ -2256,7 +2314,7 @@ def _merge_bundle(content: bytes, allow_interleave: bool, job=None) -> bundle.Im
     The connection is opened here, in the worker thread that uses it: sqlite3 objects cannot be
     shared across threads.
     """
-    return bundle.import_bundle(db.connect(), content, allow_interleave=allow_interleave,
+    return bundle.import_bundle(_track(db.connect()), content, allow_interleave=allow_interleave,
                                 job=job)
 
 

@@ -242,8 +242,18 @@ class Scheduler:
 
         job.begin("Downloading from the platform", detail=connection.url)
         fetched = sources.fetch_export(connection, secret or "")
+        # Closed however the fetch ends. On 09-11-2026 a rollup failed after it had started
+        # writing, its transaction stayed open on a connection nothing closed, and every fetch
+        # for the next three hours died with "database is locked" at its first INSERT — as did
+        # the error log's own insert, so the failure never reached the Errors page. Closing
+        # discards what was not committed and gives the write lock back.
         conn = db.connect()
+        try:
+            return self._ingest_and_roll_up(conn, connection, fetched, job)
+        finally:
+            conn.close()
 
+    def _ingest_and_roll_up(self, conn, connection, fetched, job) -> tuple[str, str, int | None]:
         if fetched.records is not None:
             job.begin("Reading devices", total=len(fetched.records),
                       detail=f"{len(fetched.records):,} devices")

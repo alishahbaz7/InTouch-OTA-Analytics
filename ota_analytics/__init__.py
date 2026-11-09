@@ -11,7 +11,8 @@ CODENAME = "relay"
 
 VERSION_HISTORY = [
     ("2.1.2", "2026-11-09", "A fetch no longer fails on a group of devices that have never "
-                            "pinged, and the totals it missed are filled in; the firmware "
+                            "pinged, and the totals it missed are filled in; a failed fetch no "
+                            "longer locks the database for the ones after it; the firmware "
                             "distribution split by online, offline and activation-pending"),
     ("2.1.1", "2026-10-26", "One name per release — zip, folder and program; the database a "
                             "quarter of the size (last pings stored on their own, four unused "

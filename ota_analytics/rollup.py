@@ -129,12 +129,18 @@ def rollup_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> None:
     """
     from . import resolve       # local, to keep the module import graph acyclic
 
-    conn.execute("DELETE FROM fact_fleet_version WHERE snapshot_id = ?", (snapshot_id,))
-    conn.execute("DELETE FROM fact_snapshot_kpi WHERE snapshot_id = ?", (snapshot_id,))
-    conn.execute(resolve.at(conn, snapshot_id, FLEET_VERSION_SQL), (snapshot_id,))
-    conn.execute(resolve.at(conn, snapshot_id, KPI_SQL), (snapshot_id,))
-    conn.execute("UPDATE fact_snapshot_kpi SET fragmentation = ? WHERE snapshot_id = ?",
-                 (fragmentation(conn, snapshot_id), snapshot_id))
+    # All or nothing: a failure part-way rolls back rather than leaving its deletes and inserts
+    # in an open transaction, which holds the write lock for as long as the connection lives.
+    try:
+        conn.execute("DELETE FROM fact_fleet_version WHERE snapshot_id = ?", (snapshot_id,))
+        conn.execute("DELETE FROM fact_snapshot_kpi WHERE snapshot_id = ?", (snapshot_id,))
+        conn.execute(resolve.at(conn, snapshot_id, FLEET_VERSION_SQL), (snapshot_id,))
+        conn.execute(resolve.at(conn, snapshot_id, KPI_SQL), (snapshot_id,))
+        conn.execute("UPDATE fact_snapshot_kpi SET fragmentation = ? WHERE snapshot_id = ?",
+                     (fragmentation(conn, snapshot_id), snapshot_id))
+    except BaseException:
+        conn.rollback()
+        raise
     conn.commit()
 
 

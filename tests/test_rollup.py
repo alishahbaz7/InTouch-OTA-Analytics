@@ -46,6 +46,33 @@ def test_a_fleet_where_no_device_has_pinged_still_rolls_up(conn, make_export):
         (3, 3, 0, 0)
 
 
+def test_a_rollup_that_fails_part_way_undoes_its_writes(conn, make_export, monkeypatch):
+    """Its deletes and inserts left in an open transaction hold the write lock for as long as the
+    connection lives — after the 09-11-2026 failure, three hours of fetches locked out."""
+    import sqlite3
+
+    result = ingest.ingest_file(conn, make_export([device("1")]))
+    rollup.rollup_snapshot(conn, result.snapshot_id)
+
+    def fails(*args, **kwargs):
+        raise RuntimeError("rollup failed part-way")
+
+    monkeypatch.setattr(rollup, "fragmentation", fails)
+    try:
+        rollup.rollup_snapshot(conn, result.snapshot_id)
+    except RuntimeError:
+        pass
+    assert not conn.in_transaction
+    # The totals it was replacing are still there, not deleted and left half-written.
+    assert conn.execute("SELECT COUNT(*) FROM fact_snapshot_kpi").fetchone()[0] == 1
+
+    path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    other = sqlite3.connect(path, timeout=0.5)
+    other.execute("BEGIN IMMEDIATE")
+    other.rollback()
+    other.close()
+
+
 def test_snapshots_left_without_totals_are_rolled_up_by_the_next_run(conn, make_export):
     """A fetch that stored its data and then failed to roll up leaves a gap in the history.
     The next run fills it, rather than leaving it for a full rebuild nobody knows to ask for."""
