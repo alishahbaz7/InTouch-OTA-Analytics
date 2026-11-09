@@ -7,7 +7,7 @@ carries one line per release; this file explains the reasoning.
 
 ## 2.1.2 — 2026-11-09
 
-A fix after 2.1.1, and one chart made readable.
+Two fixes after 2.1.1 — one failure, and the lock it left behind — and one chart made readable.
 
 ### A fetch failed on a device that had never pinged
 
@@ -25,6 +25,22 @@ away from failing; 2.1.0 would have failed the same way.
   (`rollup.rollup_missing`) — one indexed query when there is no gap.
 - Checked on a copy of the live database: the failed snapshot rolls up in 0.1s, the lone device
   counting 0 stale.
+
+### A failed fetch no longer locks out every fetch after it
+
+That one failure did more than skip its own totals: the 10:53, 11:54 and 12:55 fetches all died
+with "database is locked", and the database was not written again until the app was closed. The
+failed rollup had left its deletes and inserts in an open transaction, and the connection
+holding it was never closed. Since Python 3.11 a sqlite3 connection keeps its statement cache in
+an lru_cache that refers back to the connection, so it is not freed when nothing uses it any
+more — only by `close()` or the garbage collector's full pass, which on a quiet server came hours
+later. The failure did not even reach the Errors page: the error log's own insert waited out the
+same lock and was dropped.
+
+- A fetch closes its connection however it ends, and a rollup that fails rolls its writes back.
+- Every web request and background job (uploads, imports, bundles) closes the connections it
+  opened when it ends — which also hands each request's 32 MB page cache back straight away.
+- A job's failure is recorded after its connections are closed, so it reaches the Errors page.
 
 ### The firmware distribution, readable
 

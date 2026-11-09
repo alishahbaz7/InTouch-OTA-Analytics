@@ -91,12 +91,19 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
 }
 
 
-def connect(db_path: Path | None = None, *, apply_schema: bool = True) -> sqlite3.Connection:
-    """Open the analytics database, creating and migrating it if needed."""
+def connect(db_path: Path | None = None, *, apply_schema: bool = True,
+            any_thread: bool = False) -> sqlite3.Connection:
+    """Open the analytics database, creating and migrating it if needed.
+
+    `any_thread` lets a thread other than the one that opened it close it — a web request's,
+    which is opened on a worker thread and closed when the response is done (`api.get_conn`).
+    Safe because this SQLite is built serialized (`sqlite3.threadsafety == 3`) and the close
+    comes only after the route has finished with it.
+    """
     path = Path(db_path) if db_path else config.DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, check_same_thread=not any_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

@@ -68,6 +68,63 @@ def test_a_failing_fetch_is_recorded_not_raised():
     assert agent.state.consecutive_failures == 1
 
 
+@pytest.mark.parametrize("where", ["rollup", "registry"])
+def test_a_fetch_that_fails_mid_write_does_not_lock_out_the_next_one(monkeypatch, where):
+    """09-11-2026: the 09:53 fetch failed in its rollup, after the rollup had begun writing, and
+    every fetch after it — 10:53, 11:54, 12:55 — died with "database is locked" at its first
+    INSERT. The failed run's transaction stayed open on a connection nothing closed, holding the
+    write lock until the app was restarted. The database was not written again for three hours.
+
+    Failing in the registry as well as the rollup: the rollup now undoes its own writes, so only
+    a failure elsewhere shows that the fetch itself lets go of its connection.
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from ota_analytics import db, registry, rollup
+
+    def fleet(seen):
+        return [{"imei": str(n), "deviceModel": "LOCAT140VB", "firmware": "7.5.1A",
+                 "seenAt": seen} for n in range(3)]
+
+    monkeypatch.setattr(sources, "load_connection",
+                        lambda: SimpleNamespace(url="https://platform.invalid", username="",
+                                                auth_mode="none"))
+    batches = iter([fleet("15-08-26 10:00:00"), fleet("15-08-26 11:00:00")])
+    monkeypatch.setattr(sources, "fetch_export",
+                        lambda *a, **k: SimpleNamespace(records=next(batches), path=None))
+
+    def fails(*args, **kwargs):     # raises after rollup_snapshot has deleted and inserted rows
+        raise RuntimeError("rollup failed part-way")
+
+    def registry_fails(conn, snapshot_id):
+        conn.execute("UPDATE snapshot SET duration_ms = duration_ms")    # a write is under way
+        raise RuntimeError("registry failed part-way")
+
+    target, name, broken = ((rollup, "fragmentation", fails) if where == "rollup"
+                            else (registry, "apply_snapshot", registry_fails))
+    real = getattr(target, name)
+    monkeypatch.setattr(target, name, broken)
+    agent = scheduler.Scheduler()
+    agent.run_now()
+    assert agent.state.last_status == "error"
+
+    # Nothing may still hold the write lock once the failed run is over.
+    other = sqlite3.connect(config.DB_PATH, timeout=0.5)
+    other.execute("BEGIN IMMEDIATE")
+    other.rollback()
+    other.close()
+
+    monkeypatch.setattr(target, name, real)
+    agent.run_now()
+    assert agent.state.last_status == "ok", agent.state.last_message
+    conn = db.connect()
+    # Both fetches stored, and the first one's missing totals filled in by the second.
+    assert conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM fact_snapshot_kpi").fetchone()[0] == 2
+    agent.stop()
+
+
 def test_auth_status_reports_nothing_configured():
     sources.save_connection(sources.Connection(preset="custom"))
     status = scheduler.auth_status()

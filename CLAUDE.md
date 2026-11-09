@@ -983,6 +983,14 @@ release/dev side by side. Load it before changing any page, nav item, form or st
   NULL age. On 09-11-2026 one new, never-pinged device listed with its own IMEI as its model sat
   alone in its group and broke every fetch at the rollup. A fetch stores its data before rolling
   up, so `rollup.rollup_missing` (startup and every fetch) fills any totals a failure left out.
+- **Close what you open; never rely on a connection going out of scope.** Since Python 3.11 a
+  sqlite3 connection's statement cache is an lru_cache that refers back to the connection, so a
+  dropped connection lives until the garbage collector's full pass — hours on a quiet server —
+  and if it is mid-transaction it holds the write lock all that time. On 09-11-2026 one failed
+  rollup locked out three hours of fetches, and the error log's own insert with them. `api.get_conn`
+  registers each connection with its request or job (`closing_connections`, `any_thread=True`
+  for requests, which close on the event loop's thread); the scheduler's fetch closes its own in
+  a `finally`; a long-lived thread that opens one closes it when it ends.
 - **Never store a value derived from the snapshot time.** `seen_age_hours` is `snapshot_at`
   minus `seen_at`, so storing it made *every row of every fetch* differ and defeated the scheme
   entirely — compaction removed 6.7% of rows with it included and 87.2% without. `device_state`

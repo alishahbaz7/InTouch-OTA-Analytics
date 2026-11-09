@@ -170,6 +170,15 @@ One writer at a time, and everything else waits out `busy_timeout` (30s) before 
   the shape history should have, not a sequence that must complete.
 - **Build temp tables in the temp schema** (`CREATE TEMP TABLE`), so materializing a snapshot on
   a read path takes no write lock on the database.
+- **A connection that is not closed keeps its transaction, and its lock, until the garbage
+  collector gets round to it.** Since Python 3.11 its statement cache is an lru_cache that refers
+  back to the connection, so going out of scope frees nothing; on an idle server the full
+  collection came three hours later. On 09-11-2026 a rollup failed after it had started writing,
+  and the 10:53, 11:54 and 12:55 fetches all died with "database is locked" at their first
+  INSERT — the error log's own insert too, so the Errors page never showed it. Writes go in a
+  `try` that rolls back on failure, and every connection is closed: `api.get_conn` closes at the
+  end of its request or job, the fetch in a `finally`. If "database is locked" appears with
+  nothing else running, look for a failure just before it.
 
 ## Retention has to be able to fire
 
